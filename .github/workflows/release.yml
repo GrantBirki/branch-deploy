@@ -1,0 +1,1454 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - src/version.ts
+  workflow_dispatch:
+    inputs:
+      expected_version:
+        description: Confirm the version currently exported by src/version.ts on main
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  GH_REPO: ${{ github.repository }}
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: release
+  queue: max
+
+jobs:
+  prepare:
+    if: ${{ github.repository == 'GrantBirki/branch-deploy' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      asset_prefix: ${{ steps.policy.outputs.asset_prefix }}
+      latest: ${{ steps.policy.outputs.latest }}
+      major_tag: ${{ steps.policy.outputs.major_tag }}
+      previous_stable_tag: ${{ steps.identity.outputs.previous_stable_tag }}
+      prerelease: ${{ steps.policy.outputs.prerelease }}
+      source_date_epoch: ${{ steps.identity.outputs.source_date_epoch }}
+      source_sha: ${{ steps.identity.outputs.source_sha }}
+      state: ${{ steps.identity.outputs.state }}
+      tree_sha: ${{ steps.identity.outputs.tree_sha }}
+      update_major: ${{ steps.policy.outputs.update_major }}
+      version: ${{ steps.policy.outputs.version }}
+    steps:
+      - name: checkout the triggering source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # pin@v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: setup node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # pin@v6.4.0
+        with:
+          node-version-file: .node-version
+
+      - name: require release-capable GitHub CLI
+        run: |
+          minimum_version=2.94.0
+          current_version=$(gh --version | sed -n '1s/^gh version \([^ ]*\).*/\1/p')
+          first_version=$(printf '%s\n' "$minimum_version" "$current_version" | sort -V | head -n 1)
+          if [[ "$first_version" != "$minimum_version" ]]; then
+            echo "GitHub CLI $minimum_version or newer is required; found $current_version."
+            exit 1
+          fi
+          gh release verify --help > /dev/null
+          gh release verify-asset --help > /dev/null
+
+      - name: describe and validate release policy
+        id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+          EVENT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current_version=$(node --input-type=module --eval "import {VERSION} from './src/version.ts'; process.stdout.write(VERSION)")
+          node script/release-artifacts.ts describe \
+            --version "$current_version" \
+            --output "$GITHUB_OUTPUT"
+          node script/release-artifacts.ts validate \
+            --previous v11.1.5 \
+            --next "$current_version"
+
+          if [[ "$EVENT_NAME" == 'push' ]]; then
+            if [[ ! "$EVENT_BEFORE" =~ ^[0-9a-f]{40}$ ]] || [[ "$EVENT_BEFORE" == '0000000000000000000000000000000000000000' ]]; then
+              echo 'A release push must have a concrete previous main commit.'
+              exit 1
+            fi
+            previous_version_file="$RUNNER_TEMP/previous-version.ts"
+            git show "$EVENT_BEFORE:src/version.ts" > "$previous_version_file"
+            previous_version=$(node --input-type=module --eval "import {pathToFileURL} from 'node:url'; const module = await import(pathToFileURL(process.argv[1]).href); process.stdout.write(module.VERSION)" "$previous_version_file")
+            node script/release-artifacts.ts validate \
+              --previous "$previous_version" \
+              --next "$current_version"
+          else
+            if [[ "$GITHUB_REF" != 'refs/heads/main' ]]; then
+              echo 'Release retries may only be dispatched from main.'
+              exit 1
+            fi
+            if [[ "$EXPECTED_VERSION" != "$current_version" ]]; then
+              echo 'expected_version must exactly match src/version.ts on main.'
+              exit 1
+            fi
+            default_branch=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
+            if [[ "$default_branch" != 'main' ]]; then
+              echo 'The canonical default branch is unexpectedly not main.'
+              exit 1
+            fi
+            main_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+            if [[ "$EVENT_SHA" != "$main_sha" ]]; then
+              echo 'A release retry must target the current main commit.'
+              exit 1
+            fi
+
+            releases="$RUNNER_TEMP/dispatch-releases.json"
+            gh api --method GET --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases"
+            jq '[.[][] | select(.draft == false) | .tag_name] + ["v11.1.5"]' \
+              "$releases" > "$RUNNER_TEMP/published-release-tags.json"
+            latest_version=$(node --input-type=module --eval "
+              import {readFileSync} from 'node:fs'
+              import {compareReleaseVersions, parseReleaseVersion} from './src/release-policy.ts'
+              const candidates = JSON.parse(readFileSync(process.argv[1], 'utf8'))
+                .map(value => {
+                  try { return parseReleaseVersion(value) } catch { return null }
+                })
+                .filter(value => value !== null)
+                .sort(compareReleaseVersions)
+              if (candidates.length === 0) throw new Error('No release baseline is available')
+              process.stdout.write(candidates.at(-1).raw)
+            " "$RUNNER_TEMP/published-release-tags.json")
+            if [[ "$current_version" == "$latest_version" ]] && [[ "$current_version" != 'v11.1.5' ]]; then
+              node script/release-artifacts.ts validate \
+                --previous v11.1.5 \
+                --next "$current_version"
+            else
+              node script/release-artifacts.ts validate \
+                --previous "$latest_version" \
+                --next "$current_version"
+            fi
+          fi
+
+      - name: freeze source and inspect existing release state
+        id: identity
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          EXPECTED_PRERELEASE: ${{ steps.policy.outputs.prerelease }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.policy.outputs.version }}
+        run: |
+          resolve_tag_commit() {
+            local tag=$1
+            local error_file="$RUNNER_TEMP/prepare-tag-error"
+            local object object_type object_sha
+
+            if ! object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" 2> "$error_file"); then
+              if grep --quiet '(HTTP 404)' "$error_file"; then
+                return 1
+              fi
+              cat "$error_file" >&2
+              return 2
+            fi
+            object_type=$(jq --raw-output '.object.type' <<< "$object")
+            object_sha=$(jq --raw-output '.object.sha' <<< "$object")
+
+            while [[ "$object_type" == 'tag' ]]; do
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha")
+              object_type=$(jq --raw-output '.object.type' <<< "$object")
+              object_sha=$(jq --raw-output '.object.sha' <<< "$object")
+            done
+
+            if [[ "$object_type" != 'commit' ]]; then
+              echo "Tag $tag does not resolve to a commit." >&2
+              return 1
+            fi
+            printf '%s' "$object_sha"
+          }
+
+          releases="$RUNNER_TEMP/releases.json"
+          gh api --method GET --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases"
+
+          release_count=$(jq --arg version "$VERSION" \
+            '[.[][] | select(.draft == false and .tag_name == $version)] | length' "$releases")
+          if [[ "$release_count" -gt 1 ]]; then
+            echo "More than one release exists for $VERSION."
+            exit 1
+          fi
+
+          tag_target=''
+          if resolved=$(resolve_tag_commit "$VERSION"); then
+            tag_target=$resolved
+          else
+            status=$?
+            if [[ "$status" -ne 1 ]]; then
+              exit "$status"
+            fi
+          fi
+
+          source_sha=$EVENT_SHA
+          if [[ "$release_count" -eq 0 ]]; then
+            state=new
+          else
+            release=$(jq --compact-output --arg version "$VERSION" \
+              '[.[][] | select(.draft == false and .tag_name == $version)][0]' "$releases")
+            actual_prerelease=$(jq --raw-output '.prerelease | tostring' <<< "$release")
+            if [[ "$actual_prerelease" != "$EXPECTED_PRERELEASE" ]]; then
+              echo 'The existing release prerelease flag conflicts with the version policy.'
+              exit 1
+            fi
+            target=$(jq --raw-output '.target_commitish' <<< "$release")
+            if [[ ! "$target" =~ ^[0-9a-f]{40}$ ]]; then
+              echo 'An existing release must retain a full frozen target SHA.'
+              exit 1
+            fi
+            if [[ "$target" != "$EVENT_SHA" ]]; then
+              echo 'An existing release belongs to a different workflow event SHA; re-run that original event instead.'
+              exit 1
+            fi
+
+            state=published
+            if [[ $(jq --raw-output '.immutable // false' <<< "$release") != 'true' ]]; then
+              echo 'An existing published release is not immutable.'
+              exit 1
+            fi
+            if [[ -z "$tag_target" ]] || [[ "$tag_target" != "$source_sha" ]]; then
+              echo 'The published exact-version tag does not match its frozen source.'
+              exit 1
+            fi
+          fi
+
+          actual_sha=$(git rev-parse HEAD)
+          actual_version=$(node --input-type=module --eval "import {VERSION} from './src/version.ts'; process.stdout.write(VERSION)")
+          if [[ "$actual_sha" != "$source_sha" ]] || [[ "$actual_version" != "$VERSION" ]]; then
+            echo 'The frozen release source does not export the expected version.'
+            exit 1
+          fi
+
+          jq '[.[][] | select(.draft == false and .prerelease == false) | .tag_name] + ["v11.1.2"]' \
+            "$releases" > "$RUNNER_TEMP/stable-release-tags.json"
+          previous_stable_tag=$(CURRENT_VERSION="$VERSION" node --input-type=module --eval "
+            import {readFileSync} from 'node:fs'
+            import {compareReleaseVersions, parseReleaseVersion} from './src/release-policy.ts'
+            const current = parseReleaseVersion(process.env.CURRENT_VERSION)
+            const candidates = JSON.parse(readFileSync(process.argv[1], 'utf8'))
+              .filter((value, index, values) => values.indexOf(value) === index)
+              .map(value => parseReleaseVersion(value))
+              .filter(value => value.rc === null && compareReleaseVersions(value, current) < 0)
+              .sort(compareReleaseVersions)
+            if (candidates.length === 0) throw new Error('No preceding stable tag is available')
+            process.stdout.write(candidates.at(-1).raw)
+          " "$RUNNER_TEMP/stable-release-tags.json")
+
+          tree_sha=$(git rev-parse 'HEAD^{tree}')
+          source_date_epoch=$(git show --no-patch --format=%ct HEAD)
+          {
+            echo "previous_stable_tag=$previous_stable_tag"
+            echo "source_date_epoch=$source_date_epoch"
+            echo "source_sha=$source_sha"
+            echo "state=$state"
+            echo "tree_sha=$tree_sha"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.state != 'published' }}
+    uses: ./.github/workflows/release-build.yml
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      perform_attestation: true
+      previous_stable_tag: ${{ needs.prepare.outputs.previous_stable_tag }}
+      source_date_epoch: ${{ needs.prepare.outputs.source_date_epoch }}
+      source_sha: ${{ needs.prepare.outputs.source_sha }}
+      tree_sha: ${{ needs.prepare.outputs.tree_sha }}
+      version: ${{ needs.prepare.outputs.version }}
+
+  verify:
+    needs:
+      - prepare
+      - build
+    if: ${{ needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    steps:
+      - name: download the exact Actions artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/release
+
+      - name: verify the Actions artifact digest
+        env:
+          ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ needs.build.outputs.artifact_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ! "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || [[ ! "$ARTIFACT_ID" =~ ^[0-9]+$ ]]; then
+            echo 'The build returned invalid artifact identity metadata.'
+            exit 1
+          fi
+          artifact=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")
+          jq --exit-status \
+            --arg digest "sha256:$ARTIFACT_DIGEST" \
+            --arg name "$ARTIFACT_NAME" \
+            '.digest == $digest and .name == $name and .expired == false and .size_in_bytes > 0' \
+            <<< "$artifact" > /dev/null
+
+      - name: verify checksums, subjects, and attestations
+        env:
+          PREVIOUS_STABLE_TAG: ${{ needs.prepare.outputs.previous_stable_tag }}
+          RELEASE_DIRECTORY: ${{ runner.temp }}/release
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          TREE_SHA: ${{ needs.prepare.outputs.tree_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prefix="branch-deploy-$VERSION"
+          signer_workflow="$GITHUB_REPOSITORY/.github/workflows/release-build.yml"
+          expected="$RUNNER_TEMP/expected-assets"
+          actual="$RUNNER_TEMP/actual-assets"
+
+          printf '%s\n' \
+            "$prefix.provenance.sigstore.jsonl" \
+            "$prefix.release.json" \
+            "$prefix.sbom.sigstore.jsonl" \
+            "$prefix.spdx.json" \
+            "$prefix.tar.gz" \
+            'SHA256SUMS' | sort > "$expected"
+          find "$RELEASE_DIRECTORY" -maxdepth 1 -type f -printf '%f\n' | sort > "$actual"
+          diff --unified "$expected" "$actual"
+
+          {
+            printf '%s  %s\n' "$(sha256sum "$RELEASE_DIRECTORY/$prefix.tar.gz" | cut -d ' ' -f 1)" "$prefix.tar.gz"
+            printf '%s  %s\n' "$(sha256sum "$RELEASE_DIRECTORY/$prefix.spdx.json" | cut -d ' ' -f 1)" "$prefix.spdx.json"
+            printf '%s  %s\n' "$(sha256sum "$RELEASE_DIRECTORY/$prefix.release.json" | cut -d ' ' -f 1)" "$prefix.release.json"
+          } > "$RUNNER_TEMP/expected-SHA256SUMS"
+          cmp "$RUNNER_TEMP/expected-SHA256SUMS" "$RELEASE_DIRECTORY/SHA256SUMS"
+          archive_digest=$(sha256sum "$RELEASE_DIRECTORY/$prefix.tar.gz" | cut -d ' ' -f 1)
+          archive_size=$(stat --format=%s "$RELEASE_DIRECTORY/$prefix.tar.gz")
+          sbom_digest=$(sha256sum "$RELEASE_DIRECTORY/$prefix.spdx.json" | cut -d ' ' -f 1)
+          sbom_size=$(stat --format=%s "$RELEASE_DIRECTORY/$prefix.spdx.json")
+          source_lockfile="$RUNNER_TEMP/source-package-lock.json"
+          source_node_version="$RUNNER_TEMP/source-node-version"
+          gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/$GITHUB_REPOSITORY/contents/package-lock.json?ref=$SOURCE_SHA" > "$source_lockfile"
+          gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/$GITHUB_REPOSITORY/contents/.node-version?ref=$SOURCE_SHA" > "$source_node_version"
+          lockfile_digest=$(sha256sum "$source_lockfile" | cut -d ' ' -f 1)
+          lockfile_size=$(stat --format=%s "$source_lockfile")
+          node_version=$(< "$source_node_version")
+          ncc_version=$(jq --raw-output --exit-status \
+            '.packages["node_modules/@vercel/ncc"].version | select(type == "string" and length > 0)' \
+            "$source_lockfile")
+          [[ "$node_version" == '24.9.0' ]]
+          jq --exit-status \
+            --arg version "$VERSION" \
+            --arg source "$SOURCE_SHA" \
+            --arg tree "$TREE_SHA" \
+            --argjson source_date_epoch "$SOURCE_DATE_EPOCH" \
+            --arg previous_stable "$PREVIOUS_STABLE_TAG" \
+            --arg lockfile_digest "$lockfile_digest" \
+            --argjson lockfile_size "$lockfile_size" \
+            --arg node "v$node_version" \
+            --arg ncc "$ncc_version" \
+            --arg archive_name "$prefix.tar.gz" \
+            --arg archive_digest "$archive_digest" \
+            --argjson archive_size "$archive_size" \
+            --arg sbom_name "$prefix.spdx.json" \
+            --arg sbom_digest "$sbom_digest" \
+            --argjson sbom_size "$sbom_size" \
+            '.version == $version and .previousStableTag == $previous_stable and .source.sha == $source and .source.tree == $tree and .source.sourceDateEpoch == $source_date_epoch and .tools.node == $node and .tools.npm == "11.6.0" and .tools.ncc == $ncc and .lockfile.name == "package-lock.json" and .lockfile.sha256 == $lockfile_digest and .lockfile.size == $lockfile_size and .artifacts.archive.name == $archive_name and .artifacts.archive.sha256 == $archive_digest and .artifacts.archive.size == $archive_size and .artifacts.sbom.name == $sbom_name and .artifacts.sbom.sha256 == $sbom_digest and .artifacts.sbom.size == $sbom_size' \
+            "$RELEASE_DIRECTORY/$prefix.release.json" > /dev/null
+
+          gh attestation verify "$RELEASE_DIRECTORY/$prefix.tar.gz" \
+            --bundle "$RELEASE_DIRECTORY/$prefix.provenance.sigstore.jsonl" \
+            --deny-self-hosted-runners \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$signer_workflow" \
+            --source-digest "$SOURCE_SHA" \
+            --source-ref refs/heads/main
+
+          expected_archive="$RUNNER_TEMP/expected-archive"
+          actual_archive="$RUNNER_TEMP/actual-archive"
+          {
+            printf 'd\t%s\n' "$prefix/" "$prefix/dist/"
+            printf -- '-\t%s\n' \
+              "$prefix/action.yml" \
+              "$prefix/dist/index.js" \
+              "$prefix/dist/index.js.map" \
+              "$prefix/dist/licenses.txt" \
+              "$prefix/dist/package.json" \
+              "$prefix/dist/sourcemap-register.cjs" \
+              "$prefix/dist/sourcemap-register.js"
+          } | sort > "$expected_archive"
+          tar --list --verbose --gzip --file "$RELEASE_DIRECTORY/$prefix.tar.gz" | \
+            awk '{print substr($1, 1, 1) "\t" $NF}' | sort > "$actual_archive"
+          diff --unified "$expected_archive" "$actual_archive"
+
+          mkdir "$RUNNER_TEMP/extracted"
+          tar --extract --gzip \
+            --no-same-owner \
+            --no-same-permissions \
+            --file "$RELEASE_DIRECTORY/$prefix.tar.gz" \
+            --directory "$RUNNER_TEMP/extracted"
+          archive_root="$RUNNER_TEMP/extracted/$prefix"
+
+          action_files=(
+            action.yml
+            dist/index.js
+            dist/index.js.map
+            dist/licenses.txt
+            dist/package.json
+            dist/sourcemap-register.cjs
+            dist/sourcemap-register.js
+          )
+          for file in "${action_files[@]}"; do
+            digest=$(sha256sum "$archive_root/$file" | cut -d ' ' -f 1)
+            size=$(stat --format=%s "$archive_root/$file")
+            jq --exit-status --arg path "$file" --arg digest "$digest" --argjson size "$size" \
+              '.files[$path].sha256 == $digest and .files[$path].size == $size' \
+              "$RELEASE_DIRECTORY/$prefix.release.json" > /dev/null
+          done
+          jq --exit-status --arg namespace "https://github.com/GrantBirki/branch-deploy/sbom/$VERSION/$SOURCE_SHA" \
+            '.documentNamespace == $namespace and .spdxVersion == "SPDX-2.3"' \
+            "$RELEASE_DIRECTORY/$prefix.spdx.json" > /dev/null
+
+          subjects=(
+            "$archive_root/action.yml"
+            "$archive_root/dist/index.js"
+            "$archive_root/dist/index.js.map"
+            "$archive_root/dist/licenses.txt"
+            "$archive_root/dist/package.json"
+            "$archive_root/dist/sourcemap-register.cjs"
+            "$archive_root/dist/sourcemap-register.js"
+            "$RELEASE_DIRECTORY/$prefix.tar.gz"
+            "$RELEASE_DIRECTORY/$prefix.spdx.json"
+            "$RELEASE_DIRECTORY/$prefix.release.json"
+            "$RELEASE_DIRECTORY/SHA256SUMS"
+          )
+          for subject in "${subjects[@]}"; do
+            gh attestation verify "$subject" \
+              --bundle "$RELEASE_DIRECTORY/$prefix.provenance.sigstore.jsonl" \
+              --deny-self-hosted-runners \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$signer_workflow" \
+              --source-digest "$SOURCE_SHA" \
+              --source-ref refs/heads/main
+          done
+          gh attestation verify "$RELEASE_DIRECTORY/$prefix.tar.gz" \
+            --bundle "$RELEASE_DIRECTORY/$prefix.sbom.sigstore.jsonl" \
+            --deny-self-hosted-runners \
+            --format json \
+            --predicate-type https://spdx.dev/Document/v2.3 \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$signer_workflow" \
+            --source-digest "$SOURCE_SHA" \
+            --source-ref refs/heads/main > "$RUNNER_TEMP/sbom-verification.json"
+          jq --exit-status 'length == 1' "$RUNNER_TEMP/sbom-verification.json" > /dev/null
+          jq --sort-keys '.[0].verificationResult.statement.predicate' \
+            "$RUNNER_TEMP/sbom-verification.json" > "$RUNNER_TEMP/signed-sbom.json"
+          jq --sort-keys . "$RELEASE_DIRECTORY/$prefix.spdx.json" > "$RUNNER_TEMP/shipped-sbom.json"
+          cmp "$RUNNER_TEMP/signed-sbom.json" "$RUNNER_TEMP/shipped-sbom.json"
+
+          if grep --recursive --binary-files=without-match --extended-regexp \
+            '(/home/runner/work/|/Users/|file:///|BEGIN [A-Z ]*PRIVATE KEY|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{30,})' \
+            "$RELEASE_DIRECTORY" "$RUNNER_TEMP/extracted"; then
+            echo 'Release assets contain local paths or credential-like material.'
+            exit 1
+          fi
+
+  publish:
+    needs:
+      - prepare
+      - build
+      - verify
+    if: ${{ needs.verify.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    steps:
+      - name: download the verified release set
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # pin@v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/release
+
+      - name: create or resume the draft and publish it atomically
+        env:
+          ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ needs.build.outputs.artifact_name }}
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_STABLE_TAG: ${{ needs.prepare.outputs.previous_stable_tag }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          RELEASE_DIRECTORY: ${{ runner.temp }}/release
+          RELEASE_STATE: ${{ needs.prepare.outputs.state }}
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          TREE_SHA: ${{ needs.prepare.outputs.tree_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [[ ! "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || [[ ! "$ARTIFACT_ID" =~ ^[0-9]+$ ]]; then
+            echo 'The verified build returned invalid artifact identity metadata.'
+            exit 1
+          fi
+
+          prefix="branch-deploy-$VERSION"
+          signer_workflow="$GITHUB_REPOSITORY/.github/workflows/release-build.yml"
+          expected_names=(
+            "$prefix.provenance.sigstore.jsonl"
+            "$prefix.release.json"
+            "$prefix.sbom.sigstore.jsonl"
+            "$prefix.spdx.json"
+            "$prefix.tar.gz"
+            'SHA256SUMS'
+          )
+          expected_names_json=$(printf '%s\n' "${expected_names[@]}" | jq --raw-input --slurp 'split("\n") | map(select(length > 0))')
+
+          assert_artifact_identity() {
+            local artifact
+            artifact=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID")
+            jq --exit-status \
+              --arg digest "sha256:$ARTIFACT_DIGEST" \
+              --arg name "$ARTIFACT_NAME" \
+              '.digest == $digest and .name == $name and .expired == false and .size_in_bytes > 0' \
+              <<< "$artifact" > /dev/null
+          }
+
+          assert_artifact_identity
+
+          compare_decimal() {
+            local LC_ALL=C
+            local left=$1
+            local right=$2
+            while [[ ${#left} -gt 1 && ${left:0:1} == '0' ]]; do left=${left:1}; done
+            while [[ ${#right} -gt 1 && ${right:0:1} == '0' ]]; do right=${right:1}; done
+            if [[ ${#left} -lt ${#right} ]]; then printf '%s' -1; return 0; fi
+            if [[ ${#left} -gt ${#right} ]]; then printf '%s' 1; return 0; fi
+            if [[ "$left" == "$right" ]]; then printf '%s' 0; return 0; fi
+            if [[ "$left" < "$right" ]]; then printf '%s' -1; else printf '%s' 1; fi
+          }
+
+          release_version_compare() {
+            local left=$1
+            local right=$2
+            local left_rc right_rc index comparison
+            local -a left_parts right_parts
+
+            [[ "$left" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-rc\.([0-9]+))?$ ]] || return 1
+            left_parts=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+            left_rc=${BASH_REMATCH[5]-}
+            [[ "$right" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-rc\.([0-9]+))?$ ]] || return 1
+            right_parts=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+            right_rc=${BASH_REMATCH[5]-}
+
+            for index in 0 1 2; do
+              comparison=$(compare_decimal "${left_parts[$index]}" "${right_parts[$index]}")
+              if [[ "$comparison" != '0' ]]; then printf '%s' "$comparison"; return 0; fi
+            done
+            if [[ -z "$left_rc" && -z "$right_rc" ]]; then printf '%s' 0; return 0; fi
+            if [[ -z "$left_rc" ]]; then printf '%s' 1; return 0; fi
+            if [[ -z "$right_rc" ]]; then printf '%s' -1; return 0; fi
+            compare_decimal "$left_rc" "$right_rc"
+          }
+
+          assert_current_version_is_newer() {
+            local releases_file=$1
+            local published comparison
+            while IFS= read -r published; do
+              if comparison=$(release_version_compare "$published" "$VERSION") && ((comparison >= 0)); then
+                echo "Published release $published prevents publishing $VERSION."
+                return 1
+              fi
+            done < <(jq --raw-output '.[][] | select(.draft == false) | .tag_name' "$releases_file")
+          }
+
+          resolve_tag_commit() {
+            local tag=$1
+            local error_file="$RUNNER_TEMP/tag-error"
+            local object object_type object_sha
+
+            if ! object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" 2> "$error_file"); then
+              if grep --quiet '(HTTP 404)' "$error_file"; then
+                return 1
+              fi
+              cat "$error_file" >&2
+              return 2
+            fi
+            object_type=$(jq --raw-output '.object.type' <<< "$object")
+            object_sha=$(jq --raw-output '.object.sha' <<< "$object")
+            while [[ "$object_type" == 'tag' ]]; do
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha")
+              object_type=$(jq --raw-output '.object.type' <<< "$object")
+              object_sha=$(jq --raw-output '.object.sha' <<< "$object")
+            done
+            if [[ "$object_type" != 'commit' ]]; then
+              echo "Tag $tag does not resolve to a commit." >&2
+              return 2
+            fi
+            printf '%s' "$object_sha"
+          }
+
+          exact_tag_target() {
+            local status
+            if resolve_tag_commit "$VERSION"; then
+              return 0
+            else
+              status=$?
+            fi
+            if [[ "$status" -eq 1 ]]; then
+              return 1
+            fi
+            return "$status"
+          }
+
+          verify_archive_shape() {
+            local archive=$1
+            local expected="$RUNNER_TEMP/expected-publish-archive"
+            local actual="$RUNNER_TEMP/actual-publish-archive"
+            {
+              printf 'd\t%s\n' "$prefix/" "$prefix/dist/"
+              printf -- '-\t%s\n' \
+                "$prefix/action.yml" \
+                "$prefix/dist/index.js" \
+                "$prefix/dist/index.js.map" \
+                "$prefix/dist/licenses.txt" \
+                "$prefix/dist/package.json" \
+                "$prefix/dist/sourcemap-register.cjs" \
+                "$prefix/dist/sourcemap-register.js"
+            } | sort > "$expected"
+            tar --list --verbose --gzip --file "$archive" | \
+              awk '{print substr($1, 1, 1) "\t" $NF}' | sort > "$actual"
+            diff --unified "$expected" "$actual"
+          }
+
+          validate_asset_metadata() {
+            local metadata=$1
+            jq --exit-status --argjson expected "$expected_names_json" '
+              type == "array" and
+              (([.[].name] | length) == ([.[].name] | unique | length)) and
+              all(.[];
+                (.id | type) == "number" and .id >= 0 and .id == (.id | floor) and
+                (.name | type) == "string" and
+                (.name | test("^[A-Za-z0-9._+-]+$")) and
+                (.name as $name | ($expected | index($name)) != null) and
+                .state == "uploaded" and
+                (.size | type) == "number" and .size >= 0 and .size == (.size | floor) and
+                (.digest | type) == "string" and
+                (.digest | test("^sha256:[0-9a-f]{64}$"))
+              )
+            ' "$metadata" > /dev/null
+          }
+
+          list_release_assets() {
+            local release_id=$1
+            local destination=$2
+            local pages
+            pages=$(mktemp "$RUNNER_TEMP/release-assets.XXXXXX")
+            gh api --method GET --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" > "$pages"
+            jq 'add // []' "$pages" > "$destination"
+            rm -f "$pages"
+          }
+
+          verify_provenance_bundle() {
+            local bundle=$1
+            local extracted=$2
+            local subjects=(
+              "$extracted/$prefix/action.yml"
+              "$extracted/$prefix/dist/index.js"
+              "$extracted/$prefix/dist/index.js.map"
+              "$extracted/$prefix/dist/licenses.txt"
+              "$extracted/$prefix/dist/package.json"
+              "$extracted/$prefix/dist/sourcemap-register.cjs"
+              "$extracted/$prefix/dist/sourcemap-register.js"
+              "$RELEASE_DIRECTORY/$prefix.tar.gz"
+              "$RELEASE_DIRECTORY/$prefix.spdx.json"
+              "$RELEASE_DIRECTORY/$prefix.release.json"
+              "$RELEASE_DIRECTORY/SHA256SUMS"
+            )
+            for subject in "${subjects[@]}"; do
+              gh attestation verify "$subject" \
+                --bundle "$bundle" \
+                --deny-self-hosted-runners \
+                --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "$signer_workflow" \
+                --source-digest "$SOURCE_SHA" \
+                --source-ref refs/heads/main > /dev/null
+            done
+          }
+
+          verify_sbom_bundle() {
+            local bundle=$1
+            local result signed shipped
+            result=$(mktemp "$RUNNER_TEMP/sbom-verification.XXXXXX")
+            signed=$(mktemp "$RUNNER_TEMP/signed-sbom.XXXXXX")
+            shipped=$(mktemp "$RUNNER_TEMP/shipped-sbom.XXXXXX")
+            gh attestation verify "$RELEASE_DIRECTORY/$prefix.tar.gz" \
+              --bundle "$bundle" \
+              --deny-self-hosted-runners \
+              --format json \
+              --predicate-type https://spdx.dev/Document/v2.3 \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$signer_workflow" \
+              --source-digest "$SOURCE_SHA" \
+              --source-ref refs/heads/main > "$result"
+            jq --exit-status 'length == 1' "$result" > /dev/null
+            jq --sort-keys '.[0].verificationResult.statement.predicate' "$result" > "$signed"
+            jq --sort-keys . "$RELEASE_DIRECTORY/$prefix.spdx.json" > "$shipped"
+            cmp "$signed" "$shipped"
+            rm -f "$result" "$signed" "$shipped"
+          }
+
+          download_assets() {
+            local destination=$1
+            local metadata=$2
+            local api_digest api_size asset_id asset_name local_digest local_size
+            rm -rf "$destination"
+            mkdir -p "$destination"
+            while IFS=$'\t' read -r asset_id asset_name api_size api_digest; do
+              gh api -H 'Accept: application/octet-stream' \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$destination/$asset_name"
+              local_size=$(stat --format=%s "$destination/$asset_name")
+              local_digest="sha256:$(sha256sum "$destination/$asset_name" | cut -d ' ' -f 1)"
+              if [[ "$local_size" != "$api_size" ]] || [[ "$local_digest" != "$api_digest" ]]; then
+                echo "Downloaded release asset $asset_name does not match its API metadata."
+                return 1
+              fi
+            done < <(jq --raw-output '.[] | [.id, .name, .size, .digest] | @tsv' "$metadata")
+          }
+
+          if [[ "$RELEASE_STATE" != 'new' ]]; then
+            echo "Unexpected publication state: $RELEASE_STATE"
+            exit 1
+          fi
+
+          # Verify the archive subject before parsing or extracting its contents.
+          gh attestation verify "$RELEASE_DIRECTORY/$prefix.tar.gz" \
+            --bundle "$RELEASE_DIRECTORY/$prefix.provenance.sigstore.jsonl" \
+            --deny-self-hosted-runners \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$signer_workflow" \
+            --source-digest "$SOURCE_SHA" \
+            --source-ref refs/heads/main > /dev/null
+          verify_archive_shape "$RELEASE_DIRECTORY/$prefix.tar.gz"
+          source_lockfile="$RUNNER_TEMP/source-package-lock.json"
+          source_node_version="$RUNNER_TEMP/source-node-version"
+          gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/$GITHUB_REPOSITORY/contents/package-lock.json?ref=$SOURCE_SHA" > "$source_lockfile"
+          gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/$GITHUB_REPOSITORY/contents/.node-version?ref=$SOURCE_SHA" > "$source_node_version"
+          lockfile_digest=$(sha256sum "$source_lockfile" | cut -d ' ' -f 1)
+          lockfile_size=$(stat --format=%s "$source_lockfile")
+          node_version=$(< "$source_node_version")
+          ncc_version=$(jq --raw-output --exit-status \
+            '.packages["node_modules/@vercel/ncc"].version | select(type == "string" and length > 0)' \
+            "$source_lockfile")
+          [[ "$node_version" == '24.9.0' ]]
+          jq --exit-status \
+            --arg source "$SOURCE_SHA" \
+            --arg tree "$TREE_SHA" \
+            --arg version "$VERSION" \
+            --argjson source_date_epoch "$SOURCE_DATE_EPOCH" \
+            --arg previous_stable "$PREVIOUS_STABLE_TAG" \
+            --arg lockfile_digest "$lockfile_digest" \
+            --argjson lockfile_size "$lockfile_size" \
+            --arg node "v$node_version" \
+            --arg ncc "$ncc_version" \
+            '.version == $version and .previousStableTag == $previous_stable and .source.sha == $source and .source.tree == $tree and .source.sourceDateEpoch == $source_date_epoch and .tools.node == $node and .tools.npm == "11.6.0" and .tools.ncc == $ncc and .lockfile.name == "package-lock.json" and .lockfile.sha256 == $lockfile_digest and .lockfile.size == $lockfile_size' \
+            "$RELEASE_DIRECTORY/$prefix.release.json" > /dev/null
+
+          mkdir "$RUNNER_TEMP/current-extracted"
+          tar --extract --gzip \
+            --no-same-owner \
+            --no-same-permissions \
+            --file "$RELEASE_DIRECTORY/$prefix.tar.gz" \
+            --directory "$RUNNER_TEMP/current-extracted"
+          verify_provenance_bundle "$RELEASE_DIRECTORY/$prefix.provenance.sigstore.jsonl" "$RUNNER_TEMP/current-extracted"
+          verify_sbom_bundle "$RELEASE_DIRECTORY/$prefix.sbom.sigstore.jsonl"
+
+          releases="$RUNNER_TEMP/releases-before-draft.json"
+          gh api --method GET --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases"
+          assert_current_version_is_newer "$releases"
+
+          notes_response="$RUNNER_TEMP/generated-notes.json"
+          expected_notes="$RUNNER_TEMP/expected-notes.md"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            --field tag_name="$VERSION" \
+            --field target_commitish="$SOURCE_SHA" \
+            --field previous_tag_name="$PREVIOUS_STABLE_TAG" > "$notes_response"
+          jq --raw-output --join-output '.body' "$notes_response" > "$expected_notes"
+
+          matching_count=$(jq --arg version "$VERSION" \
+            '[.[][] | select(.tag_name == $version)] | length' "$releases")
+          published_count=$(jq --arg version "$VERSION" \
+            '[.[][] | select(.tag_name == $version and .draft == false)] | length' "$releases")
+          draft_count=$(jq --arg version "$VERSION" \
+            '[.[][] | select(.tag_name == $version and .draft == true)] | length' "$releases")
+          if [[ "$published_count" -ne 0 ]] || [[ "$matching_count" -gt 1 ]] || [[ "$draft_count" -gt 1 ]]; then
+            echo "A conflicting release already exists for $VERSION."
+            exit 1
+          fi
+
+          if [[ "$draft_count" -eq 0 ]]; then
+            if tag_target=$(exact_tag_target); then
+              echo "Tag $VERSION already exists at $tag_target without a matching draft release."
+              exit 1
+            else
+              status=$?
+              if [[ "$status" -ne 1 ]]; then
+                exit "$status"
+              fi
+            fi
+            create_args=(
+              "$VERSION"
+              --draft
+              --notes-file "$expected_notes"
+              --target "$SOURCE_SHA"
+              --title "$VERSION"
+            )
+            if [[ "$PRERELEASE" == 'true' ]]; then
+              create_args+=(--prerelease --latest=false)
+            fi
+            assert_artifact_identity
+            gh release create "${create_args[@]}"
+          fi
+
+          releases="$RUNNER_TEMP/releases-with-draft.json"
+          gh api --method GET --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases"
+          release_count=$(jq --arg version "$VERSION" '[.[][] | select(.tag_name == $version)] | length' "$releases")
+          if [[ "$release_count" -ne 1 ]]; then
+            echo 'Expected exactly one release for the requested version.'
+            exit 1
+          fi
+          release=$(jq --compact-output --arg version "$VERSION" '.[][] | select(.tag_name == $version)' "$releases")
+          if ! jq --exit-status \
+            --arg prerelease "$PRERELEASE" \
+            --arg source "$SOURCE_SHA" \
+            '.draft == true and .target_commitish == $source and ((.prerelease | tostring) == $prerelease)' \
+            <<< "$release" > /dev/null; then
+            echo 'The existing draft does not match the frozen source SHA and release policy.'
+            exit 1
+          fi
+          release_id=$(jq --raw-output '.id' <<< "$release")
+          if [[ ! "$release_id" =~ ^[0-9]+$ ]]; then
+            echo 'The draft release returned an invalid identifier.'
+            exit 1
+          fi
+
+          if tag_target=$(exact_tag_target); then
+            if [[ "$tag_target" != "$SOURCE_SHA" ]]; then
+              echo "The exact-version tag points at $tag_target instead of $SOURCE_SHA."
+              exit 1
+            fi
+          else
+            status=$?
+            if [[ "$status" -ne 1 ]]; then
+              exit "$status"
+            fi
+          fi
+
+          list_release_assets "$release_id" "$RUNNER_TEMP/assets.json"
+          validate_asset_metadata "$RUNNER_TEMP/assets.json"
+          download_assets "$RUNNER_TEMP/existing-assets" "$RUNNER_TEMP/assets.json"
+          mapfile -t existing_names < <(find "$RUNNER_TEMP/existing-assets" -maxdepth 1 -type f -printf '%f\n' | sort)
+          for name in "${existing_names[@]}"; do
+            case " ${expected_names[*]} " in
+              *" $name "*) ;;
+              *)
+                echo "Draft release contains unexpected asset: $name"
+                exit 1
+                ;;
+            esac
+
+            if [[ "$name" == "$prefix.provenance.sigstore.jsonl" ]]; then
+              verify_provenance_bundle "$RUNNER_TEMP/existing-assets/$name" "$RUNNER_TEMP/current-extracted"
+            elif [[ "$name" == "$prefix.sbom.sigstore.jsonl" ]]; then
+              verify_sbom_bundle "$RUNNER_TEMP/existing-assets/$name"
+            else
+              cmp "$RUNNER_TEMP/existing-assets/$name" "$RELEASE_DIRECTORY/$name"
+            fi
+          done
+
+          jq --null-input --arg name "$VERSION" --rawfile body "$expected_notes" \
+            '{name: $name, body: $body}' > "$RUNNER_TEMP/expected-draft-metadata.json"
+          assert_artifact_identity
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            --input "$RUNNER_TEMP/expected-draft-metadata.json" > "$RUNNER_TEMP/updated-draft.json"
+          jq --exit-status --arg name "$VERSION" --rawfile body "$expected_notes" \
+            '.name == $name and .body == $body and .draft == true' \
+            "$RUNNER_TEMP/updated-draft.json" > /dev/null
+
+          for name in "${expected_names[@]}"; do
+            if [[ ! -f "$RUNNER_TEMP/existing-assets/$name" ]]; then
+              assert_artifact_identity
+              gh release upload "$VERSION" "$RELEASE_DIRECTORY/$name"
+            fi
+          done
+
+          list_release_assets "$release_id" "$RUNNER_TEMP/final-assets.json"
+          validate_asset_metadata "$RUNNER_TEMP/final-assets.json"
+          download_assets "$RUNNER_TEMP/draft-assets" "$RUNNER_TEMP/final-assets.json"
+          mapfile -t draft_names < <(find "$RUNNER_TEMP/draft-assets" -maxdepth 1 -type f -printf '%f\n' | sort)
+          mapfile -t sorted_expected < <(printf '%s\n' "${expected_names[@]}" | sort)
+          if [[ "${draft_names[*]}" != "${sorted_expected[*]}" ]]; then
+            echo 'The draft release does not contain the exact expected asset set.'
+            exit 1
+          fi
+
+          for name in \
+            "$prefix.release.json" \
+            "$prefix.spdx.json" \
+            "$prefix.tar.gz" \
+            'SHA256SUMS'; do
+            cmp "$RUNNER_TEMP/draft-assets/$name" "$RELEASE_DIRECTORY/$name"
+          done
+
+          {
+            printf '%s  %s\n' "$(sha256sum "$RUNNER_TEMP/draft-assets/$prefix.tar.gz" | cut -d ' ' -f 1)" "$prefix.tar.gz"
+            printf '%s  %s\n' "$(sha256sum "$RUNNER_TEMP/draft-assets/$prefix.spdx.json" | cut -d ' ' -f 1)" "$prefix.spdx.json"
+            printf '%s  %s\n' "$(sha256sum "$RUNNER_TEMP/draft-assets/$prefix.release.json" | cut -d ' ' -f 1)" "$prefix.release.json"
+          } > "$RUNNER_TEMP/expected-draft-SHA256SUMS"
+          cmp "$RUNNER_TEMP/expected-draft-SHA256SUMS" "$RUNNER_TEMP/draft-assets/SHA256SUMS"
+          verify_provenance_bundle "$RUNNER_TEMP/draft-assets/$prefix.provenance.sigstore.jsonl" "$RUNNER_TEMP/current-extracted"
+          verify_sbom_bundle "$RUNNER_TEMP/draft-assets/$prefix.sbom.sigstore.jsonl"
+
+          for name in "${expected_names[@]}"; do
+            local_digest=$(sha256sum "$RUNNER_TEMP/draft-assets/$name" | cut -d ' ' -f 1)
+            local_size=$(stat --format=%s "$RUNNER_TEMP/draft-assets/$name")
+            api_digest=$(jq --raw-output --arg name "$name" '.[] | select(.name == $name) | .digest' "$RUNNER_TEMP/final-assets.json")
+            api_size=$(jq --raw-output --arg name "$name" '.[] | select(.name == $name) | .size' "$RUNNER_TEMP/final-assets.json")
+            if [[ "$api_digest" != "sha256:$local_digest" ]] || [[ "$api_size" != "$local_size" ]]; then
+              echo "GitHub's digest or size for $name does not match the downloaded asset."
+              exit 1
+            fi
+          done
+
+          releases="$RUNNER_TEMP/releases-before-publish.json"
+          gh api --method GET --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases"
+          assert_current_version_is_newer "$releases"
+          release=$(jq --compact-output --exit-status --arg version "$VERSION" \
+            '[.[][] | select(.tag_name == $version)] | if length == 1 then .[0] else error("release identity changed") end' \
+            "$releases")
+          if ! jq --exit-status \
+            --argjson release_id "$release_id" \
+            --arg name "$VERSION" \
+            --arg prerelease "$PRERELEASE" \
+            --arg source "$SOURCE_SHA" \
+            --rawfile body "$expected_notes" \
+            '.id == $release_id and .name == $name and .body == $body and .draft == true and .target_commitish == $source and ((.prerelease | tostring) == $prerelease)' \
+            <<< "$release" > /dev/null; then
+            echo 'The draft identity or metadata changed before publication.'
+            exit 1
+          fi
+          list_release_assets "$release_id" "$RUNNER_TEMP/prepublish-assets.json"
+          validate_asset_metadata "$RUNNER_TEMP/prepublish-assets.json"
+          jq '[.[] | {digest, name, size, state}] | sort_by(.name)' \
+            "$RUNNER_TEMP/final-assets.json" > "$RUNNER_TEMP/final-asset-identity.json"
+          jq '[.[] | {digest, name, size, state}] | sort_by(.name)' \
+            "$RUNNER_TEMP/prepublish-assets.json" > "$RUNNER_TEMP/prepublish-asset-identity.json"
+          cmp "$RUNNER_TEMP/final-asset-identity.json" "$RUNNER_TEMP/prepublish-asset-identity.json"
+          if tag_target=$(exact_tag_target); then
+            [[ "$tag_target" == "$SOURCE_SHA" ]]
+          else
+            status=$?
+            if [[ "$status" -ne 1 ]]; then
+              exit "$status"
+            fi
+          fi
+
+          if [[ "$PRERELEASE" == 'true' ]]; then
+            assert_artifact_identity
+            gh release edit "$VERSION" --draft=false --prerelease --latest=false
+          else
+            assert_artifact_identity
+            gh release edit "$VERSION" --draft=false --latest
+          fi
+
+  verify_release:
+    needs:
+      - prepare
+      - build
+      - publish
+    if: ${{ always() && (needs.prepare.outputs.state == 'published' || needs.publish.result == 'success') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: read
+      contents: read
+    steps:
+      - name: verify the immutable release and every release asset
+        env:
+          EXPECTED_LATEST: ${{ needs.prepare.outputs.latest }}
+          EXPECTED_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_STABLE_TAG: ${{ needs.prepare.outputs.previous_stable_tag }}
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source_date_epoch }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          TREE_SHA: ${{ needs.prepare.outputs.tree_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          resolve_tag_commit() {
+            local tag=$1
+            local object object_type object_sha
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")
+            object_type=$(jq --raw-output '.object.type' <<< "$object")
+            object_sha=$(jq --raw-output '.object.sha' <<< "$object")
+            while [[ "$object_type" == 'tag' ]]; do
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha")
+              object_type=$(jq --raw-output '.object.type' <<< "$object")
+              object_sha=$(jq --raw-output '.object.sha' <<< "$object")
+            done
+            [[ "$object_type" == 'commit' ]]
+            printf '%s' "$object_sha"
+          }
+
+          prefix="branch-deploy-$VERSION"
+          release_ready=false
+          for attempt in $(seq 1 18); do
+            if release_json=$(gh release view "$VERSION" \
+              --json isDraft,isImmutable,isPrerelease,tagName,targetCommitish 2> /dev/null) && \
+              [[ $(jq --raw-output '.isImmutable' <<< "$release_json") == 'true' ]] && \
+              gh release verify "$VERSION" > /dev/null 2>&1; then
+              release_ready=true
+              break
+            fi
+            echo "Waiting for immutable release attestation (attempt $attempt of 18)."
+            sleep 10
+          done
+          if [[ "$release_ready" != 'true' ]]; then
+            echo 'The immutable release attestation did not become verifiable.'
+            exit 1
+          fi
+
+          jq --exit-status \
+            --arg prerelease "$EXPECTED_PRERELEASE" \
+            --arg source "$SOURCE_SHA" \
+            --arg tag "$VERSION" \
+            '.isDraft == false and .isImmutable == true and .tagName == $tag and .targetCommitish == $source and ((.isPrerelease | tostring) == $prerelease)' \
+            <<< "$release_json" > /dev/null
+          release_list=$(gh release list --limit 1000 --json isLatest,tagName)
+          actual_latest=$(jq --raw-output --arg tag "$VERSION" \
+            '[.[] | select(.tagName == $tag)] | if length == 1 then (.[0].isLatest | tostring) else "" end' \
+            <<< "$release_list")
+          [[ "$actual_latest" == "$EXPECTED_LATEST" ]]
+          [[ $(resolve_tag_commit "$VERSION") == "$SOURCE_SHA" ]]
+
+          expected="$RUNNER_TEMP/expected-assets"
+          actual="$RUNNER_TEMP/actual-assets"
+          printf '%s\n' \
+            "$prefix.provenance.sigstore.jsonl" \
+            "$prefix.release.json" \
+            "$prefix.sbom.sigstore.jsonl" \
+            "$prefix.spdx.json" \
+            "$prefix.tar.gz" \
+            'SHA256SUMS' | sort > "$expected"
+          expected_names_json=$(jq --raw-input --slurp 'split("\n") | map(select(length > 0))' "$expected")
+          release_id=$(gh release view "$VERSION" --json databaseId --jq .databaseId)
+          gh api --method GET --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" > "$RUNNER_TEMP/asset-pages.json"
+          jq 'add // []' "$RUNNER_TEMP/asset-pages.json" > "$RUNNER_TEMP/assets.json"
+          jq --exit-status --argjson expected "$expected_names_json" '
+            type == "array" and length == ($expected | length) and
+            (([.[].name] | length) == ([.[].name] | unique | length)) and
+            all(.[];
+              (.id | type) == "number" and .id >= 0 and .id == (.id | floor) and
+              (.name | type) == "string" and
+              (.name | test("^[A-Za-z0-9._+-]+$")) and
+              (.name as $name | ($expected | index($name)) != null) and
+              .state == "uploaded" and
+              (.size | type) == "number" and .size >= 0 and .size == (.size | floor) and
+              (.digest | type) == "string" and
+              (.digest | test("^sha256:[0-9a-f]{64}$"))
+            )
+          ' "$RUNNER_TEMP/assets.json" > /dev/null
+
+          mkdir "$RUNNER_TEMP/release"
+          while IFS=$'\t' read -r asset_id asset_name api_size api_digest; do
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$RUNNER_TEMP/release/$asset_name"
+            local_size=$(stat --format=%s "$RUNNER_TEMP/release/$asset_name")
+            local_digest="sha256:$(sha256sum "$RUNNER_TEMP/release/$asset_name" | cut -d ' ' -f 1)"
+            if [[ "$local_size" != "$api_size" ]] || [[ "$local_digest" != "$api_digest" ]]; then
+              echo "Downloaded release asset $asset_name does not match its API metadata."
+              exit 1
+            fi
+          done < <(jq --raw-output '.[] | [.id, .name, .size, .digest] | @tsv' "$RUNNER_TEMP/assets.json")
+          find "$RUNNER_TEMP/release" -maxdepth 1 -type f -printf '%f\n' | sort > "$actual"
+          diff --unified "$expected" "$actual"
+          {
+            printf '%s  %s\n' "$(sha256sum "$RUNNER_TEMP/release/$prefix.tar.gz" | cut -d ' ' -f 1)" "$prefix.tar.gz"
+            printf '%s  %s\n' "$(sha256sum "$RUNNER_TEMP/release/$prefix.spdx.json" | cut -d ' ' -f 1)" "$prefix.spdx.json"
+            printf '%s  %s\n' "$(sha256sum "$RUNNER_TEMP/release/$prefix.release.json" | cut -d ' ' -f 1)" "$prefix.release.json"
+          } > "$RUNNER_TEMP/expected-release-SHA256SUMS"
+          cmp "$RUNNER_TEMP/expected-release-SHA256SUMS" "$RUNNER_TEMP/release/SHA256SUMS"
+          archive_digest=$(sha256sum "$RUNNER_TEMP/release/$prefix.tar.gz" | cut -d ' ' -f 1)
+          archive_size=$(stat --format=%s "$RUNNER_TEMP/release/$prefix.tar.gz")
+          sbom_digest=$(sha256sum "$RUNNER_TEMP/release/$prefix.spdx.json" | cut -d ' ' -f 1)
+          sbom_size=$(stat --format=%s "$RUNNER_TEMP/release/$prefix.spdx.json")
+          source_lockfile="$RUNNER_TEMP/source-package-lock.json"
+          source_node_version="$RUNNER_TEMP/source-node-version"
+          gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/$GITHUB_REPOSITORY/contents/package-lock.json?ref=$SOURCE_SHA" > "$source_lockfile"
+          gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/$GITHUB_REPOSITORY/contents/.node-version?ref=$SOURCE_SHA" > "$source_node_version"
+          lockfile_digest=$(sha256sum "$source_lockfile" | cut -d ' ' -f 1)
+          lockfile_size=$(stat --format=%s "$source_lockfile")
+          node_version=$(< "$source_node_version")
+          ncc_version=$(jq --raw-output --exit-status \
+            '.packages["node_modules/@vercel/ncc"].version | select(type == "string" and length > 0)' \
+            "$source_lockfile")
+          [[ "$node_version" == '24.9.0' ]]
+          jq --exit-status \
+            --arg version "$VERSION" \
+            --arg source "$SOURCE_SHA" \
+            --arg tree "$TREE_SHA" \
+            --argjson source_date_epoch "$SOURCE_DATE_EPOCH" \
+            --arg previous_stable "$PREVIOUS_STABLE_TAG" \
+            --arg lockfile_digest "$lockfile_digest" \
+            --argjson lockfile_size "$lockfile_size" \
+            --arg node "v$node_version" \
+            --arg ncc "$ncc_version" \
+            --arg archive_name "$prefix.tar.gz" \
+            --arg archive_digest "$archive_digest" \
+            --argjson archive_size "$archive_size" \
+            --arg sbom_name "$prefix.spdx.json" \
+            --arg sbom_digest "$sbom_digest" \
+            --argjson sbom_size "$sbom_size" \
+            '.version == $version and .previousStableTag == $previous_stable and .source.sha == $source and .source.tree == $tree and .source.sourceDateEpoch == $source_date_epoch and .tools.node == $node and .tools.npm == "11.6.0" and .tools.ncc == $ncc and .lockfile.name == "package-lock.json" and .lockfile.sha256 == $lockfile_digest and .lockfile.size == $lockfile_size and .artifacts.archive.name == $archive_name and .artifacts.archive.sha256 == $archive_digest and .artifacts.archive.size == $archive_size and .artifacts.sbom.name == $sbom_name and .artifacts.sbom.sha256 == $sbom_digest and .artifacts.sbom.size == $sbom_size' \
+            "$RUNNER_TEMP/release/$prefix.release.json" > /dev/null
+
+          signer_workflow="$GITHUB_REPOSITORY/.github/workflows/release-build.yml"
+          gh attestation verify "$RUNNER_TEMP/release/$prefix.tar.gz" \
+            --bundle "$RUNNER_TEMP/release/$prefix.provenance.sigstore.jsonl" \
+            --deny-self-hosted-runners \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$signer_workflow" \
+            --source-digest "$SOURCE_SHA" \
+            --source-ref refs/heads/main
+
+          expected_archive="$RUNNER_TEMP/expected-archive"
+          actual_archive="$RUNNER_TEMP/actual-archive"
+          {
+            printf 'd\t%s\n' "$prefix/" "$prefix/dist/"
+            printf -- '-\t%s\n' \
+              "$prefix/action.yml" \
+              "$prefix/dist/index.js" \
+              "$prefix/dist/index.js.map" \
+              "$prefix/dist/licenses.txt" \
+              "$prefix/dist/package.json" \
+              "$prefix/dist/sourcemap-register.cjs" \
+              "$prefix/dist/sourcemap-register.js"
+          } | sort > "$expected_archive"
+          tar --list --verbose --gzip --file "$RUNNER_TEMP/release/$prefix.tar.gz" | \
+            awk '{print substr($1, 1, 1) "\t" $NF}' | sort > "$actual_archive"
+          diff --unified "$expected_archive" "$actual_archive"
+
+          mkdir "$RUNNER_TEMP/extracted"
+          tar --extract --gzip \
+            --no-same-owner \
+            --no-same-permissions \
+            --file "$RUNNER_TEMP/release/$prefix.tar.gz" \
+            --directory "$RUNNER_TEMP/extracted"
+
+          action_files=(
+            action.yml
+            dist/index.js
+            dist/index.js.map
+            dist/licenses.txt
+            dist/package.json
+            dist/sourcemap-register.cjs
+            dist/sourcemap-register.js
+          )
+          for file in "${action_files[@]}"; do
+            digest=$(sha256sum "$RUNNER_TEMP/extracted/$prefix/$file" | cut -d ' ' -f 1)
+            size=$(stat --format=%s "$RUNNER_TEMP/extracted/$prefix/$file")
+            jq --exit-status --arg path "$file" --arg digest "$digest" --argjson size "$size" \
+              '.files[$path].sha256 == $digest and .files[$path].size == $size' \
+              "$RUNNER_TEMP/release/$prefix.release.json" > /dev/null
+          done
+          jq --exit-status --arg namespace "https://github.com/GrantBirki/branch-deploy/sbom/$VERSION/$SOURCE_SHA" \
+            '.documentNamespace == $namespace and .spdxVersion == "SPDX-2.3"' \
+            "$RUNNER_TEMP/release/$prefix.spdx.json" > /dev/null
+
+          subjects=(
+            "$RUNNER_TEMP/extracted/$prefix/action.yml"
+            "$RUNNER_TEMP/extracted/$prefix/dist/index.js"
+            "$RUNNER_TEMP/extracted/$prefix/dist/index.js.map"
+            "$RUNNER_TEMP/extracted/$prefix/dist/licenses.txt"
+            "$RUNNER_TEMP/extracted/$prefix/dist/package.json"
+            "$RUNNER_TEMP/extracted/$prefix/dist/sourcemap-register.cjs"
+            "$RUNNER_TEMP/extracted/$prefix/dist/sourcemap-register.js"
+            "$RUNNER_TEMP/release/$prefix.tar.gz"
+            "$RUNNER_TEMP/release/$prefix.spdx.json"
+            "$RUNNER_TEMP/release/$prefix.release.json"
+            "$RUNNER_TEMP/release/SHA256SUMS"
+          )
+          for subject in "${subjects[@]}"; do
+            gh attestation verify "$subject" \
+              --bundle "$RUNNER_TEMP/release/$prefix.provenance.sigstore.jsonl" \
+              --deny-self-hosted-runners \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$signer_workflow" \
+              --source-digest "$SOURCE_SHA" \
+              --source-ref refs/heads/main
+          done
+          gh attestation verify "$RUNNER_TEMP/release/$prefix.tar.gz" \
+            --bundle "$RUNNER_TEMP/release/$prefix.sbom.sigstore.jsonl" \
+            --deny-self-hosted-runners \
+            --format json \
+            --predicate-type https://spdx.dev/Document/v2.3 \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$signer_workflow" \
+            --source-digest "$SOURCE_SHA" \
+            --source-ref refs/heads/main > "$RUNNER_TEMP/sbom-verification.json"
+          jq --exit-status 'length == 1' "$RUNNER_TEMP/sbom-verification.json" > /dev/null
+          jq --sort-keys '.[0].verificationResult.statement.predicate' \
+            "$RUNNER_TEMP/sbom-verification.json" > "$RUNNER_TEMP/signed-sbom.json"
+          jq --sort-keys . "$RUNNER_TEMP/release/$prefix.spdx.json" > "$RUNNER_TEMP/shipped-sbom.json"
+          cmp "$RUNNER_TEMP/signed-sbom.json" "$RUNNER_TEMP/shipped-sbom.json"
+
+          gh release verify "$VERSION"
+          while IFS= read -r asset; do
+            gh release verify-asset "$VERSION" "$RUNNER_TEMP/release/$asset"
+          done < "$expected"
+
+          while IFS= read -r asset; do
+            local_digest=$(sha256sum "$RUNNER_TEMP/release/$asset" | cut -d ' ' -f 1)
+            local_size=$(stat --format=%s "$RUNNER_TEMP/release/$asset")
+            api_digest=$(jq --raw-output --arg name "$asset" '.[] | select(.name == $name) | .digest' "$RUNNER_TEMP/assets.json")
+            api_size=$(jq --raw-output --arg name "$asset" '.[] | select(.name == $name) | .size' "$RUNNER_TEMP/assets.json")
+            [[ "$api_digest" == "sha256:$local_digest" ]]
+            [[ "$api_size" == "$local_size" ]]
+          done < "$expected"
+
+  update_major:
+    needs:
+      - prepare
+      - verify_release
+    if: ${{ needs.prepare.outputs.update_major == 'true' && needs.verify_release.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: move the stable major compatibility tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAJOR_TAG: ${{ needs.prepare.outputs.major_tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          releases="$RUNNER_TEMP/releases-before-major-update.json"
+          gh api --method GET --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases"
+          alias_release_count=$(jq --arg tag "$MAJOR_TAG" \
+            '[.[][] | select(.tag_name == $tag)] | length' "$releases")
+          if [[ "$alias_release_count" -ne 0 ]]; then
+            echo "A draft or published GitHub Release must never be attached to movable tag $MAJOR_TAG."
+            exit 1
+          fi
+          exact_release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION")
+          jq --exit-status \
+            --arg source "$SOURCE_SHA" \
+            --arg version "$VERSION" \
+            '.tag_name == $version and .draft == false and .immutable == true and .prerelease == false and .target_commitish == $source' \
+            <<< "$exact_release" > /dev/null
+
+          resolve_tag_commit() {
+            local tag=$1
+            local object object_type object_sha
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")
+            object_type=$(jq --raw-output '.object.type' <<< "$object")
+            object_sha=$(jq --raw-output '.object.sha' <<< "$object")
+            while [[ "$object_type" == 'tag' ]]; do
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha")
+              object_type=$(jq --raw-output '.object.type' <<< "$object")
+              object_sha=$(jq --raw-output '.object.sha' <<< "$object")
+            done
+            [[ "$object_type" == 'commit' ]]
+            printf '%s' "$object_sha"
+          }
+
+          compare_decimal() {
+            local LC_ALL=C
+            local left=$1
+            local right=$2
+            while [[ ${#left} -gt 1 && ${left:0:1} == '0' ]]; do left=${left:1}; done
+            while [[ ${#right} -gt 1 && ${right:0:1} == '0' ]]; do right=${right:1}; done
+            if [[ ${#left} -lt ${#right} ]]; then printf '%s' -1; return 0; fi
+            if [[ ${#left} -gt ${#right} ]]; then printf '%s' 1; return 0; fi
+            if [[ "$left" == "$right" ]]; then printf '%s' 0; return 0; fi
+            if [[ "$left" < "$right" ]]; then printf '%s' -1; else printf '%s' 1; fi
+          }
+
+          release_version_compare() {
+            local left=$1
+            local right=$2
+            local left_rc right_rc index comparison
+            local -a left_parts right_parts
+
+            [[ "$left" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-rc\.([0-9]+))?$ ]] || return 1
+            left_parts=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+            left_rc=${BASH_REMATCH[5]-}
+            [[ "$right" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-rc\.([0-9]+))?$ ]] || return 1
+            right_parts=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+            right_rc=${BASH_REMATCH[5]-}
+
+            for index in 0 1 2; do
+              comparison=$(compare_decimal "${left_parts[$index]}" "${right_parts[$index]}")
+              if [[ "$comparison" != '0' ]]; then printf '%s' "$comparison"; return 0; fi
+            done
+            if [[ -z "$left_rc" && -z "$right_rc" ]]; then printf '%s' 0; return 0; fi
+            if [[ -z "$left_rc" ]]; then printf '%s' 1; return 0; fi
+            if [[ -z "$right_rc" ]]; then printf '%s' -1; return 0; fi
+            compare_decimal "$left_rc" "$right_rc"
+          }
+
+          while IFS= read -r published; do
+            if comparison=$(release_version_compare "$published" "$VERSION") && ((comparison > 0)); then
+              echo "Published release $published prevents moving the major alias to $VERSION."
+              exit 1
+            fi
+          done < <(jq --raw-output '.[][] | select(.draft == false and .prerelease == false) | .tag_name' "$releases")
+
+          alias_error="$RUNNER_TEMP/major-tag-error"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$MAJOR_TAG" > /dev/null 2> "$alias_error"; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$MAJOR_TAG" \
+              --field force=true \
+              --field sha="$SOURCE_SHA" > /dev/null
+          else
+            if ! grep --quiet '(HTTP 404)' "$alias_error"; then
+              cat "$alias_error" >&2
+              exit 1
+            fi
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              --field ref="refs/tags/$MAJOR_TAG" \
+              --field sha="$SOURCE_SHA" > /dev/null
+          fi
+
+          releases_after="$RUNNER_TEMP/releases-after-major-update.json"
+          gh api --method GET --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$releases_after"
+          alias_release_count=$(jq --arg tag "$MAJOR_TAG" \
+            '[.[][] | select(.tag_name == $tag)] | length' "$releases_after")
+          if [[ "$alias_release_count" -ne 0 ]]; then
+            echo "A draft or published GitHub Release is attached to movable tag $MAJOR_TAG after its update."
+            exit 1
+          fi
+          [[ $(resolve_tag_commit "$MAJOR_TAG") == "$SOURCE_SHA" ]]
+
+  verify_major:
+    needs:
+      - prepare
+      - build
+      - update_major
+    if: ${{ always() && needs.prepare.outputs.update_major == 'true' && needs.update_major.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: verify the stable compatibility tag contents
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAJOR_TAG: ${{ needs.prepare.outputs.major_tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          resolve_tag_commit() {
+            local tag=$1
+            local object object_type object_sha
+            object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag")
+            object_type=$(jq --raw-output '.object.type' <<< "$object")
+            object_sha=$(jq --raw-output '.object.sha' <<< "$object")
+            while [[ "$object_type" == 'tag' ]]; do
+              object=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha")
+              object_type=$(jq --raw-output '.object.type' <<< "$object")
+              object_sha=$(jq --raw-output '.object.sha' <<< "$object")
+            done
+            [[ "$object_type" == 'commit' ]]
+            printf '%s' "$object_sha"
+          }
+
+          release_error="$RUNNER_TEMP/major-release-error"
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$MAJOR_TAG" > /dev/null 2> "$release_error"; then
+            echo "A published GitHub Release is unexpectedly attached to $MAJOR_TAG."
+            exit 1
+          fi
+          if ! grep --quiet '(HTTP 404)' "$release_error"; then
+            cat "$release_error" >&2
+            exit 1
+          fi
+          [[ $(resolve_tag_commit "$MAJOR_TAG") == "$SOURCE_SHA" ]]
+
+          prefix="branch-deploy-$VERSION"
+          mkdir "$RUNNER_TEMP/release" "$RUNNER_TEMP/extracted" "$RUNNER_TEMP/major"
+          gh release download "$VERSION" \
+            --pattern "$prefix.tar.gz" \
+            --dir "$RUNNER_TEMP/release"
+          expected_archive="$RUNNER_TEMP/expected-major-archive"
+          actual_archive="$RUNNER_TEMP/actual-major-archive"
+          {
+            printf 'd\t%s\n' "$prefix/" "$prefix/dist/"
+            printf -- '-\t%s\n' \
+              "$prefix/action.yml" \
+              "$prefix/dist/index.js" \
+              "$prefix/dist/index.js.map" \
+              "$prefix/dist/licenses.txt" \
+              "$prefix/dist/package.json" \
+              "$prefix/dist/sourcemap-register.cjs" \
+              "$prefix/dist/sourcemap-register.js"
+          } | sort > "$expected_archive"
+          tar --list --verbose --gzip --file "$RUNNER_TEMP/release/$prefix.tar.gz" | \
+            awk '{print substr($1, 1, 1) "\t" $NF}' | sort > "$actual_archive"
+          diff --unified "$expected_archive" "$actual_archive"
+          tar --extract --gzip \
+            --no-same-owner \
+            --no-same-permissions \
+            --file "$RUNNER_TEMP/release/$prefix.tar.gz" \
+            --directory "$RUNNER_TEMP/extracted"
+
+          files=(
+            action.yml
+            dist/index.js
+            dist/index.js.map
+            dist/licenses.txt
+            dist/package.json
+            dist/sourcemap-register.cjs
+            dist/sourcemap-register.js
+          )
+          for file in "${files[@]}"; do
+            mkdir -p "$RUNNER_TEMP/major/$(dirname "$file")"
+            gh api -H 'Accept: application/vnd.github.raw+json' \
+              "repos/$GITHUB_REPOSITORY/contents/$file?ref=$MAJOR_TAG" > "$RUNNER_TEMP/major/$file"
+            cmp "$RUNNER_TEMP/extracted/$prefix/$file" "$RUNNER_TEMP/major/$file"
+          done
