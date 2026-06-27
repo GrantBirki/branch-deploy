@@ -39,8 +39,6 @@ on:
         description: The unique Actions artifact name
         value: ${{ jobs.build.outputs.artifact_name }}
 
-permissions: {}
-
 defaults:
   run:
     shell: bash
@@ -48,10 +46,9 @@ defaults:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
+    # Reusable workflows cannot elevate their caller's permissions. This job
+    # intentionally inherits the caller's exact permission cap: contents:read
+    # for dry builds, plus OIDC and attestation writes for production builds.
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}

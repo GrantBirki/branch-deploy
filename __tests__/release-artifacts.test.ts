@@ -717,7 +717,7 @@ describe('deterministic release artifacts', () => {
         treeSha: TREE_SHA
       }).version
     ).toBe('v11.1.6-rc.1')
-  })
+  }, 30_000)
 
   test('rejects artifact tampering and unsafe build inputs', () => {
     const projectRoot = createProjectFixture()

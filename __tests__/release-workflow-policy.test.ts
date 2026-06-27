@@ -312,7 +312,7 @@ test('only minimal publication jobs receive contents write', () => {
   }
 })
 
-test('reusable build owns production attestations with narrow permissions', () => {
+test('reusable build inherits narrow caller permissions for attestations', () => {
   const document = workflow(releaseBuildWorkflowPath)
   const triggers = requireRecord(document['on'], 'release-build triggers')
   const build = job(document, releaseBuildWorkflowPath, 'build')
@@ -322,16 +322,12 @@ test('reusable build owns production attestations with narrow permissions', () =
     )
   )
 
-  expect(document['permissions']).toStrictEqual({})
+  expect(document).not.toHaveProperty('permissions')
   expect(triggers).toHaveProperty('workflow_call')
   expect(
     requireRecord(triggers['workflow_call'], 'workflow_call')
   ).not.toHaveProperty('inputs.resume_existing')
-  expect(build['permissions']).toStrictEqual({
-    contents: 'read',
-    'id-token': 'write',
-    attestations: 'write'
-  })
+  expect(build).not.toHaveProperty('permissions')
   expect(readFileSync('.node-version', 'utf8').trim()).toBe('24.9.0')
   expect(attestSteps).toHaveLength(2)
   expect(readFileSync(releaseBuildWorkflowPath, 'utf8')).toContain(
