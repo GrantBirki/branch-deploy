@@ -17,4 +17,15 @@ if [[ ! -f dist/index.js ]]; then
   exit 1
 fi
 
-exec node tools/acceptance/index.ts
+export BRANCH_DEPLOY_COVERAGE_SCOPE=acceptance
+
+exec node \
+  --experimental-test-coverage \
+  --test \
+  --test-coverage-lines=100 \
+  --test-coverage-branches=100 \
+  --test-coverage-functions=100 \
+  '--test-coverage-include=tools/acceptance/**' \
+  --test-reporter=./tools/coverage-reporter.ts \
+  --test-reporter-destination=stdout \
+  tools/acceptance/index.ts

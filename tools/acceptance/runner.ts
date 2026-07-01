@@ -1,11 +1,6 @@
+import assert from 'node:assert/strict'
 import {spawn} from 'node:child_process'
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync
-} from 'node:fs'
+import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 import {load} from 'js-yaml'
@@ -16,12 +11,12 @@ import type {
 } from './types.ts'
 
 export interface RunActionRequest {
-  readonly inputs?: Readonly<Record<string, string>>
+  readonly inputs: Readonly<Record<string, string>>
   readonly mode: 'main' | 'post'
   readonly port: number
-  readonly previousState?: AcceptanceOutputs
+  readonly previousState: AcceptanceOutputs
   readonly state: MockGitHubState
-  readonly status?: 'failure' | 'success'
+  readonly status: 'failure' | 'success'
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -29,9 +24,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
-  if (!isRecord(value)) {
-    throw new Error(`${label} must be an object`)
-  }
+  assert.ok(isRecord(value), `${label} must be an object`)
   return value
 }
 
@@ -49,7 +42,8 @@ function loadInputDefaults(): Record<string, string> {
   for (const [name, value] of Object.entries(inputs)) {
     const definition = requireRecord(value, `input ${name}`)
     const defaultValue = definition['default']
-    defaults[name] = typeof defaultValue === 'string' ? defaultValue : ''
+    assert.equal(typeof defaultValue, 'string', `input ${name} default`)
+    defaults[name] = String(defaultValue)
   }
   defaults['github_token'] = 'acceptance-token'
   defaults['status'] = 'success'
@@ -121,13 +115,10 @@ function eventPayloadForMode(
 }
 
 function parseCommandFile(path: string): AcceptanceOutputs {
-  if (!existsSync(path)) {
-    return {}
-  }
   const lines = readFileSync(path, 'utf8').split(/\r?\n/u)
   const output: Record<string, string> = {}
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? ''
+    const line = String(lines[index])
     const marker = line.indexOf('<<')
     if (marker < 0) {
       continue
@@ -137,7 +128,7 @@ function parseCommandFile(path: string): AcceptanceOutputs {
     const valueLines: string[] = []
     index += 1
     while (index < lines.length && lines[index] !== delimiter) {
-      valueLines.push(lines[index] ?? '')
+      valueLines.push(String(lines[index]))
       index += 1
     }
     output[key] = valueLines.join('\n')
@@ -157,8 +148,8 @@ function baseEnvironment(
   }
 
   const defaults = loadInputDefaults()
-  const inputs = {...defaults, ...(request.inputs ?? {})}
-  inputs['status'] = request.status ?? inputs['status'] ?? 'success'
+  const inputs = {...defaults, ...request.inputs}
+  inputs['status'] = request.status
   for (const [name, value] of Object.entries(inputs)) {
     env[inputEnvName(name)] = value
   }
@@ -190,7 +181,7 @@ function baseEnvironment(
 
   if (request.mode === 'post') {
     env['STATE_isPost'] = 'true'
-    for (const [name, value] of Object.entries(request.previousState ?? {})) {
+    for (const [name, value] of Object.entries(request.previousState)) {
       env[`STATE_${name}`] = value
     }
   }
@@ -231,6 +222,7 @@ function runNode(
     child.stdout.on('data', (chunk: Buffer | string) => {
       stdout.push(Buffer.from(chunk))
     })
+    /* node:coverage ignore next 3 */
     child.stderr.on('data', (chunk: Buffer | string) => {
       stderr.push(Buffer.from(chunk))
     })

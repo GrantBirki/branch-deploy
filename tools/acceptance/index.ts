@@ -3,6 +3,9 @@ import {
   ACCEPTANCE_REPOSITORY,
   ACCEPTANCE_SHAS,
   createMockState,
+  mockErrorMessage,
+  mockServerCloseAction,
+  mockServerPort,
   seedLock,
   setTriggerComment,
   startMockGitHub
@@ -93,8 +96,8 @@ function requireOutput(
   key: string
 ): string {
   const value = result.output[key]
-  assert.notStrictEqual(value, undefined, diagnostics(context, result))
-  return value ?? ''
+  assert.ok(value !== undefined, diagnostics(context, result))
+  return value
 }
 
 function assertExit(
@@ -186,10 +189,7 @@ function requireDeployment(
   index = 0
 ): MockDeployment {
   const deployment = context.state.deployments[index]
-  assert.notStrictEqual(deployment, undefined, diagnostics(context))
-  if (deployment === undefined) {
-    throw new Error('deployment unexpectedly missing')
-  }
+  assert.ok(deployment !== undefined, diagnostics(context))
   return deployment
 }
 
@@ -199,10 +199,7 @@ function requireDeploymentStatus(
   index: number
 ): MockDeploymentStatus {
   const status = deployment.statuses[index]
-  assert.notStrictEqual(status, undefined, diagnostics(context))
-  if (status === undefined) {
-    throw new Error('deployment status unexpectedly missing')
-  }
+  assert.ok(status !== undefined, diagnostics(context))
   return status
 }
 
@@ -268,10 +265,7 @@ async function withMockGitHub(
   try {
     await run(context)
   } catch (error) {
-    const detail = error instanceof Error ? error.stack : String(error)
-    throw new Error(
-      `${name} failed\n${String(detail)}\n${diagnostics(context)}`
-    )
+    throw new Error(`${name} failed\n${String(error)}\n${diagnostics(context)}`)
   } finally {
     await server.close()
   }
@@ -285,7 +279,9 @@ function runMain(
     inputs,
     mode: 'main',
     port: context.port,
-    state: context.state
+    previousState: {},
+    state: context.state,
+    status: 'success'
   })
 }
 
@@ -306,10 +302,26 @@ function runPost(
 }
 
 function getMockRoute(port: number, path: string): Promise<HttpResult> {
-  return fetch(`http://127.0.0.1:${port}${path}`).then(async response => ({
-    body: await response.text(),
-    status: response.status
-  }))
+  return requestMockRoute(port, path)
+}
+
+function requestMockRoute(
+  port: number,
+  path: string,
+  method = 'GET',
+  body: Record<string, unknown> | string | undefined = undefined
+): Promise<HttpResult> {
+  const init: RequestInit = {method}
+  if (body !== undefined) {
+    init.body = typeof body === 'string' ? body : JSON.stringify(body)
+    init.headers = {'content-type': 'application/json'}
+  }
+  return fetch(`http://127.0.0.1:${port}${path}`, init).then(
+    async response => ({
+      body: await response.text(),
+      status: response.status
+    })
+  )
 }
 
 const scenarios = [
@@ -1160,6 +1172,326 @@ const scenarios = [
           diagnostics(context, result)
         )
       })
+  },
+  {
+    name: 'mock GraphQL deployment lookup',
+    run: () =>
+      withMockGitHub('mock GraphQL deployment lookup', async context => {
+        seedDeployment(context.state, ACCEPTANCE_SHAS.oldDeployment)
+        seedDeployment(context.state, ACCEPTANCE_SHAS.feature, 'staging')
+        requireDeployment(context, 1).statuses.push({
+          environment: 'staging',
+          environmentUrl: null,
+          id: context.state.nextStatusId,
+          state: 'failure'
+        })
+        context.state.nextStatusId += 1
+
+        const result = await requestMockRoute(
+          context.port,
+          '/graphql',
+          'POST',
+          {
+            query:
+              'query($environment:String!){repository{deployments(environments:[$environment]){nodes{id}}}}',
+            variables: {environment: 'production'}
+          }
+        )
+
+        assert.equal(result.status, 200, diagnostics(context))
+        assert.equal(
+          result.body.includes(ACCEPTANCE_SHAS.oldDeployment),
+          true,
+          diagnostics(context)
+        )
+
+        const inactiveResult = await requestMockRoute(
+          context.port,
+          '/graphql',
+          'POST',
+          {
+            query:
+              'query($environment:String!){repository{deployments(environments:[$environment]){nodes{state}}}}',
+            variables: {environment: 'staging'}
+          }
+        )
+        assert.equal(inactiveResult.status, 200, diagnostics(context))
+        assert.equal(
+          inactiveResult.body.includes('"state":"INACTIVE"'),
+          true,
+          diagnostics(context)
+        )
+
+        const defaultEnvironmentResult = await requestMockRoute(
+          context.port,
+          '/graphql',
+          'POST',
+          {
+            query:
+              'query{repository{deployments(environments:[$environment]){nodes{id}}}}'
+          }
+        )
+        assert.equal(defaultEnvironmentResult.status, 200, diagnostics(context))
+        assert.equal(
+          defaultEnvironmentResult.body.includes(ACCEPTANCE_SHAS.oldDeployment),
+          true,
+          diagnostics(context)
+        )
+      })
+  },
+  {
+    name: 'mock server platform helpers',
+    run: () => {
+      assert.equal(
+        mockServerPort({address: '127.0.0.1', family: 'IPv4', port: 1234}),
+        1234
+      )
+      assert.throws(() => mockServerPort(null), /did not bind/u)
+      assert.throws(() => mockServerPort('pipe'), /did not bind/u)
+      assert.equal(mockServerCloseAction(undefined), 'resolve')
+      assert.equal(mockServerCloseAction(new Error('close failed')), 'reject')
+      assert.equal(mockErrorMessage(new Error('message')), 'message')
+      assert.equal(mockErrorMessage('string failure'), 'string failure')
+      return Promise.resolve()
+    }
+  },
+  {
+    name: 'mock server strict request validation',
+    run: () =>
+      withMockGitHub('mock server strict request validation', async context => {
+        seedDeployment(context.state, ACCEPTANCE_SHAS.oldDeployment)
+        const deployment = requireDeployment(context)
+        context.state.comments.splice(0, context.state.comments.length)
+        setTriggerComment(context.state, '.deploy')
+        context.state.labels.add('deploying')
+        const route = (path: string): string =>
+          `/repos/${ACCEPTANCE_REPOSITORY.owner}/${ACCEPTANCE_REPOSITORY.repo}${path}`
+
+        const malformedGraphql = await requestMockRoute(
+          context.port,
+          '/graphql',
+          'POST',
+          {variables: {}}
+        )
+        assert.equal(malformedGraphql.status, 500, diagnostics(context))
+        assert.equal(
+          malformedGraphql.body.includes('expected string field: query'),
+          true,
+          diagnostics(context)
+        )
+
+        const nonObjectJson = await requestMockRoute(
+          context.port,
+          '/graphql',
+          'POST',
+          '[]'
+        )
+        assert.equal(nonObjectJson.status, 500, diagnostics(context))
+        assert.equal(
+          nonObjectJson.body.includes('expected JSON object request body'),
+          true,
+          diagnostics(context)
+        )
+
+        const unknownGraphql = await requestMockRoute(
+          context.port,
+          '/graphql',
+          'POST',
+          {query: 'query{viewer{login}}'}
+        )
+        assert.equal(unknownGraphql.status, 500, diagnostics(context))
+        assert.equal(
+          unknownGraphql.body.includes('Unhandled mock GitHub route'),
+          true,
+          diagnostics(context)
+        )
+
+        const missingPart = await getMockRoute(context.port, '/repos')
+        assert.equal(missingPart.status, 500, diagnostics(context))
+        assert.equal(
+          missingPart.body.includes('missing path segment 1'),
+          true,
+          diagnostics(context)
+        )
+
+        const wrongRepository = await getMockRoute(
+          context.port,
+          '/repos/Other/actions-sandbox'
+        )
+        assert.equal(wrongRepository.status, 500, diagnostics(context))
+        assert.equal(
+          wrongRepository.body.includes('Unhandled mock GitHub route'),
+          true,
+          diagnostics(context)
+        )
+
+        const unknownArea = await getMockRoute(
+          context.port,
+          route('/unexpected')
+        )
+        assert.equal(unknownArea.status, 500, diagnostics(context))
+        assert.equal(
+          unknownArea.body.includes('Unhandled mock GitHub route'),
+          true,
+          diagnostics(context)
+        )
+
+        const missingCommit = await getMockRoute(
+          context.port,
+          route('/commits/missing')
+        )
+        assert.equal(missingCommit.status, 404, diagnostics(context))
+
+        const defaultContentRef = await getMockRoute(
+          context.port,
+          route('/contents/lock.json')
+        )
+        assert.equal(defaultContentRef.status, 404, diagnostics(context))
+
+        const missingComment = await requestMockRoute(
+          context.port,
+          route('/issues/comments/999'),
+          'PATCH',
+          {body: 'missing'}
+        )
+        assert.equal(missingComment.status, 404, diagnostics(context))
+        assert.equal(
+          missingComment.body.includes('Comment not found'),
+          true,
+          diagnostics(context)
+        )
+
+        const invalidLabelPayload = await requestMockRoute(
+          context.port,
+          route('/issues/1/labels'),
+          'POST',
+          {labels: [1]}
+        )
+        assert.equal(invalidLabelPayload.status, 500, diagnostics(context))
+        assert.equal(
+          invalidLabelPayload.body.includes('expected string array field'),
+          true,
+          diagnostics(context)
+        )
+
+        const listedLabels = await getMockRoute(
+          context.port,
+          route('/issues/1/labels')
+        )
+        assert.equal(listedLabels.status, 200, diagnostics(context))
+        assert.equal(
+          listedLabels.body.includes('deploying'),
+          true,
+          diagnostics(context)
+        )
+
+        const deletedLabel = await requestMockRoute(
+          context.port,
+          route('/issues/1/labels/deploying'),
+          'DELETE'
+        )
+        assert.equal(deletedLabel.status, 200, diagnostics(context))
+
+        const unknownIssueRoute = await getMockRoute(
+          context.port,
+          route('/issues/1/milestones')
+        )
+        assert.equal(unknownIssueRoute.status, 500, diagnostics(context))
+
+        const invalidTree = await requestMockRoute(
+          context.port,
+          route('/git/trees'),
+          'POST',
+          {tree: []}
+        )
+        assert.equal(invalidTree.status, 500, diagnostics(context))
+        assert.equal(
+          invalidTree.body.includes('expected tree item'),
+          true,
+          diagnostics(context)
+        )
+
+        const duplicateRef = await requestMockRoute(
+          context.port,
+          route('/git/refs'),
+          'POST',
+          {ref: 'refs/heads/main', sha: ACCEPTANCE_SHAS.default}
+        )
+        assert.equal(duplicateRef.status, 422, diagnostics(context))
+
+        const directRef = await requestMockRoute(
+          context.port,
+          route('/git/refs'),
+          'POST',
+          {ref: 'refs/heads/direct-ref', sha: ACCEPTANCE_SHAS.default}
+        )
+        assert.equal(directRef.status, 201, diagnostics(context))
+
+        const missingRef = await requestMockRoute(
+          context.port,
+          route('/git/refs/heads/missing'),
+          'DELETE'
+        )
+        assert.equal(missingRef.status, 422, diagnostics(context))
+
+        const unknownGitRoute = await getMockRoute(
+          context.port,
+          route('/git/unexpected')
+        )
+        assert.equal(unknownGitRoute.status, 500, diagnostics(context))
+
+        const invalidStatus = await requestMockRoute(
+          context.port,
+          route(`/deployments/${deployment.id}/statuses`),
+          'POST',
+          {environment: 'production', environment_url: 1, state: 'success'}
+        )
+        assert.equal(invalidStatus.status, 500, diagnostics(context))
+        assert.equal(
+          invalidStatus.body.includes('expected optional string field'),
+          true,
+          diagnostics(context)
+        )
+
+        const unknownDeployment = await requestMockRoute(
+          context.port,
+          route('/deployments/999/statuses'),
+          'POST',
+          {environment: 'production', state: 'success'}
+        )
+        assert.equal(unknownDeployment.status, 500, diagnostics(context))
+        assert.equal(
+          unknownDeployment.body.includes('unknown deployment id'),
+          true,
+          diagnostics(context)
+        )
+
+        const unknownDeploymentRoute = await getMockRoute(
+          context.port,
+          route('/deployments/999')
+        )
+        assert.equal(unknownDeploymentRoute.status, 500, diagnostics(context))
+      })
+  },
+  {
+    name: 'runner missing trigger diagnostics',
+    run: () =>
+      withMockGitHub('runner missing trigger diagnostics', async context => {
+        context.state.comments.splice(0, context.state.comments.length)
+        await assert.rejects(() => runMain(context), /missing trigger comment/u)
+      })
+  },
+  {
+    name: 'scenario failure diagnostics',
+    run: async () => {
+      await assert.rejects(
+        () =>
+          withMockGitHub('scenario failure diagnostics', () =>
+            Promise.reject(new Error('intentional diagnostics failure'))
+          ),
+        /scenario failure diagnostics failed/u
+      )
+    }
   },
   {
     name: 'unknown mock route',

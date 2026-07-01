@@ -2,6 +2,7 @@ import {Buffer} from 'node:buffer'
 import {
   createServer,
   type IncomingMessage,
+  type Server,
   type ServerResponse
 } from 'node:http'
 import type {
@@ -45,10 +46,11 @@ interface MockServer {
 }
 
 interface JsonResponse {
-  readonly headers?: Readonly<Record<string, string>>
   readonly status: number
   readonly value?: unknown
 }
+
+type MockServerCloseAction = 'reject' | 'resolve'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -119,6 +121,23 @@ function createCommit(
   }
 }
 
+export function mockServerPort(address: ReturnType<Server['address']>): number {
+  if (address === null || typeof address === 'string') {
+    throw new Error('mock server did not bind to a TCP port')
+  }
+  return address.port
+}
+
+export function mockServerCloseAction(
+  error: Error | undefined
+): MockServerCloseAction {
+  return error === undefined ? 'resolve' : 'reject'
+}
+
+export function mockErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 export function createMockState(): MockGitHubState {
   lockFiles.clear()
   blobs.clear()
@@ -133,7 +152,7 @@ export function createMockState(): MockGitHubState {
   const commits = new Map<string, MockCommit>()
   commits.set(defaultSha, createCommit(defaultSha, true))
   commits.set(featureSha, createCommit(featureSha, true))
-  commits.set(forkSha, createCommit(forkSha, true))
+  commits.set(forkSha, createCommit(forkSha, false))
   commits.set(
     oldDeploymentSha,
     createCommit(oldDeploymentSha, true, oldTreeSha)
@@ -838,9 +857,6 @@ function readBody(request: IncomingMessage): Promise<string> {
 
 function writeResponse(response: ServerResponse, result: JsonResponse): void {
   response.statusCode = result.status
-  for (const [name, value] of Object.entries(result.headers ?? {})) {
-    response.setHeader(name, value)
-  }
   if (result.value === undefined) {
     response.end()
     return
@@ -861,21 +877,21 @@ export async function startMockGitHub(
     server.on('error', reject)
   })
   const address = server.address()
-  if (address === null || typeof address === 'string') {
-    throw new Error('mock server did not bind to a TCP port')
-  }
   return {
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close(error => {
-          if (error) {
-            reject(error)
-          } else {
-            resolve()
-          }
+          const actions = {
+            reject,
+            resolve: (): void => resolve()
+          } satisfies Record<
+            MockServerCloseAction,
+            (closeError: Error | undefined) => void
+          >
+          actions[mockServerCloseAction(error)](error)
         })
       }),
-    port: address.port,
+    port: mockServerPort(address),
     routeLog
   }
 }
@@ -886,8 +902,8 @@ async function handleRequest(
   request: IncomingMessage,
   response: ServerResponse
 ): Promise<void> {
-  const method = request.method ?? 'GET'
-  const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+  const method = String(request.method)
+  const url = new URL(String(request.url), 'http://127.0.0.1')
   const rawBody = await readBody(request)
   routeLog.push({body: rawBody, method, path: url.pathname})
   try {
@@ -901,7 +917,7 @@ async function handleRequest(
     writeResponse(response, {
       status: 500,
       value: {
-        message: error instanceof Error ? error.message : String(error)
+        message: mockErrorMessage(error)
       }
     })
   }
