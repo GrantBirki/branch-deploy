@@ -110,6 +110,7 @@ test('inventories only executable TypeScript source', context => {
     'src/types.ts',
     'src/vendor.d.ts',
     'src/readme.txt',
+    'tools/acceptance/index.ts',
     'tools/check.ts'
   ]) {
     const absolutePath = resolve(root, path)
@@ -135,6 +136,7 @@ test('accepts full coverage and ignores non-project records', () => {
         coverageRecord('src/main.ts'),
         coverageRecord(toolsUrl.href),
         coverageRecord('/repo/dist/index.ts'),
+        coverageRecord('/repo/tools/acceptance/index.ts'),
         coverageRecord('/outside/vendor.ts'),
         coverageRecord('/')
       ],

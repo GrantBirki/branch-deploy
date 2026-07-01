@@ -21,6 +21,7 @@ interface ProjectCoveragePath {
 
 const MOCK_QUERY = /(?:\?|&)node-test-mock(?:=|&|$)/u
 const SOURCE_DIRECTORIES = ['src', 'tools'] as const
+const UNIT_COVERAGE_EXCLUDED_PREFIXES = ['tools/acceptance/'] as const
 
 function toPosixPath(path: string): string {
   return path.split(sep).join('/')
@@ -38,7 +39,7 @@ function walkTypescriptFiles(directory: string, root: string): string[] {
       files.push(...walkTypescriptFiles(absolutePath, root))
     } else if (entry.isFile() && entry.name.endsWith('.ts')) {
       const projectPath = toPosixPath(relative(root, absolutePath))
-      if (!projectPath.endsWith('.d.ts') && projectPath !== 'src/types.ts') {
+      if (isUnitCoverageSource(projectPath)) {
         files.push(projectPath)
       }
     }
@@ -87,7 +88,18 @@ function normalizeCoveragePath(
 }
 
 function isProjectSource(path: string): boolean {
-  return SOURCE_DIRECTORIES.some(directory => path.startsWith(`${directory}/`))
+  return (
+    SOURCE_DIRECTORIES.some(directory => path.startsWith(`${directory}/`)) &&
+    isUnitCoverageSource(path)
+  )
+}
+
+function isUnitCoverageSource(path: string): boolean {
+  return (
+    !path.endsWith('.d.ts') &&
+    path !== 'src/types.ts' &&
+    !UNIT_COVERAGE_EXCLUDED_PREFIXES.some(prefix => path.startsWith(prefix))
+  )
 }
 
 function formatMetric(
