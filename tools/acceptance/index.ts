@@ -58,11 +58,14 @@ function stateForDiagnostics(state: MockGitHubState): unknown {
       statuses: deployment.statuses.map(status => status.state)
     })),
     labels: [...state.labels].sort(),
+    pullRequest: state.pullRequest,
     reactions: state.reactions.map(reaction => ({
       commentId: reaction.commentId,
       content: reaction.content,
       id: reaction.id
-    }))
+    })),
+    reviewDecision: state.reviewDecision,
+    rollupState: state.rollupState
   }
 }
 
@@ -167,6 +170,17 @@ function assertReaction(context: ScenarioContext, content: string): void {
   assert.equal(matched, true, diagnostics(context))
 }
 
+function assertNoDeployment(
+  context: ScenarioContext,
+  result: AcceptanceRunResult
+): void {
+  assert.equal(
+    context.state.deployments.length,
+    0,
+    diagnostics(context, result)
+  )
+}
+
 function requireDeployment(
   context: ScenarioContext,
   index = 0
@@ -201,6 +215,18 @@ function setForkPullRequest(state: MockGitHubState): void {
     headRepoFullName: `fork-owner/${ACCEPTANCE_REPOSITORY.repo}`,
     headSha: ACCEPTANCE_SHAS.fork
   }
+}
+
+function addBranch(
+  state: MockGitHubState,
+  name: string,
+  sha = ACCEPTANCE_SHAS.default
+): void {
+  state.branches.set(name, {
+    name,
+    sha,
+    treeSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  })
 }
 
 function seedDeployment(
@@ -676,6 +702,444 @@ const scenarios = [
         assertReason(context, result, 'prechecks_failed')
         assertOutput(context, result, 'commit_status', 'UNAVAILABLE')
         assertCommentIncludes(context, 'commitStatus: `UNAVAILABLE`')
+      })
+  },
+  {
+    name: 'permission denied precheck',
+    run: () =>
+      withMockGitHub('permission denied precheck', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.permission = 'read'
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertNoDeployment(context, result)
+        assertCommentIncludes(
+          context,
+          'command requires the following permission'
+        )
+      })
+  },
+  {
+    name: 'draft PR rejected by default',
+    run: () =>
+      withMockGitHub('draft PR rejected by default', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.pullRequest = {...context.state.pullRequest, draft: true}
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertNoDeployment(context, result)
+        assertCommentIncludes(context, 'pull request is in a draft state')
+      })
+  },
+  {
+    name: 'draft PR permitted target',
+    run: () =>
+      withMockGitHub('draft PR permitted target', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.pullRequest = {...context.state.pullRequest, draft: true}
+
+        const result = await runMain(context, {
+          draft_permitted_targets: 'production'
+        })
+
+        assertExit(context, result, 0)
+        assertReason(context, result, 'deployment_ready')
+        assertOutput(context, result, 'environment', 'production')
+        assert.equal(context.state.deployments.length, 1)
+      })
+  },
+  {
+    name: 'non-default base rejected',
+    run: () =>
+      withMockGitHub('non-default base rejected', async context => {
+        setTriggerComment(context.state, '.deploy')
+        addBranch(context.state, 'release')
+        context.state.pullRequest = {
+          ...context.state.pullRequest,
+          baseRef: 'release'
+        }
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertOutput(context, result, 'non_default_target_branch_used', 'true')
+        assertNoDeployment(context, result)
+        assertCommentIncludes(
+          context,
+          'not the default branch of this repository'
+        )
+      })
+  },
+  {
+    name: 'non-default base explicit opt-in',
+    run: () =>
+      withMockGitHub('non-default base explicit opt-in', async context => {
+        setTriggerComment(context.state, '.deploy')
+        addBranch(context.state, 'release')
+        context.state.pullRequest = {
+          ...context.state.pullRequest,
+          baseRef: 'release'
+        }
+
+        const result = await runMain(context, {
+          allow_non_default_target_branch_deployments: 'true',
+          use_security_warnings: 'false'
+        })
+
+        assertExit(context, result, 0)
+        assertReason(context, result, 'deployment_ready')
+        assertOutput(context, result, 'non_default_target_branch_used', 'true')
+        assert.equal(context.state.deployments.length, 1)
+      })
+  },
+  {
+    name: 'CI failure rejection',
+    run: () =>
+      withMockGitHub('CI failure rejection', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.rollupState = 'FAILURE'
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertOutput(context, result, 'commit_status', 'FAILURE')
+        assertNoDeployment(context, result)
+        assertCommentIncludes(context, 'CI checks are failing')
+      })
+  },
+  {
+    name: 'CI pending rejection',
+    run: () =>
+      withMockGitHub('CI pending rejection', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.rollupState = 'PENDING'
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertOutput(context, result, 'commit_status', 'PENDING')
+        assertNoDeployment(context, result)
+        assertCommentIncludes(context, 'CI checks must be passing')
+      })
+  },
+  {
+    name: 'no CI checks with approval',
+    run: () =>
+      withMockGitHub('no CI checks with approval', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.rollupState = null
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 0)
+        assertReason(context, result, 'deployment_ready')
+        assert.equal(context.state.deployments.length, 1)
+      })
+  },
+  {
+    name: 'skip ci bypasses failing rollup',
+    run: () =>
+      withMockGitHub('skip ci bypasses failing rollup', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.rollupState = 'FAILURE'
+
+        const result = await runMain(context, {skip_ci: 'production'})
+
+        assertExit(context, result, 0)
+        assertReason(context, result, 'deployment_ready')
+        assertOutput(context, result, 'commit_status', 'skip_ci')
+      })
+  },
+  {
+    name: 'skip reviews bypasses review-required',
+    run: () =>
+      withMockGitHub('skip reviews bypasses review-required', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.reviewDecision = 'REVIEW_REQUIRED'
+
+        const result = await runMain(context, {skip_reviews: 'production'})
+
+        assertExit(context, result, 0)
+        assertReason(context, result, 'deployment_ready')
+        assertOutput(context, result, 'review_decision', 'skip_reviews')
+      })
+  },
+  {
+    name: 'admin bypasses review-required',
+    run: () =>
+      withMockGitHub('admin bypasses review-required', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.reviewDecision = 'REVIEW_REQUIRED'
+
+        const result = await runMain(context, {admins: 'GrantBirki'})
+
+        assertExit(context, result, 0)
+        assertReason(context, result, 'deployment_ready')
+        assertOutput(context, result, 'review_decision', 'REVIEW_REQUIRED')
+      })
+  },
+  {
+    name: 'noop still waits for pending CI',
+    run: () =>
+      withMockGitHub('noop still waits for pending CI', async context => {
+        setTriggerComment(context.state, '.noop')
+        context.state.reviewDecision = 'REVIEW_REQUIRED'
+        context.state.rollupState = 'PENDING'
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertOutput(context, result, 'type', 'deploy')
+        assertOutput(context, result, 'commit_status', 'PENDING')
+        assertNoDeployment(context, result)
+        assertCommentIncludes(context, 'CI checks must be passing')
+      })
+  },
+  {
+    name: 'outdated branch warn mode rejects',
+    run: () =>
+      withMockGitHub('outdated branch warn mode rejects', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.mergeStateStatus = 'BEHIND'
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertOutput(context, result, 'is_outdated', 'true')
+        assertNoDeployment(context, result)
+        assertCommentIncludes(context, 'branch is behind the base branch')
+      })
+  },
+  {
+    name: 'outdated branch disabled mode continues',
+    run: () =>
+      withMockGitHub(
+        'outdated branch disabled mode continues',
+        async context => {
+          setTriggerComment(context.state, '.deploy')
+          context.state.mergeStateStatus = 'BEHIND'
+
+          const result = await runMain(context, {update_branch: 'disabled'})
+
+          assertExit(context, result, 0)
+          assertReason(context, result, 'deployment_ready')
+          assertOutput(context, result, 'is_outdated', 'true')
+          assertOutput(context, result, 'merge_state_status', 'BEHIND')
+        }
+      )
+  },
+  {
+    name: 'outdated branch force update exits',
+    run: () =>
+      withMockGitHub('outdated branch force update exits', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.mergeStateStatus = 'BEHIND'
+
+        const result = await runMain(context, {update_branch: 'force'})
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertNoDeployment(context, result)
+        assertCommentIncludes(context, 'updated your branch with `main`')
+      })
+  },
+  {
+    name: 'dirty merge state rejects',
+    run: () =>
+      withMockGitHub('dirty merge state rejects', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.mergeStateStatus = 'DIRTY'
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertOutput(context, result, 'merge_state_status', 'DIRTY')
+        assertNoDeployment(context, result)
+        assertCommentIncludes(
+          context,
+          'A merge commit cannot be cleanly created'
+        )
+      })
+  },
+  {
+    name: 'deleted branch rejection',
+    run: () =>
+      withMockGitHub('deleted branch rejection', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.branches.delete('feature-branch')
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertNoDeployment(context, result)
+        assertCommentIncludes(
+          context,
+          'The branch for this pull request no longer exists'
+        )
+      })
+  },
+  {
+    name: 'graphql commit mismatch rejection',
+    run: () =>
+      withMockGitHub('graphql commit mismatch rejection', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.graphqlCommitOid = ACCEPTANCE_SHAS.default
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertNoDeployment(context, result)
+        assertCommentIncludes(context, 'does not match the commit sha')
+      })
+  },
+  {
+    name: 'exact SHA rejected without opt-in',
+    run: () =>
+      withMockGitHub('exact SHA rejected without opt-in', async context => {
+        setTriggerComment(context.state, `.deploy ${ACCEPTANCE_SHAS.default}`)
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertNoDeployment(context, result)
+        assertCommentIncludes(context, 'sha deployments have not been enabled')
+      })
+  },
+  {
+    name: 'exact SHA explicit opt-in',
+    run: () =>
+      withMockGitHub('exact SHA explicit opt-in', async context => {
+        setTriggerComment(context.state, `.deploy ${ACCEPTANCE_SHAS.default}`)
+
+        const result = await runMain(context, {allow_sha_deployments: 'true'})
+
+        assertExit(context, result, 0)
+        assertReason(context, result, 'deployment_ready')
+        assertOutput(context, result, 'sha_deployment', ACCEPTANCE_SHAS.default)
+        assertOutput(context, result, 'ref', ACCEPTANCE_SHAS.default)
+        assertOutput(context, result, 'sha', ACCEPTANCE_SHAS.default)
+        assert.equal(requireDeployment(context).ref, ACCEPTANCE_SHAS.default)
+      })
+  },
+  {
+    name: 'required checks ignore optional failure',
+    run: () =>
+      withMockGitHub(
+        'required checks ignore optional failure',
+        async context => {
+          setTriggerComment(context.state, '.deploy')
+          context.state.rollupState = 'FAILURE'
+          context.state.rollupContexts = [
+            {
+              conclusion: 'SUCCESS',
+              isRequired: true,
+              name: 'acceptance',
+              type: 'check-run'
+            },
+            {
+              conclusion: 'FAILURE',
+              isRequired: false,
+              name: 'optional-lint',
+              type: 'check-run'
+            }
+          ]
+
+          const result = await runMain(context, {checks: 'required'})
+
+          assertExit(context, result, 0)
+          assertReason(context, result, 'deployment_ready')
+          assertOutput(context, result, 'commit_status', 'SUCCESS')
+        }
+      )
+  },
+  {
+    name: 'ignored failing check allows all checks',
+    run: () =>
+      withMockGitHub(
+        'ignored failing check allows all checks',
+        async context => {
+          setTriggerComment(context.state, '.deploy')
+          context.state.rollupState = 'FAILURE'
+          context.state.rollupContexts = [
+            {
+              conclusion: 'SUCCESS',
+              isRequired: true,
+              name: 'acceptance',
+              type: 'check-run'
+            },
+            {
+              conclusion: 'FAILURE',
+              isRequired: true,
+              name: 'flaky-ci',
+              type: 'check-run'
+            }
+          ]
+
+          const result = await runMain(context, {ignored_checks: 'flaky-ci'})
+
+          assertExit(context, result, 0)
+          assertReason(context, result, 'deployment_ready')
+          assertOutput(context, result, 'commit_status', 'SUCCESS')
+        }
+      )
+  },
+  {
+    name: 'explicit check list missing check',
+    run: () =>
+      withMockGitHub('explicit check list missing check', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.rollupContexts = [
+          {
+            conclusion: 'SUCCESS',
+            isRequired: true,
+            name: 'security',
+            type: 'check-run'
+          }
+        ]
+
+        const result = await runMain(context, {checks: 'security,build'})
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertOutput(context, result, 'commit_status', 'MISSING')
+        assertNoDeployment(context, result)
+        assertCommentIncludes(context, 'following checks are missing: `build`')
+      })
+  },
+  {
+    name: 'status context explicit check passes',
+    run: () =>
+      withMockGitHub('status context explicit check passes', async context => {
+        setTriggerComment(context.state, '.deploy')
+        context.state.rollupContexts = [
+          {
+            context: 'legacy-ci',
+            isRequired: true,
+            state: 'SUCCESS',
+            type: 'status-context'
+          }
+        ]
+
+        const result = await runMain(context, {checks: 'legacy-ci'})
+
+        assertExit(context, result, 0)
+        assertReason(context, result, 'deployment_ready')
+        assertOutput(context, result, 'commit_status', 'SUCCESS')
       })
   },
   {

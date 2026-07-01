@@ -74,6 +74,20 @@ export interface MockRouteLog {
   readonly path: string
 }
 
+export type MockRollupContext =
+  | {
+      readonly conclusion: string
+      readonly isRequired: boolean
+      readonly name: string
+      readonly type: 'check-run'
+    }
+  | {
+      readonly context: string
+      readonly isRequired: boolean
+      readonly state: string
+      readonly type: 'status-context'
+    }
+
 export interface MockGitHubState {
   branchRules: readonly unknown[]
   branches: Map<string, MockBranch>
@@ -83,6 +97,7 @@ export interface MockGitHubState {
   confirmationReaction: '+1' | '-1' | null
   deployments: MockDeployment[]
   failInitialReaction: boolean
+  graphqlCommitOid: string | null
   labels: Set<string>
   mergeStateStatus: string
   nextCommentId: number
@@ -99,6 +114,7 @@ export interface MockGitHubState {
   repositoryDefaultBranch: string
   reviewDecision: string | null
   rollupAvailable: boolean
+  rollupContexts: readonly MockRollupContext[]
   rollupState: string | null
 }
 

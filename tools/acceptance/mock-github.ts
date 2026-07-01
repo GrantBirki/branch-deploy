@@ -11,6 +11,7 @@ import type {
   MockDeploymentStatus,
   MockGitHubState,
   MockReaction,
+  MockRollupContext,
   MockRouteLog
 } from './types.ts'
 
@@ -152,6 +153,7 @@ export function createMockState(): MockGitHubState {
     confirmationReaction: null,
     deployments: [],
     failInitialReaction: false,
+    graphqlCommitOid: null,
     labels: new Set(),
     mergeStateStatus: 'CLEAN',
     nextCommentId: 2000,
@@ -178,6 +180,14 @@ export function createMockState(): MockGitHubState {
     repositoryDefaultBranch: defaultBranch,
     reviewDecision: 'APPROVED',
     rollupAvailable: true,
+    rollupContexts: [
+      {
+        conclusion: 'SUCCESS',
+        isRequired: true,
+        name: 'acceptance',
+        type: 'check-run'
+      }
+    ],
     rollupState: 'SUCCESS'
   }
 }
@@ -295,19 +305,29 @@ function checkRollup(state: MockGitHubState): unknown {
   return {
     state: state.rollupState,
     contexts: {
-      nodes: [
-        {
-          __typename: 'CheckRun',
-          conclusion: state.rollupState,
-          isRequired: true,
-          name: 'acceptance'
-        }
-      ],
+      nodes: state.rollupContexts.map(rollupContextResponse),
       pageInfo: {
         endCursor: null,
         hasNextPage: false
       }
     }
+  }
+}
+
+function rollupContextResponse(context: MockRollupContext): unknown {
+  if (context.type === 'check-run') {
+    return {
+      __typename: 'CheckRun',
+      conclusion: context.conclusion,
+      isRequired: context.isRequired,
+      name: context.name
+    }
+  }
+  return {
+    __typename: 'StatusContext',
+    context: context.context,
+    isRequired: context.isRequired,
+    state: context.state
   }
 }
 
@@ -326,7 +346,7 @@ function prechecksGraphql(state: MockGitHubState): unknown {
               {
                 commit: {
                   id: 'C_acceptance',
-                  oid: state.pullRequest.headSha,
+                  oid: state.graphqlCommitOid ?? state.pullRequest.headSha,
                   statusCheckRollup: checkRollup(state)
                 }
               }
