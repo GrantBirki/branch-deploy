@@ -295,7 +295,9 @@ export async function* reportCoverage(
     throw new Error(`coverage policy failed:\n${diagnostics.join('\n')}`)
   }
 
-  yield `coverage policy: ${expectedSources.length} executable source files have 100% line, branch, and function coverage\n`
+  if (scope === 'unit') {
+    yield `coverage policy: ${expectedSources.length} executable source files have 100% line, branch, and function coverage\n`
+  }
 }
 
 async function* replayEvents(

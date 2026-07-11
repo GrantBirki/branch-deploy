@@ -219,9 +219,7 @@ test('uses the acceptance coverage scope from the environment', async context =>
       ),
       root
     ),
-    [
-      'coverage policy: 1 executable source files have 100% line, branch, and function coverage\n'
-    ]
+    []
   )
 })
 
