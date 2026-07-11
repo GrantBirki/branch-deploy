@@ -10,6 +10,7 @@ import type {
   MockCommit,
   MockDeployment,
   MockDeploymentStatus,
+  MockFault,
   MockGitHubState,
   MockReaction,
   MockRollupContext,
@@ -89,6 +90,22 @@ function requireStringArray(
   return value
 }
 
+function requireBoolean(record: Record<string, unknown>, key: string): boolean {
+  const value = record[key]
+  if (typeof value !== 'boolean') {
+    throw new Error(`expected boolean field: ${key}`)
+  }
+  return value
+}
+
+function requireNumber(record: Record<string, unknown>, key: string): number {
+  const value = record[key]
+  if (typeof value !== 'number') {
+    throw new Error(`expected number field: ${key}`)
+  }
+  return value
+}
+
 function part(parts: readonly string[], index: number): string {
   const value = parts[index]
   if (value === undefined) {
@@ -138,12 +155,19 @@ export function mockErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-export function createMockState(): MockGitHubState {
-  lockFiles.clear()
-  blobs.clear()
-  trees.clear()
-  commitsToTrees.clear()
+export function mockHeaderValue(
+  value: readonly string[] | string | undefined
+): string {
+  if (typeof value === 'string') {
+    return value
+  }
+  if (value === undefined) {
+    return ''
+  }
+  return value.join(',')
+}
 
+export function createMockState(): MockGitHubState {
   const branches = new Map<string, MockBranch>()
   branches.set(defaultBranch, createBranch(defaultBranch, defaultSha))
   branches.set('feature-branch', createBranch('feature-branch', featureSha))
@@ -159,6 +183,7 @@ export function createMockState(): MockGitHubState {
   )
 
   return {
+    blobs: new Map(),
     branchRules: [],
     branches,
     comments: [
@@ -168,12 +193,15 @@ export function createMockState(): MockGitHubState {
       }
     ],
     commits,
+    commitsToTrees: new Map(),
     comparisonBehindBy: 0,
     confirmationReaction: null,
     deployments: [],
     failInitialReaction: false,
+    faults: [],
     graphqlCommitOid: null,
     labels: new Set(),
+    lockFiles: new Map(),
     mergeStateStatus: 'CLEAN',
     nextCommentId: 2000,
     nextDeploymentId: 3000,
@@ -207,8 +235,20 @@ export function createMockState(): MockGitHubState {
         type: 'check-run'
       }
     ],
-    rollupState: 'SUCCESS'
+    rollupState: 'SUCCESS',
+    trees: new Map()
   }
+}
+
+export function queueFault(state: MockGitHubState, fault: MockFault): void {
+  state.faults.push(fault)
+}
+
+export function mockLockContents(
+  state: MockGitHubState,
+  branch: string
+): string | undefined {
+  return state.lockFiles.get(lockFileKey(state, branch))
 }
 
 export function setTriggerComment(state: MockGitHubState, body: string): void {
@@ -245,10 +285,8 @@ export function seedLock(
   state.commits.set(branchShaValue, createCommit(branchShaValue, true))
   state.comments.push({body: JSON.stringify(lock), id: state.nextCommentId})
   state.nextCommentId += 1
-  lockFiles.set(lockFileKey(state, branchName), JSON.stringify(lock))
+  state.lockFiles.set(lockFileKey(state, branchName), JSON.stringify(lock))
 }
-
-const lockFiles = new Map<string, string>()
 
 function lockFileKey(state: MockGitHubState, branch: string): string {
   return `${state.owner}/${state.repo}/${branch}/lock.json`
@@ -424,14 +462,31 @@ function routeGraphql(
 ): JsonResponse {
   const query = requireString(body, 'query')
   const variables = isRecord(body['variables']) ? body['variables'] : {}
-  if (query.includes('pullRequest(number:$number)')) {
+  const normalizedQuery = query.replace(/\s+/gu, ' ')
+  if (
+    normalizedQuery.includes('pullRequest(number:$number)') &&
+    normalizedQuery.includes('statusCheckRollup')
+  ) {
+    if (
+      requireString(variables, 'owner') !== state.owner ||
+      requireString(variables, 'name') !== state.repo ||
+      requireNumber(variables, 'number') !== state.pullRequest.number
+    ) {
+      throw new Error('unexpected prechecks GraphQL variables')
+    }
     return {status: 200, value: prechecksGraphql(state)}
   }
-  if (query.includes('deployments(environments:')) {
-    const environment =
-      typeof variables['environment'] === 'string'
-        ? variables['environment']
-        : 'production'
+  if (
+    normalizedQuery.includes('deployments(environments:') &&
+    normalizedQuery.includes('orderBy: { field: CREATED_AT')
+  ) {
+    if (
+      requireString(variables, 'repo_owner') !== state.owner ||
+      requireString(variables, 'repo_name') !== state.repo
+    ) {
+      throw new Error('unexpected deployment GraphQL repository variables')
+    }
+    const environment = requireString(variables, 'environment')
     return {status: 200, value: deploymentGraphql(state, environment)}
   }
   return unknownRoute('POST', '/graphql')
@@ -469,6 +524,12 @@ function createDeployment(
 ): MockDeployment {
   const ref = requireString(body, 'ref')
   const environment = requireString(body, 'environment')
+  requireBoolean(body, 'auto_merge')
+  requireBoolean(body, 'production_environment')
+  requireStringArray(body, 'required_contexts')
+  if (!isRecord(body['payload'])) {
+    throw new Error('expected object field: payload')
+  }
   const deployment = {
     createdAt: '2026-01-01T00:20:00Z',
     environment,
@@ -530,9 +591,35 @@ function createGitObjectSha(state: MockGitHubState): string {
   return sha
 }
 
-const blobs = new Map<string, string>()
-const trees = new Map<string, string>()
-const commitsToTrees = new Map<string, string>()
+function consumeFault(
+  state: MockGitHubState,
+  method: string,
+  path: string
+): JsonResponse | undefined {
+  const fault = state.faults.find(
+    fault => fault.method === method && fault.path === path
+  )
+  if (fault === undefined) {
+    return undefined
+  }
+  state.faults.splice(state.faults.indexOf(fault), 1)
+  if (fault.seedLock !== undefined) {
+    const sha = createGitObjectSha(state)
+    state.branches.set(
+      fault.seedLock.branch,
+      createBranch(fault.seedLock.branch, sha)
+    )
+    state.commits.set(sha, createCommit(sha, true))
+    state.lockFiles.set(
+      lockFileKey(state, fault.seedLock.branch),
+      fault.seedLock.contents
+    )
+  }
+  return {
+    status: fault.response.status,
+    value: {message: fault.response.message}
+  }
+}
 
 function routeRest(
   state: MockGitHubState,
@@ -557,48 +644,72 @@ function routeRest(
 
   const area = part(parts, 3)
 
-  if (area === 'collaborators' && method === 'GET') {
+  if (
+    area === 'collaborators' &&
+    method === 'GET' &&
+    parts.length === 6 &&
+    part(parts, 5) === 'permission'
+  ) {
     return {status: 200, value: {permission: state.permission}}
   }
 
   if (
     area === 'pulls' &&
     method === 'PUT' &&
+    parts.length === 6 &&
+    Number(part(parts, 4)) === state.pullRequest.number &&
     part(parts, 5) === 'update-branch'
   ) {
     return {status: 202, value: {}}
   }
 
-  if (area === 'pulls' && method === 'GET' && parts.length === 5) {
+  if (
+    area === 'pulls' &&
+    method === 'GET' &&
+    parts.length === 5 &&
+    Number(part(parts, 4)) === state.pullRequest.number
+  ) {
     return {status: 200, value: pullResponse(state)}
   }
 
-  if (area === 'branches' && method === 'GET') {
+  if (area === 'branches' && method === 'GET' && parts.length === 5) {
     const branch = state.branches.get(part(parts, 4))
     return branch === undefined
       ? notFound('Branch not found')
       : {status: 200, value: branchResponse(branch)}
   }
 
-  if (area === 'rules' && method === 'GET') {
+  if (
+    area === 'rules' &&
+    method === 'GET' &&
+    parts.length === 6 &&
+    part(parts, 4) === 'branches'
+  ) {
     return {status: 200, value: state.branchRules}
   }
 
-  if (area === 'compare' && method === 'GET') {
+  if (
+    area === 'compare' &&
+    method === 'GET' &&
+    parts.length === 5 &&
+    part(parts, 4).includes('...')
+  ) {
     return {status: 200, value: {behind_by: state.comparisonBehindBy}}
   }
 
-  if (area === 'commits' && method === 'GET') {
+  if (area === 'commits' && method === 'GET' && parts.length === 5) {
     const commit = state.commits.get(part(parts, 4))
     return commit === undefined
       ? notFound('Commit not found')
       : {status: 200, value: commitResponse(commit)}
   }
 
-  if (area === 'contents' && method === 'GET') {
+  if (area === 'contents' && method === 'GET' && parts.length >= 5) {
     const ref = searchParams.get('ref') ?? state.repositoryDefaultBranch
     const path = parts.slice(4).map(decodeURIComponent).join('/')
-    const content = lockFiles.get(`${state.owner}/${state.repo}/${ref}/${path}`)
+    const content = state.lockFiles.get(
+      `${state.owner}/${state.repo}/${ref}/${path}`
+    )
     return content === undefined
       ? notFound('Not Found')
       : {
@@ -632,7 +743,12 @@ function routeIssues(
   parts: readonly string[],
   body: Record<string, unknown>
 ): JsonResponse {
-  if (method === 'POST' && part(parts, 5) === 'comments') {
+  if (
+    method === 'POST' &&
+    parts.length === 6 &&
+    Number(part(parts, 4)) === state.pullRequest.number &&
+    part(parts, 5) === 'comments'
+  ) {
     const comment = {
       body: requireString(body, 'body'),
       id: state.nextCommentId
@@ -642,9 +758,9 @@ function routeIssues(
     return {status: 201, value: {id: comment.id, body: comment.body}}
   }
 
-  if (part(parts, 4) === 'comments') {
+  if (part(parts, 4) === 'comments' && parts.length >= 6) {
     const commentId = Number(part(parts, 5))
-    if (method === 'PATCH') {
+    if (method === 'PATCH' && parts.length === 6) {
       const comment = state.comments.find(item => item.id === commentId)
       if (comment === undefined) {
         return notFound('Comment not found')
@@ -653,8 +769,8 @@ function routeIssues(
       state.comments.splice(state.comments.indexOf(comment), 1, updated)
       return {status: 200, value: {id: updated.id, body: updated.body}}
     }
-    if (part(parts, 6) === 'reactions') {
-      if (method === 'POST') {
+    if (parts.length >= 7 && part(parts, 6) === 'reactions') {
+      if (method === 'POST' && parts.length === 7) {
         if (state.failInitialReaction && !state.reactionFailureConsumed) {
           state.reactionFailureConsumed = true
           return {status: 500, value: {message: 'reaction unavailable'}}
@@ -666,7 +782,7 @@ function routeIssues(
         )
         return {status: 201, value: issueCommentReactionResponse(reaction)}
       }
-      if (method === 'GET') {
+      if (method === 'GET' && parts.length === 7) {
         const existing = state.reactions.filter(
           reaction => reaction.commentId === commentId
         )
@@ -686,7 +802,7 @@ function routeIssues(
           value: existing.map(issueCommentReactionResponse)
         }
       }
-      if (method === 'DELETE') {
+      if (method === 'DELETE' && parts.length === 8) {
         const reactionId = Number(part(parts, 7))
         const index = state.reactions.findIndex(
           reaction => reaction.id === reactionId
@@ -699,14 +815,17 @@ function routeIssues(
     }
   }
 
-  if (part(parts, 5) === 'labels') {
-    if (method === 'GET') {
+  if (
+    Number(part(parts, 4)) === state.pullRequest.number &&
+    part(parts, 5) === 'labels'
+  ) {
+    if (method === 'GET' && parts.length === 6) {
       return {
         status: 200,
         value: [...state.labels].map(name => ({name}))
       }
     }
-    if (method === 'POST') {
+    if (method === 'POST' && parts.length === 6) {
       for (const label of requireStringArray(body, 'labels')) {
         state.labels.add(label)
       }
@@ -715,7 +834,7 @@ function routeIssues(
         value: [...state.labels].map(name => ({name}))
       }
     }
-    if (method === 'DELETE') {
+    if (method === 'DELETE' && parts.length === 7) {
       state.labels.delete(part(parts, 6))
       return {status: 200, value: {}}
     }
@@ -731,45 +850,63 @@ function routeGit(
   body: Record<string, unknown>
 ): JsonResponse {
   const resource = part(parts, 4)
-  if (method === 'POST' && resource === 'blobs') {
+  if (method === 'POST' && resource === 'blobs' && parts.length === 5) {
+    if (requireString(body, 'encoding') !== 'utf-8') {
+      throw new Error('expected lock blob encoding: utf-8')
+    }
     const sha = createGitObjectSha(state)
-    blobs.set(sha, requireString(body, 'content'))
+    state.blobs.set(sha, requireString(body, 'content'))
     return {status: 201, value: {sha}}
   }
-  if (method === 'POST' && resource === 'trees') {
+  if (method === 'POST' && resource === 'trees' && parts.length === 5) {
+    requireString(body, 'base_tree')
     const treeItems = body['tree']
     if (!Array.isArray(treeItems) || !isRecord(treeItems[0])) {
       throw new Error('expected tree item')
     }
+    if (
+      treeItems[0]['path'] !== 'lock.json' ||
+      treeItems[0]['mode'] !== '100644' ||
+      treeItems[0]['type'] !== 'blob'
+    ) {
+      throw new Error('unexpected lock tree item')
+    }
     const sha = requireString(treeItems[0], 'sha')
     const treeShaValue = createGitObjectSha(state)
-    trees.set(treeShaValue, sha)
+    state.trees.set(treeShaValue, sha)
     return {status: 201, value: {sha: treeShaValue}}
   }
-  if (method === 'POST' && resource === 'commits') {
+  if (method === 'POST' && resource === 'commits' && parts.length === 5) {
     const commitSha = createGitObjectSha(state)
+    requireString(body, 'message')
     const treeShaValue = requireString(body, 'tree')
-    commitsToTrees.set(commitSha, treeShaValue)
+    requireStringArray(body, 'parents')
+    state.commitsToTrees.set(commitSha, treeShaValue)
     state.commits.set(commitSha, createCommit(commitSha, true))
     return {status: 201, value: {sha: commitSha}}
   }
-  if (method === 'POST' && resource === 'refs') {
+  if (method === 'POST' && resource === 'refs' && parts.length === 5) {
     const ref = requireString(body, 'ref').replace('refs/heads/', '')
     const sha = requireString(body, 'sha')
     if (state.branches.has(ref)) {
       return {status: 422, value: {message: 'Reference already exists'}}
     }
     state.branches.set(ref, createBranch(ref, sha))
-    const treeShaValue = commitsToTrees.get(sha)
+    const treeShaValue = state.commitsToTrees.get(sha)
     const blobSha =
-      treeShaValue === undefined ? undefined : trees.get(treeShaValue)
-    const content = blobSha === undefined ? undefined : blobs.get(blobSha)
+      treeShaValue === undefined ? undefined : state.trees.get(treeShaValue)
+    const content = blobSha === undefined ? undefined : state.blobs.get(blobSha)
     if (content !== undefined) {
-      lockFiles.set(lockFileKey(state, ref), content)
+      state.lockFiles.set(lockFileKey(state, ref), content)
     }
     return {status: 201, value: {ref: `refs/heads/${ref}`, object: {sha}}}
   }
-  if (method === 'DELETE' && resource === 'refs') {
+  if (
+    method === 'DELETE' &&
+    resource === 'refs' &&
+    parts.length === 6 &&
+    part(parts, 5).startsWith('heads/')
+  ) {
     const ref = parts
       .slice(5)
       .map(decodeURIComponent)
@@ -779,7 +916,7 @@ function routeGit(
       return {status: 422, value: {message: 'Reference does not exist'}}
     }
     state.branches.delete(ref)
-    lockFiles.delete(lockFileKey(state, ref))
+    state.lockFiles.delete(lockFileKey(state, ref))
     return {status: 204}
   }
   return unknownRoute(method, `/${parts.join('/')}`)
@@ -812,7 +949,11 @@ function routeDeployments(
     const deployment = createDeployment(state, body)
     return {status: 201, value: deploymentResponse(state, deployment)}
   }
-  if (method === 'POST' && part(parts, 5) === 'statuses') {
+  if (
+    method === 'POST' &&
+    parts.length === 6 &&
+    part(parts, 5) === 'statuses'
+  ) {
     const deploymentId = Number(part(parts, 4))
     const status = createDeploymentStatus(state, deploymentId, body)
     return {status: 201, value: statusResponse(status)}
@@ -880,6 +1021,7 @@ export async function startMockGitHub(
   return {
     close: () =>
       new Promise<void>((resolve, reject) => {
+        server.closeAllConnections()
         server.close(error => {
           const actions = {
             reject,
@@ -904,14 +1046,25 @@ async function handleRequest(
 ): Promise<void> {
   const method = String(request.method)
   const url = new URL(String(request.url), 'http://127.0.0.1')
-  const rawBody = await readBody(request)
-  routeLog.push({body: rawBody, method, path: url.pathname})
   try {
+    const rawBody = await readBody(request)
+    routeLog.push({
+      accept: mockHeaderValue(request.headers['accept']),
+      apiVersion: mockHeaderValue(request.headers['x-github-api-version']),
+      authorizationPresent: request.headers['authorization'] !== undefined,
+      body: rawBody,
+      method,
+      path: url.pathname,
+      query: url.search,
+      userAgent: mockHeaderValue(request.headers['user-agent'])
+    })
     const body = parseJson(rawBody)
+    const fault = consumeFault(state, method, url.pathname)
     const result =
-      url.pathname === '/graphql'
+      fault ??
+      (url.pathname === '/graphql'
         ? routeGraphql(state, body)
-        : routeRest(state, method, url.pathname, url.searchParams, body)
+        : routeRest(state, method, url.pathname, url.searchParams, body))
     writeResponse(response, result)
   } catch (error) {
     writeResponse(response, {

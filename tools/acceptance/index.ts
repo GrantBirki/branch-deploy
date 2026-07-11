@@ -4,13 +4,16 @@ import {
   ACCEPTANCE_SHAS,
   createMockState,
   mockErrorMessage,
+  mockHeaderValue,
+  mockLockContents,
   mockServerCloseAction,
   mockServerPort,
+  queueFault,
   seedLock,
   setTriggerComment,
   startMockGitHub
 } from './mock-github.ts'
-import {runAction} from './runner.ts'
+import {runAcceptanceProcess, runAction} from './runner.ts'
 import type {
   AcceptanceRunResult,
   MockDeployment,
@@ -34,14 +37,71 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function requireRecordValue(
+  value: unknown,
+  message: string
+): Record<string, unknown> {
+  assert.ok(isRecord(value), message)
+  return value
+}
+
+function requireRoute(
+  context: ScenarioContext,
+  method: string,
+  path: string,
+  occurrence = 0
+): MockRouteLog {
+  const route = context.routeLog.filter(
+    item => item.method === method && item.path === path
+  )[occurrence]
+  assert.ok(route !== undefined, diagnostics(context))
+  return route
+}
+
+function routeBody(
+  context: ScenarioContext,
+  method: string,
+  path: string,
+  occurrence = 0
+): Record<string, unknown> {
+  const route = requireRoute(context, method, path, occurrence)
+  return requireRecordValue(JSON.parse(route.body), diagnostics(context))
+}
+
+function requireMockLock(
+  context: ScenarioContext,
+  branch: string
+): Record<string, unknown> {
+  const contents = mockLockContents(context.state, branch)
+  assert.ok(contents !== undefined, diagnostics(context))
+  return requireRecordValue(JSON.parse(contents), diagnostics(context))
+}
+
 function lockBranch(environment: string): string {
   return `${environment}-branch-deploy-lock`
 }
 
+function apiPath(path: string): string {
+  return `/repos/${ACCEPTANCE_REPOSITORY.owner}/${ACCEPTANCE_REPOSITORY.repo}${path}`
+}
+
+function restoreEnvironment(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name]
+  } else {
+    process.env[name] = value
+  }
+}
+
 function routeLogForDiagnostics(routeLog: readonly MockRouteLog[]): unknown {
   return routeLog.map(route => ({
+    accept: route.accept,
+    apiVersion: route.apiVersion,
+    authorizationPresent: route.authorizationPresent,
     method: route.method,
     path: route.path,
+    query: route.query,
+    userAgent: route.userAgent,
     body: route.body === '' ? '' : route.body.slice(0, 500)
   }))
 }
@@ -61,6 +121,7 @@ function stateForDiagnostics(state: MockGitHubState): unknown {
       statuses: deployment.statuses.map(status => status.state)
     })),
     labels: [...state.labels].sort(),
+    lockFiles: [...state.lockFiles.keys()].sort(),
     pullRequest: state.pullRequest,
     reactions: state.reactions.map(reaction => ({
       commentId: reaction.commentId,
@@ -273,9 +334,11 @@ async function withMockGitHub(
 
 function runMain(
   context: ScenarioContext,
-  inputs: Readonly<Record<string, string>> = {}
+  inputs: Readonly<Record<string, string>> = {},
+  actor = 'GrantBirki'
 ): Promise<AcceptanceRunResult> {
   return runAction({
+    actor,
     inputs,
     mode: 'main',
     port: context.port,
@@ -289,9 +352,11 @@ function runPost(
   context: ScenarioContext,
   mainResult: AcceptanceRunResult,
   inputs: Readonly<Record<string, string>> = {},
-  status: 'failure' | 'success' = 'success'
+  status: 'failure' | 'success' = 'success',
+  actor = 'GrantBirki'
 ): Promise<AcceptanceRunResult> {
   return runAction({
+    actor,
     inputs,
     mode: 'post',
     port: context.port,
@@ -339,6 +404,20 @@ const scenarios = [
         assertOutput(context, result, 'type', 'help')
         assertCommentIncludes(context, '## 📚 Branch Deployment Help')
         assertReaction(context, '+1')
+
+        const routeCount = context.routeLog.length
+        const postResult = await runPost(context, result)
+        assertExit(context, postResult, 0)
+        assert.equal(
+          context.routeLog.length,
+          routeCount,
+          diagnostics(context, postResult)
+        )
+        assert.equal(
+          postResult.stdout.includes('bypass'),
+          true,
+          diagnostics(context, postResult)
+        )
       })
   },
   {
@@ -409,6 +488,45 @@ const scenarios = [
           true,
           diagnostics(context, mainResult)
         )
+        const graphqlRoute = requireRoute(context, 'POST', '/graphql')
+        assert.equal(graphqlRoute.authorizationPresent, true)
+        assert.equal(
+          graphqlRoute.accept,
+          'application/vnd.github.merge-info-preview+json'
+        )
+        assert.equal(
+          graphqlRoute.userAgent.includes('github/branch-deploy@'),
+          true
+        )
+        const deploymentBody = routeBody(
+          context,
+          'POST',
+          apiPath('/deployments')
+        )
+        const deploymentRoute = requireRoute(
+          context,
+          'POST',
+          apiPath('/deployments')
+        )
+        assert.equal(deploymentRoute.apiVersion, '2022-11-28')
+        assert.equal(deploymentBody['ref'], 'feature-branch')
+        assert.equal(deploymentBody['environment'], 'production')
+        assert.equal(deploymentBody['auto_merge'], true)
+        assert.equal(deploymentBody['production_environment'], true)
+        assert.deepEqual(deploymentBody['required_contexts'], [])
+        const payload = requireRecordValue(
+          deploymentBody['payload'],
+          diagnostics(context, mainResult)
+        )
+        assert.equal(payload['type'], 'branch-deploy')
+        assert.equal(payload['sha'], ACCEPTANCE_SHAS.feature)
+        const statusBody = routeBody(
+          context,
+          'POST',
+          apiPath(`/deployments/${String(deployment.id)}/statuses`)
+        )
+        assert.equal(statusBody['state'], 'in_progress')
+        assert.equal(statusBody['environment'], 'production')
 
         const postResult = await runPost(context, mainResult, inputs)
 
@@ -423,6 +541,302 @@ const scenarios = [
           diagnostics(context, postResult)
         )
         assert.equal(context.state.labels.has('deploy-success'), true)
+      })
+  },
+  {
+    name: 'failed deploy post lifecycle',
+    run: () =>
+      withMockGitHub('failed deploy post lifecycle', async context => {
+        setTriggerComment(context.state, '.deploy')
+        const inputs = {
+          failed_deploy_labels: 'deploy-failed',
+          sticky_locks: 'true',
+          successful_deploy_labels: 'deploy-success'
+        }
+        const mainResult = await runMain(context, inputs)
+        assertExit(context, mainResult, 0)
+
+        const deployment = requireDeployment(context)
+        const postResult = await runPost(context, mainResult, inputs, 'failure')
+
+        assertExit(context, postResult, 0)
+        assert.equal(
+          requireDeploymentStatus(context, deployment, 1).state,
+          'failure'
+        )
+        assert.equal(context.state.labels.has('deploy-failed'), true)
+        assert.equal(context.state.labels.has('deploy-success'), false)
+        assert.equal(
+          context.state.branches.has(lockBranch('production')),
+          true,
+          diagnostics(context, postResult)
+        )
+        assertCommentIncludes(context, '"status": "failure"')
+        assertReaction(context, '-1')
+      })
+  },
+  {
+    name: 'failed noop post lifecycle',
+    run: () =>
+      withMockGitHub('failed noop post lifecycle', async context => {
+        setTriggerComment(context.state, '.noop')
+        const inputs = {
+          failed_noop_labels: 'noop-failed',
+          successful_noop_labels: 'noop-success'
+        }
+        const mainResult = await runMain(context, inputs)
+        assertExit(context, mainResult, 0)
+
+        const postResult = await runPost(context, mainResult, inputs, 'failure')
+
+        assertExit(context, postResult, 0)
+        assert.equal(context.state.labels.has('noop-failed'), true)
+        assert.equal(context.state.labels.has('noop-success'), false)
+        assert.equal(
+          context.state.branches.has(lockBranch('production')),
+          false,
+          diagnostics(context, postResult)
+        )
+        assertCommentIncludes(context, '"status": "failure"')
+        assertReaction(context, '-1')
+      })
+  },
+  {
+    name: 'post skip completing',
+    run: () =>
+      withMockGitHub('post skip completing', async context => {
+        setTriggerComment(context.state, '.deploy')
+        const inputs = {skip_completing: 'true'}
+        const mainResult = await runMain(context, inputs)
+        assertExit(context, mainResult, 0)
+        const deployment = requireDeployment(context)
+        const routeCount = context.routeLog.length
+
+        const postResult = await runPost(context, mainResult, inputs)
+
+        assertExit(context, postResult, 0)
+        assert.equal(context.routeLog.length, routeCount)
+        assert.equal(deployment.statuses.length, 1)
+        assert.equal(
+          context.state.branches.has(lockBranch('production')),
+          true,
+          diagnostics(context, postResult)
+        )
+        assert.equal(
+          postResult.stdout.includes('skip_completing'),
+          true,
+          diagnostics(context, postResult)
+        )
+      })
+  },
+  {
+    name: 'post missing state fails',
+    run: () =>
+      withMockGitHub('post missing state fails', async context => {
+        setTriggerComment(context.state, '.deploy')
+        const mainResult = await runMain(context)
+        assertExit(context, mainResult, 0)
+        const routeCount = context.routeLog.length
+        const incompleteMainResult = {
+          ...mainResult,
+          state: {...mainResult.state, deployment_id: ''}
+        }
+
+        const postResult = await runPost(context, incompleteMainResult)
+
+        assertExit(context, postResult, 1)
+        assert.equal(context.routeLog.length, routeCount)
+        assert.equal(
+          postResult.stdout.includes('no deployment_id provided'),
+          true,
+          diagnostics(context, postResult)
+        )
+        assert.equal(requireDeployment(context).statuses.length, 1)
+        assert.equal(
+          context.state.branches.has(lockBranch('production')),
+          true,
+          diagnostics(context, postResult)
+        )
+      })
+  },
+  {
+    name: 'post API failure does not complete',
+    run: () =>
+      withMockGitHub('post API failure does not complete', async context => {
+        setTriggerComment(context.state, '.deploy')
+        const mainResult = await runMain(context)
+        assertExit(context, mainResult, 0)
+        const deployment = requireDeployment(context)
+        queueFault(context.state, {
+          method: 'POST',
+          path: apiPath(`/deployments/${String(deployment.id)}/statuses`),
+          response: {message: 'status rejected', status: 422}
+        })
+
+        const postResult = await runPost(context, mainResult)
+
+        assertExit(context, postResult, 1)
+        assert.equal(context.state.faults.length, 0)
+        assert.equal(deployment.statuses.length, 1)
+        assert.equal(context.state.labels.size, 0)
+        assert.equal(
+          context.state.branches.has(lockBranch('production')),
+          true,
+          diagnostics(context, postResult)
+        )
+        assert.equal(
+          postResult.stdout.includes('status rejected'),
+          true,
+          diagnostics(context, postResult)
+        )
+      })
+  },
+  {
+    name: 'explicit lock lifecycle',
+    run: () =>
+      withMockGitHub('explicit lock lifecycle', async context => {
+        const command = '.lock production --reason maintenance window'
+        setTriggerComment(context.state, command)
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 0)
+        assertDecision(context, result, 'complete')
+        assertReason(context, result, 'lock_acquired')
+        assertOutput(context, result, 'type', 'lock')
+        const branch = lockBranch('production')
+        const lock = requireMockLock(context, branch)
+        assert.equal(lock['schema_version'], 1)
+        assert.match(String(lock['claim_id']), /^sha256:[a-f0-9]{64}$/u)
+        assert.equal(lock['created_by'], 'GrantBirki')
+        assert.equal(lock['branch'], 'feature-branch')
+        assert.equal(lock['environment'], 'production')
+        assert.equal(lock['global'], false)
+        assert.equal(lock['sticky'], true)
+        assert.equal(lock['reason'], 'maintenance window')
+        assert.equal(lock['unlock_command'], '.unlock production')
+        const blobBody = routeBody(context, 'POST', apiPath('/git/blobs'))
+        assert.equal(blobBody['encoding'], 'utf-8')
+        assert.deepEqual(JSON.parse(String(blobBody['content'])), lock)
+
+        const rerun = await runMain(context)
+        assertExit(context, rerun, 0)
+        assertReason(context, rerun, 'lock_already_owned')
+
+        context.state.comments[0] = {body: command, id: 1001}
+        const conflict = await runMain(context, {}, 'OtherUser')
+        assertExit(context, conflict, 1)
+        assertDecision(context, conflict, 'stop')
+        assertReason(context, conflict, 'lock_conflict')
+        assertCommentIncludes(context, 'currently claimed by __GrantBirki__')
+      })
+  },
+  {
+    name: 'global lock contract',
+    run: () =>
+      withMockGitHub('global lock contract', async context => {
+        setTriggerComment(
+          context.state,
+          '.lock --global --reason release freeze'
+        )
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 0)
+        assertReason(context, result, 'lock_acquired')
+        assertOutput(context, result, 'global_lock_claimed', 'true')
+        const lock = requireMockLock(context, 'global-branch-deploy-lock')
+        assert.equal(lock['environment'], null)
+        assert.equal(lock['global'], true)
+        assert.equal(lock['sticky'], true)
+        assert.equal(lock['reason'], 'release freeze')
+        assert.equal(lock['unlock_command'], '.unlock --global')
+        assertCommentIncludes(context, 'This is a **global** deploy lock')
+      })
+  },
+  {
+    name: 'atomic lock collision',
+    run: () =>
+      withMockGitHub('atomic lock collision', async context => {
+        setTriggerComment(context.state, '.lock production')
+        const branch = lockBranch('production')
+        const winningLock = JSON.stringify({
+          schema_version: 1,
+          reason: 'other deployment',
+          branch: 'other-branch',
+          created_at: '2026-01-01T00:00:00.000Z',
+          created_by: 'OtherUser',
+          sticky: true,
+          environment: 'production',
+          global: false,
+          unlock_command: '.unlock production',
+          link: `https://github.com/${ACCEPTANCE_REPOSITORY.owner}/${ACCEPTANCE_REPOSITORY.repo}/pull/2#issuecomment-2001`,
+          claim_id:
+            'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+        })
+        queueFault(context.state, {
+          method: 'POST',
+          path: apiPath('/git/refs'),
+          response: {message: 'Reference already exists', status: 422},
+          seedLock: {branch, contents: winningLock}
+        })
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 1)
+        assertDecision(context, result, 'stop')
+        assertReason(context, result, 'lock_conflict')
+        assert.deepEqual(
+          requireMockLock(context, branch),
+          JSON.parse(winningLock)
+        )
+        assertCommentIncludes(context, 'currently claimed by __OtherUser__')
+        assert.equal(context.state.faults.length, 0)
+      })
+  },
+  {
+    name: 'ambiguous lock fails closed',
+    run: () =>
+      withMockGitHub('ambiguous lock fails closed', async context => {
+        setTriggerComment(context.state, '.lock production')
+        addBranch(context.state, lockBranch('production'))
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 1)
+        assertDecision(context, result, 'stop')
+        assertReason(context, result, 'lock_conflict')
+        assertCommentIncludes(
+          context,
+          'does not contain a readable `lock.json`'
+        )
+        assert.equal(
+          mockLockContents(context.state, lockBranch('production')),
+          undefined
+        )
+      })
+  },
+  {
+    name: 'legacy lock compatibility',
+    run: () =>
+      withMockGitHub('legacy lock compatibility', async context => {
+        const branch = lockBranch('production')
+        seedLock(context.state, 'production', 'feature-branch', 'GrantBirki', 1)
+        const legacyLock = requireMockLock(context, branch)
+        delete legacyLock['schema_version']
+        delete legacyLock['claim_id']
+        context.state.lockFiles.set(
+          `${context.state.owner}/${context.state.repo}/${branch}/lock.json`,
+          JSON.stringify(legacyLock)
+        )
+        setTriggerComment(context.state, '.wcid')
+
+        const result = await runMain(context)
+
+        assertExit(context, result, 0)
+        assertDecision(context, result, 'complete')
+        assertReason(context, result, 'lock_info_completed')
+        assertCommentIncludes(context, '- __Created By__: `GrantBirki`')
       })
   },
   {
@@ -1186,15 +1600,21 @@ const scenarios = [
           state: 'failure'
         })
         context.state.nextStatusId += 1
+        const query =
+          'query($repo_owner:String!,$repo_name:String!,$environment:String!){repository(owner:$repo_owner,name:$repo_name){deployments(environments:[$environment],first:100,after:null,orderBy: { field: CREATED_AT, direction: DESC }){nodes{id state}}}}'
+        const variables = {
+          environment: 'production',
+          repo_name: ACCEPTANCE_REPOSITORY.repo,
+          repo_owner: ACCEPTANCE_REPOSITORY.owner
+        }
 
         const result = await requestMockRoute(
           context.port,
           '/graphql',
           'POST',
           {
-            query:
-              'query($environment:String!){repository{deployments(environments:[$environment]){nodes{id}}}}',
-            variables: {environment: 'production'}
+            query,
+            variables
           }
         )
 
@@ -1210,9 +1630,8 @@ const scenarios = [
           '/graphql',
           'POST',
           {
-            query:
-              'query($environment:String!){repository{deployments(environments:[$environment]){nodes{state}}}}',
-            variables: {environment: 'staging'}
+            query,
+            variables: {...variables, environment: 'staging'}
           }
         )
         assert.equal(inactiveResult.status, 200, diagnostics(context))
@@ -1222,18 +1641,20 @@ const scenarios = [
           diagnostics(context)
         )
 
-        const defaultEnvironmentResult = await requestMockRoute(
+        const invalidVariablesResult = await requestMockRoute(
           context.port,
           '/graphql',
           'POST',
           {
-            query:
-              'query{repository{deployments(environments:[$environment]){nodes{id}}}}'
+            query,
+            variables: {environment: 'production'}
           }
         )
-        assert.equal(defaultEnvironmentResult.status, 200, diagnostics(context))
+        assert.equal(invalidVariablesResult.status, 500, diagnostics(context))
         assert.equal(
-          defaultEnvironmentResult.body.includes(ACCEPTANCE_SHAS.oldDeployment),
+          invalidVariablesResult.body.includes(
+            'expected string field: repo_owner'
+          ),
           true,
           diagnostics(context)
         )
@@ -1252,8 +1673,78 @@ const scenarios = [
       assert.equal(mockServerCloseAction(new Error('close failed')), 'reject')
       assert.equal(mockErrorMessage(new Error('message')), 'message')
       assert.equal(mockErrorMessage('string failure'), 'string failure')
+      assert.equal(mockHeaderValue('value'), 'value')
+      assert.equal(mockHeaderValue(['first', 'second']), 'first,second')
+      assert.equal(mockHeaderValue(undefined), '')
+      const environmentName = 'BRANCH_DEPLOY_ACCEPTANCE_RESTORE_TEST'
+      const previousValue = process.env[environmentName]
+      restoreEnvironment(environmentName, 'restored')
+      assert.equal(process.env[environmentName], 'restored')
+      restoreEnvironment(environmentName, undefined)
+      assert.equal(process.env[environmentName], undefined)
+      restoreEnvironment(environmentName, previousValue)
       return Promise.resolve()
     }
+  },
+  {
+    name: 'action process timeout',
+    run: async () => {
+      await assert.rejects(
+        () =>
+          runAcceptanceProcess(
+            "process.stderr.write('waiting for timeout\\n');setInterval(() => {}, 1000)",
+            {},
+            250
+          ),
+        /action process timed out after 250ms[\s\S]*waiting for timeout/u
+      )
+    }
+  },
+  {
+    name: 'runner environment isolation',
+    run: () =>
+      withMockGitHub('runner environment isolation', async context => {
+        const poisonedEnvironment = {
+          GITHUB_API_URL: process.env['GITHUB_API_URL'],
+          INPUT_TRIGGER: process.env['INPUT_TRIGGER'],
+          STATE_isPost: process.env['STATE_isPost']
+        }
+        process.env['GITHUB_API_URL'] = 'http://127.0.0.1:1'
+        process.env['INPUT_TRIGGER'] = '.poison'
+        process.env['STATE_isPost'] = 'true'
+        try {
+          setTriggerComment(context.state, '.help')
+          const result = await runMain(context)
+          assertExit(context, result, 0)
+          assertReason(context, result, 'help_completed')
+        } finally {
+          for (const [name, value] of Object.entries(poisonedEnvironment)) {
+            restoreEnvironment(name, value)
+          }
+        }
+      })
+  },
+  {
+    name: 'mock fault status matrix',
+    run: () =>
+      withMockGitHub('mock fault status matrix', async context => {
+        for (const status of [403, 404, 409, 500]) {
+          const path = apiPath(`/fault-${String(status)}`)
+          queueFault(context.state, {
+            method: 'GET',
+            path,
+            response: {message: `fault ${String(status)}`, status}
+          })
+          const result = await getMockRoute(context.port, path)
+          assert.equal(result.status, status, diagnostics(context))
+          assert.equal(
+            result.body.includes(`fault ${String(status)}`),
+            true,
+            diagnostics(context)
+          )
+        }
+        assert.equal(context.state.faults.length, 0)
+      })
   },
   {
     name: 'mock server strict request validation',
@@ -1264,8 +1755,7 @@ const scenarios = [
         context.state.comments.splice(0, context.state.comments.length)
         setTriggerComment(context.state, '.deploy')
         context.state.labels.add('deploying')
-        const route = (path: string): string =>
-          `/repos/${ACCEPTANCE_REPOSITORY.owner}/${ACCEPTANCE_REPOSITORY.repo}${path}`
+        const route = apiPath
 
         const malformedGraphql = await requestMockRoute(
           context.port,
@@ -1302,6 +1792,96 @@ const scenarios = [
         assert.equal(unknownGraphql.status, 500, diagnostics(context))
         assert.equal(
           unknownGraphql.body.includes('Unhandled mock GitHub route'),
+          true,
+          diagnostics(context)
+        )
+
+        for (const query of [
+          'query{repository{pullRequest(number:$number){id}}}',
+          'query{repository{deployments(environments:[$environment]){nodes{id}}}}'
+        ]) {
+          const incompleteOperation = await requestMockRoute(
+            context.port,
+            '/graphql',
+            'POST',
+            {query}
+          )
+          assert.equal(incompleteOperation.status, 500, diagnostics(context))
+          assert.equal(
+            incompleteOperation.body.includes('Unhandled mock GitHub route'),
+            true,
+            diagnostics(context)
+          )
+        }
+
+        const prechecksQuery =
+          'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}'
+        const invalidNumberVariable = await requestMockRoute(
+          context.port,
+          '/graphql',
+          'POST',
+          {
+            query: prechecksQuery,
+            variables: {
+              name: ACCEPTANCE_REPOSITORY.repo,
+              number: '1',
+              owner: ACCEPTANCE_REPOSITORY.owner
+            }
+          }
+        )
+        assert.equal(invalidNumberVariable.status, 500, diagnostics(context))
+        assert.equal(
+          invalidNumberVariable.body.includes('expected number field: number'),
+          true,
+          diagnostics(context)
+        )
+
+        const wrongPrechecksRepository = await requestMockRoute(
+          context.port,
+          '/graphql',
+          'POST',
+          {
+            query: prechecksQuery,
+            variables: {
+              name: ACCEPTANCE_REPOSITORY.repo,
+              number: 1,
+              owner: 'Other'
+            }
+          }
+        )
+        assert.equal(wrongPrechecksRepository.status, 500, diagnostics(context))
+        assert.equal(
+          wrongPrechecksRepository.body.includes(
+            'unexpected prechecks GraphQL variables'
+          ),
+          true,
+          diagnostics(context)
+        )
+
+        const deploymentQuery =
+          'query($repo_owner:String!,$repo_name:String!,$environment:String!){repository(owner:$repo_owner,name:$repo_name){deployments(environments:[$environment],first:100,after:null,orderBy: { field: CREATED_AT, direction: DESC }){nodes{id}}}}'
+        const wrongDeploymentRepository = await requestMockRoute(
+          context.port,
+          '/graphql',
+          'POST',
+          {
+            query: deploymentQuery,
+            variables: {
+              environment: 'production',
+              repo_name: ACCEPTANCE_REPOSITORY.repo,
+              repo_owner: 'Other'
+            }
+          }
+        )
+        assert.equal(
+          wrongDeploymentRepository.status,
+          500,
+          diagnostics(context)
+        )
+        assert.equal(
+          wrongDeploymentRepository.body.includes(
+            'unexpected deployment GraphQL repository variables'
+          ),
           true,
           diagnostics(context)
         )
@@ -1402,11 +1982,47 @@ const scenarios = [
           context.port,
           route('/git/trees'),
           'POST',
-          {tree: []}
+          {base_tree: ACCEPTANCE_SHAS.default, tree: []}
         )
         assert.equal(invalidTree.status, 500, diagnostics(context))
         assert.equal(
           invalidTree.body.includes('expected tree item'),
+          true,
+          diagnostics(context)
+        )
+
+        const invalidTreeItem = await requestMockRoute(
+          context.port,
+          route('/git/trees'),
+          'POST',
+          {
+            base_tree: ACCEPTANCE_SHAS.default,
+            tree: [
+              {
+                mode: '100755',
+                path: 'unexpected',
+                sha: ACCEPTANCE_SHAS.default,
+                type: 'blob'
+              }
+            ]
+          }
+        )
+        assert.equal(invalidTreeItem.status, 500, diagnostics(context))
+        assert.equal(
+          invalidTreeItem.body.includes('unexpected lock tree item'),
+          true,
+          diagnostics(context)
+        )
+
+        const invalidBlobEncoding = await requestMockRoute(
+          context.port,
+          route('/git/blobs'),
+          'POST',
+          {content: '{}', encoding: 'base64'}
+        )
+        assert.equal(invalidBlobEncoding.status, 500, diagnostics(context))
+        assert.equal(
+          invalidBlobEncoding.body.includes('expected lock blob encoding'),
           true,
           diagnostics(context)
         )
@@ -1429,7 +2045,7 @@ const scenarios = [
 
         const missingRef = await requestMockRoute(
           context.port,
-          route('/git/refs/heads/missing'),
+          route('/git/refs/heads%2Fmissing'),
           'DELETE'
         )
         assert.equal(missingRef.status, 422, diagnostics(context))
@@ -1449,6 +2065,48 @@ const scenarios = [
         assert.equal(invalidStatus.status, 500, diagnostics(context))
         assert.equal(
           invalidStatus.body.includes('expected optional string field'),
+          true,
+          diagnostics(context)
+        )
+
+        const invalidDeploymentBoolean = await requestMockRoute(
+          context.port,
+          route('/deployments'),
+          'POST',
+          {
+            auto_merge: 'true',
+            environment: 'production',
+            payload: {},
+            production_environment: true,
+            ref: 'main',
+            required_contexts: []
+          }
+        )
+        assert.equal(invalidDeploymentBoolean.status, 500, diagnostics(context))
+        assert.equal(
+          invalidDeploymentBoolean.body.includes('expected boolean field'),
+          true,
+          diagnostics(context)
+        )
+
+        const invalidDeploymentPayload = await requestMockRoute(
+          context.port,
+          route('/deployments'),
+          'POST',
+          {
+            auto_merge: true,
+            environment: 'production',
+            payload: [],
+            production_environment: true,
+            ref: 'main',
+            required_contexts: []
+          }
+        )
+        assert.equal(invalidDeploymentPayload.status, 500, diagnostics(context))
+        assert.equal(
+          invalidDeploymentPayload.body.includes(
+            'expected object field: payload'
+          ),
           true,
           diagnostics(context)
         )

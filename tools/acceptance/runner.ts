@@ -11,6 +11,7 @@ import type {
 } from './types.ts'
 
 export interface RunActionRequest {
+  readonly actor: string
   readonly inputs: Readonly<Record<string, string>>
   readonly mode: 'main' | 'post'
   readonly port: number
@@ -18,6 +19,14 @@ export interface RunActionRequest {
   readonly state: MockGitHubState
   readonly status: 'failure' | 'success'
 }
+
+interface AcceptanceProcessResult {
+  readonly code: number | null
+  readonly stderr: string
+  readonly stdout: string
+}
+
+const ACTION_TIMEOUT_MILLISECONDS = 20_000
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -61,7 +70,10 @@ function repositoryPayload(state: MockGitHubState): Record<string, unknown> {
   }
 }
 
-function issueCommentPayload(state: MockGitHubState): Record<string, unknown> {
+function issueCommentPayload(
+  state: MockGitHubState,
+  actor: string
+): Record<string, unknown> {
   const triggerComment = state.comments[0]
   if (triggerComment === undefined) {
     throw new Error('missing trigger comment')
@@ -75,7 +87,7 @@ function issueCommentPayload(state: MockGitHubState): Record<string, unknown> {
       id: triggerComment.id,
       updated_at: '2026-01-01T00:10:00Z',
       user: {
-        login: 'GrantBirki'
+        login: actor
       }
     },
     issue: {
@@ -101,7 +113,7 @@ function pullRequestPayload(state: MockGitHubState): Record<string, unknown> {
 }
 
 function eventNameForMode(request: RunActionRequest): string {
-  return request.inputs?.['unlock_on_merge_mode'] === 'true'
+  return request.inputs['unlock_on_merge_mode'] === 'true'
     ? 'pull_request'
     : 'issue_comment'
 }
@@ -111,7 +123,7 @@ function eventPayloadForMode(
 ): Record<string, unknown> {
   return eventNameForMode(request) === 'pull_request'
     ? pullRequestPayload(request.state)
-    : issueCommentPayload(request.state)
+    : issueCommentPayload(request.state, request.actor)
 }
 
 function parseCommandFile(path: string): AcceptanceOutputs {
@@ -140,11 +152,11 @@ function baseEnvironment(
   request: RunActionRequest,
   workspace: string
 ): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {}
-  for (const [name, value] of Object.entries(process.env)) {
-    if (value !== undefined) {
-      env[name] = value
-    }
+  const env: NodeJS.ProcessEnv = {
+    HOME: process.env['HOME'],
+    PATH: process.env['PATH'],
+    TMPDIR: tmpdir(),
+    TZ: 'UTC'
   }
 
   const defaults = loadInputDefaults()
@@ -155,11 +167,10 @@ function baseEnvironment(
   }
 
   const eventName = eventNameForMode(request)
-  env['BRANCH_DEPLOY_VITEST_TEST'] = 'true'
   env['CI'] = 'true'
   env['GITHUB_ACTION'] = 'branch-deploy'
   env['GITHUB_ACTIONS'] = 'true'
-  env['GITHUB_ACTOR'] = 'GrantBirki'
+  env['GITHUB_ACTOR'] = request.actor
   env['GITHUB_API_URL'] = `http://127.0.0.1:${request.port}`
   env['GITHUB_EVENT_NAME'] = eventName
   env['GITHUB_EVENT_PATH'] = join(workspace, 'event.json')
@@ -189,25 +200,15 @@ function baseEnvironment(
   return env
 }
 
-function actionScript(mode: 'main' | 'post'): string {
-  if (mode === 'main') {
-    return [
-      "const action = await import('./dist/index.js')",
-      'const result = await action.run()',
-      'if (result !== undefined) console.log(`ACCEPTANCE_RESULT:${result}`)'
-    ].join(';')
-  }
+function actionScript(): string {
   return "await import('./dist/index.js')"
 }
 
-function runNode(
+export function runAcceptanceProcess(
   script: string,
-  env: NodeJS.ProcessEnv
-): Promise<{
-  readonly code: number | null
-  readonly stderr: string
-  readonly stdout: string
-}> {
+  env: NodeJS.ProcessEnv,
+  timeoutMilliseconds = ACTION_TIMEOUT_MILLISECONDS
+): Promise<AcceptanceProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
@@ -219,20 +220,38 @@ function runNode(
     )
     const stdout: Buffer[] = []
     const stderr: Buffer[] = []
+    let timedOut = false
+    const timeout = setTimeout(() => {
+      timedOut = true
+      child.kill('SIGKILL')
+    }, timeoutMilliseconds)
     child.stdout.on('data', (chunk: Buffer | string) => {
       stdout.push(Buffer.from(chunk))
     })
-    /* node:coverage ignore next 3 */
     child.stderr.on('data', (chunk: Buffer | string) => {
       stderr.push(Buffer.from(chunk))
     })
-    child.on('error', reject)
+    /* node:coverage ignore next 4 */
+    child.on('error', error => {
+      clearTimeout(timeout)
+      reject(error)
+    })
     child.on('close', code => {
-      resolve({
+      clearTimeout(timeout)
+      const result = {
         code,
         stderr: Buffer.concat(stderr).toString('utf8'),
         stdout: Buffer.concat(stdout).toString('utf8')
-      })
+      }
+      if (timedOut) {
+        reject(
+          new Error(
+            `action process timed out after ${String(timeoutMilliseconds)}ms\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+          )
+        )
+        return
+      }
+      resolve(result)
     })
   })
 }
@@ -247,17 +266,20 @@ export async function runAction(
   const workspace = mkdtempSync(join(tmpdir(), 'branch-deploy-acceptance-'))
   const outputPath = join(workspace, 'output')
   const statePath = join(workspace, 'state')
-  writeFileSync(
-    join(workspace, 'event.json'),
-    `${JSON.stringify(eventPayloadForMode(request))}\n`,
-    'utf8'
-  )
-  writeFileSync(outputPath, '', 'utf8')
-  writeFileSync(statePath, '', 'utf8')
-  const env = baseEnvironment(request, workspace)
-  const result = await runNode(actionScript(request.mode), env)
-  const output = parseCommandFile(outputPath)
-  const state = parseCommandFile(statePath)
-  rmSync(workspace, {force: true, recursive: true})
-  return {...result, output, state}
+  try {
+    writeFileSync(
+      join(workspace, 'event.json'),
+      `${JSON.stringify(eventPayloadForMode(request))}\n`,
+      'utf8'
+    )
+    writeFileSync(outputPath, '', 'utf8')
+    writeFileSync(statePath, '', 'utf8')
+    const env = baseEnvironment(request, workspace)
+    const result = await runAcceptanceProcess(actionScript(), env)
+    const output = parseCommandFile(outputPath)
+    const state = parseCommandFile(statePath)
+    return {...result, output, state}
+  } finally {
+    rmSync(workspace, {force: true, recursive: true})
+  }
 }

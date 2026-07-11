@@ -69,9 +69,27 @@ export interface MockReaction {
 }
 
 export interface MockRouteLog {
+  readonly accept: string
+  readonly apiVersion: string
+  readonly authorizationPresent: boolean
   readonly body: string
   readonly method: string
   readonly path: string
+  readonly query: string
+  readonly userAgent: string
+}
+
+export interface MockFault {
+  readonly method: string
+  readonly path: string
+  readonly response: {
+    readonly message: string
+    readonly status: number
+  }
+  readonly seedLock?: {
+    readonly branch: string
+    readonly contents: string
+  }
 }
 
 export type MockRollupContext =
@@ -89,16 +107,20 @@ export type MockRollupContext =
     }
 
 export interface MockGitHubState {
+  blobs: Map<string, string>
   branchRules: readonly unknown[]
   branches: Map<string, MockBranch>
   comments: MockComment[]
   commits: Map<string, MockCommit>
+  commitsToTrees: Map<string, string>
   comparisonBehindBy: number
   confirmationReaction: '+1' | '-1' | null
   deployments: MockDeployment[]
   failInitialReaction: boolean
+  faults: MockFault[]
   graphqlCommitOid: string | null
   labels: Set<string>
+  lockFiles: Map<string, string>
   mergeStateStatus: string
   nextCommentId: number
   nextDeploymentId: number
@@ -116,6 +138,7 @@ export interface MockGitHubState {
   rollupAvailable: boolean
   rollupContexts: readonly MockRollupContext[]
   rollupState: string | null
+  trees: Map<string, string>
 }
 
 export interface ScenarioContext {
