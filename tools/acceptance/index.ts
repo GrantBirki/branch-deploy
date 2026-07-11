@@ -33,6 +33,14 @@ interface HttpResult {
   readonly status: number
 }
 
+const GREEN = '\u001b[32m'
+const RED = '\u001b[31m'
+const RESET = '\u001b[0m'
+
+function progressDot(passed: boolean): string {
+  return `${passed ? GREEN : RED}.${RESET}`
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -1676,6 +1684,8 @@ const scenarios = [
       assert.equal(mockHeaderValue('value'), 'value')
       assert.equal(mockHeaderValue(['first', 'second']), 'first,second')
       assert.equal(mockHeaderValue(undefined), '')
+      assert.equal(progressDot(true), '\u001b[32m.\u001b[0m')
+      assert.equal(progressDot(false), '\u001b[31m.\u001b[0m')
       const environmentName = 'BRANCH_DEPLOY_ACCEPTANCE_RESTORE_TEST'
       const previousValue = process.env[environmentName]
       restoreEnvironment(environmentName, 'restored')
@@ -2168,8 +2178,14 @@ const scenarios = [
 ] satisfies readonly Scenario[]
 
 for (const scenario of scenarios) {
-  await scenario.run()
-  process.stdout.write(`ok - ${scenario.name}\n`)
+  try {
+    await scenario.run()
+    process.stdout.write(progressDot(true))
+    /* node:coverage ignore next 4 */
+  } catch (error) {
+    process.stdout.write(`${progressDot(false)}\n`)
+    throw new Error(`${scenario.name} failed\n${String(error)}`)
+  }
 }
 
-process.stdout.write(`acceptance: ${scenarios.length} scenarios passed\n`)
+process.stdout.write(`\nacceptance: ${scenarios.length} scenarios passed\n`)
