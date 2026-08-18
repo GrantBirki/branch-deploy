@@ -35453,6 +35453,7 @@ const ACTION_INPUT_KEYS = (/* unused pure expression or super */ null && ([
     'skip_successful_noop_labels_if_approved',
     'skip_successful_deploy_labels_if_approved',
     'enforced_deployment_order',
+    'deployment_order_scope',
     'use_security_warnings',
     'allow_non_default_target_branch_deployments',
     'deployment_confirmation',
@@ -35875,6 +35876,7 @@ function dedent(value) {
 
 
 
+const BRANCH_DEPLOY_PAYLOAD_TYPE = 'branch-deploy';
 // Helper function to add deployment statuses to a PR / ref
 // :param octokit: The octokit client
 // :param context: The GitHub Actions event context
@@ -35908,8 +35910,10 @@ async function createDeploymentStatus(octokit, context, ref, state, deploymentId
 // :param environment: The environment to check for (ex: production)
 // :param sha: The sha to check for (ex: cb2bc0193184e779a5efc05e48acdfd1026f59a7)
 // :returns: true if the deployment is active for the given environment at the given commit sha, false otherwise
-async function activeDeployment(octokit, context, environment, sha) {
-    const deployment = await latestActiveDeployment(octokit, context, environment);
+async function activeDeployment({ context, environment, octokit, scope, sha }) {
+    const deployment = scope === BRANCH_DEPLOY_PAYLOAD_TYPE
+        ? await latestBranchDeployDeployment(octokit, context, environment)
+        : await latestActiveDeployment(octokit, context, environment);
     // If no deployment was found, return false
     if (deployment === null) {
         return false;
@@ -36022,8 +36026,9 @@ function deploymentPayloadKind(payload) {
     }
     if (!('type' in parsed))
         return 'other';
-    if (parsed.type === 'branch-deploy')
-        return 'branch-deploy';
+    if (parsed.type === BRANCH_DEPLOY_PAYLOAD_TYPE) {
+        return BRANCH_DEPLOY_PAYLOAD_TYPE;
+    }
     return typeof parsed.type === 'string' ? 'other' : 'malformed';
 }
 async function latestBranchDeployDeployment(octokit, context, environment) {
@@ -36035,10 +36040,12 @@ async function latestBranchDeployDeployment(octokit, context, environment) {
         repositoryId = repository.id;
         for (const deployment of repository.deployments.nodes) {
             const payloadKind = deploymentPayloadKind(deployment.payload);
-            if (payloadKind === 'branch-deploy')
+            if (payloadKind === BRANCH_DEPLOY_PAYLOAD_TYPE)
                 return deployment;
-            if (payloadKind === 'malformed')
+            if (payloadKind === 'malformed') {
+                warning(`deployment history for ${environment} contains a malformed payload; refusing to search older records`);
                 return null;
+            }
         }
         const pageInfo = repository.deployments.pageInfo;
         if (!pageInfo.hasNextPage)
@@ -40105,35 +40112,45 @@ async function unlockIfUnchanged(octokit, context, environment, expectedSha) {
 // :param environment: The environment to check for (ex: production)
 // :param sha: The sha to check for (ex: cb2bc0193184e779a5efc05e48acdfd1026f59a7)
 // :returns: an object with the valid: true if the deployment order is valid, false otherwise, and results: an array of the previous environments in the enforced deployment order that do not have active deployments
-async function validDeploymentOrder(octokit, context, enforced_deployment_order, environment, sha) {
+async function validDeploymentOrder({ context, enforcedDeploymentOrder, environment, octokit, scope, sha }) {
     info(`🚦 deployment order is ${COLORS.highlight}enforced${COLORS.reset}`);
-    if (new Set(enforced_deployment_order).size !== enforced_deployment_order.length) {
+    if (scope === 'branch-deploy') {
+        debug('deployment order scope: branch-deploy');
+    }
+    if (new Set(enforcedDeploymentOrder).size !== enforcedDeploymentOrder.length) {
         throw new Error('The enforced deployment order contains duplicate environments');
     }
-    const environmentIndex = enforced_deployment_order.indexOf(environment);
+    const environmentIndex = enforcedDeploymentOrder.indexOf(environment);
     if (environmentIndex === -1) {
         throw new Error(`The requested environment is not present in the enforced deployment order: ${environment}`);
     }
-    if (enforced_deployment_order.length === 1) {
+    if (enforcedDeploymentOrder.length === 1) {
         warning(`💡 Having only one environment in the enforced deployment order will always cause the deployment order checks to pass if the environment names match. This is likely not what you want. Please either unset the enforced deployment order or add more environments to it.`);
-        return { valid: enforced_deployment_order[0] === environment, results: [] };
+        return { valid: enforcedDeploymentOrder[0] === environment, results: [] };
     }
     // if the enforced deployment order is set, check to see if the current environment is the first in the list
     // this indicates that we can proceed with the deployment right away as there are no previous environments to gate it
-    if (enforced_deployment_order[0] === environment) {
+    if (enforcedDeploymentOrder[0] === environment) {
         info(`🚦 deployment order checks passed as ${COLORS.highlight}${environment}${COLORS.reset} is the first environment in the enforced deployment order`);
         return { valid: true, results: [] };
     }
     // determine all the previous environments in the enforced deployment order prior to the current environment
-    const previous_environments = enforced_deployment_order.slice(0, environmentIndex);
+    const previous_environments = enforcedDeploymentOrder.slice(0, environmentIndex);
     debug(`environments that require active deployments: ${previous_environments.join(',')}`);
     // iterate over the previous environments and check to see if they have an active deployment
     const results = [];
     for (const previous_environment of previous_environments) {
         debug(`checking if ${previous_environment} has an active deployment`);
-        const is_active = await activeDeployment(octokit, context, previous_environment, sha);
+        const is_active = await activeDeployment({
+            context,
+            environment: previous_environment,
+            octokit,
+            scope,
+            sha
+        });
         if (!is_active) {
-            actions_core_error(`🚦 deployment order checks failed as ${COLORS.highlight}${previous_environment}${COLORS.reset} does not have an active deployment at sha: ${sha}`);
+            const deploymentLabel = scope === 'branch-deploy' ? 'Branch Deploy deployment' : 'deployment';
+            actions_core_error(`🚦 deployment order checks failed as ${COLORS.highlight}${previous_environment}${COLORS.reset} does not have an active ${deploymentLabel} at sha: ${sha}`);
             results.push({ environment: previous_environment, active: false });
             continue;
         }
@@ -40192,7 +40209,14 @@ async function enforceDeploymentOrder(request, environment, ref, sha) {
     const { context, inputs, octokit, reactionId } = request;
     let order;
     try {
-        order = await validDeploymentOrder(octokit, context, inputs.enforced_deployment_order, environment, sha);
+        order = await validDeploymentOrder({
+            context,
+            enforcedDeploymentOrder: inputs.enforced_deployment_order,
+            environment,
+            octokit,
+            scope: inputs.deployment_order_scope,
+            sha
+        });
     }
     catch (error) {
         const apiError = legacyApiError(error);
@@ -40577,7 +40601,7 @@ async function createDeployment(request, ready, lease, deploymentType, deploymen
         environment,
         production_environment: production,
         payload: {
-            type: 'branch-deploy',
+            type: BRANCH_DEPLOY_PAYLOAD_TYPE,
             sha: precheck.sha,
             params: environmentResult.environmentObj.params,
             parsed_params: environmentResult.environmentObj.parsed_params,
@@ -41294,7 +41318,10 @@ async function help(octokit, context, reactionId, inputs) {
     }
     let enforced_deployment_order_message = defaultSpecificMessage;
     if (inputs.enforced_deployment_order.length > 0) {
-        enforced_deployment_order_message = `Deployments are required to follow a specific deployment order by environment before the next one can proceed: ${inputs.enforced_deployment_order.join(', ')}`;
+        const deploymentOrderScopeMessage = inputs.deployment_order_scope === 'branch-deploy'
+            ? 'Only deployments whose payload identifies them as Branch Deploy count toward this order; newer deployments from other systems are ignored.'
+            : 'The newest deployment from any system counts toward this order.';
+        enforced_deployment_order_message = `Deployments are required to follow a specific deployment order by environment before the next one can proceed: ${inputs.enforced_deployment_order.join(', ')}. ${deploymentOrderScopeMessage}`;
     }
     else {
         enforced_deployment_order_message = `Deployments can be made to any environment in any order`;
@@ -41490,15 +41517,21 @@ const CHECKS_MODE_VALUES = [
     'all',
     'required'
 ];
+const DEPLOYMENT_ORDER_SCOPE_VALUES = [
+    'all',
+    'branch-deploy'
+];
 const LITERAL_ACTION_INPUT_KEYS = (/* unused pure expression or super */ null && ([
     'update_branch',
     'outdated_mode',
-    'checks'
+    'checks',
+    'deployment_order_scope'
 ]));
 const LITERAL_ACTION_INPUT_VALUES = {
     update_branch: UPDATE_BRANCH_VALUES,
     outdated_mode: OUTDATED_MODE_VALUES,
-    checks: CHECKS_MODE_VALUES
+    checks: CHECKS_MODE_VALUES,
+    deployment_order_scope: DEPLOYMENT_ORDER_SCOPE_VALUES
 };
 // Helper function to validate the input values
 // :param inputName: The name of the input being validated (string)
@@ -41567,6 +41600,7 @@ function getInputs() {
     // validate inputs
     const update_branch = validateInput('update_branch', getActionInput('update_branch'), UPDATE_BRANCH_VALUES);
     const outdated_mode = validateInput('outdated_mode', getActionInput('outdated_mode'), OUTDATED_MODE_VALUES);
+    const deployment_order_scope = validateInput('deployment_order_scope', getActionInput('deployment_order_scope'), DEPLOYMENT_ORDER_SCOPE_VALUES);
     let checks;
     if (rawChecks === 'all' || rawChecks === 'required') {
         checks = validateInput('checks', rawChecks, CHECKS_MODE_VALUES);
@@ -41607,6 +41641,7 @@ function getInputs() {
         sticky_locks: sticky_locks,
         sticky_locks_for_noop: sticky_locks_for_noop,
         disable_lock: disable_lock,
+        deployment_order_scope: deployment_order_scope,
         enforced_deployment_order: enforced_deployment_order,
         commit_verification: commit_verification,
         ignored_checks: ignored_checks,

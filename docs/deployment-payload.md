@@ -33,3 +33,5 @@ Here is the data that the branch-deploy Action will add to the deployment payloa
 - `commit_verified` - This is a boolean that indicates whether the commit that is being deployed is verified.
 - `actor` - This is the username of the user that triggered the deployment.
 - `stable_branch_used` - This is a boolean that indicates whether the stable branch was used for the deployment. This will be `true` if the stable branch was used and `false` if the stable branch was not used.
+
+The `type: branch-deploy` marker also lets [enforced deployment order](./enforced-deployment-order.md) select Branch Deploy history when `deployment_order_scope` is set to `branch-deploy`. This marker identifies compatible deployment records; it does not authenticate who created them.

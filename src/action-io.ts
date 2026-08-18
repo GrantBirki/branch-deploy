@@ -47,6 +47,7 @@ export const ACTION_INPUT_KEYS = [
   'skip_successful_noop_labels_if_approved',
   'skip_successful_deploy_labels_if_approved',
   'enforced_deployment_order',
+  'deployment_order_scope',
   'use_security_warnings',
   'allow_non_default_target_branch_deployments',
   'deployment_confirmation',

@@ -34,6 +34,7 @@ import {run} from '../src/main.ts'
 import {OPERATION_REASON_CODES} from '../src/operation-result.ts'
 import type {
   DeploymentConfirmationResult,
+  DeploymentOrderScope,
   LockResponse,
   OperationDecision,
   OperationReasonCode,
@@ -90,7 +91,10 @@ test('typed input registries expose exact ActionInputKey subsets', () => {
     Equal<(typeof LITERAL_ACTION_INPUT_KEYS)[number], LiteralActionInputKey>
   >(true)
   assertType<
-    Equal<LiteralActionInputKey, 'checks' | 'outdated_mode' | 'update_branch'>
+    Equal<
+      LiteralActionInputKey,
+      'checks' | 'deployment_order_scope' | 'outdated_mode' | 'update_branch'
+    >
   >(true)
   assertType<Extends<LiteralActionInputKey, ActionInputKey>>(true)
   assertType<
@@ -109,6 +113,12 @@ test('typed input registries expose exact ActionInputKey subsets', () => {
     Equal<
       (typeof LITERAL_ACTION_INPUT_VALUES)['checks'][number],
       'all' | 'required'
+    >
+  >(true)
+  assertType<
+    Equal<
+      (typeof LITERAL_ACTION_INPUT_VALUES)['deployment_order_scope'][number],
+      DeploymentOrderScope
     >
   >(true)
 })

@@ -71,6 +71,7 @@ export interface PullRequestContext extends BranchDeployContext {
 export type UpdateBranchMode = 'disabled' | 'force' | 'warn'
 export type OutdatedMode = 'default_branch' | 'pr_base' | 'strict'
 export type ChecksInput = 'all' | 'required' | readonly string[]
+export type DeploymentOrderScope = 'all' | 'branch-deploy'
 
 export interface ActionInputs {
   readonly admins: string
@@ -84,6 +85,7 @@ export interface ActionInputs {
   readonly disable_lock: boolean
   readonly disable_naked_commands: boolean
   readonly draft_permitted_targets: string
+  readonly deployment_order_scope: DeploymentOrderScope
   readonly enforced_deployment_order: readonly string[]
   readonly environment: string
   readonly environment_targets: string

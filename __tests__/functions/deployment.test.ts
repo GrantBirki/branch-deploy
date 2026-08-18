@@ -3,6 +3,7 @@ import {afterEach, beforeEach, mock, test} from 'node:test'
 import {API_HEADERS} from '../../src/functions/api-headers.ts'
 import {createContext} from '../test-helpers.ts'
 import {
+  assertCalledWith,
   assertCalledTimes,
   createMock,
   installModuleMock
@@ -18,9 +19,11 @@ type DeploymentNode = NonNullable<
 >['deployments']['nodes'][number]
 
 const debugMock = createMock<ActionsCore['debug']>()
+const warningMock = createMock<ActionsCore['warning']>()
 
 installModuleMock(mock, new URL('../../src/actions-core.ts', import.meta.url), {
-  debug: debugMock
+  debug: debugMock,
+  warning: warningMock
 })
 
 const {
@@ -76,6 +79,7 @@ const originalServerUrl = process.env['GITHUB_SERVER_URL']
 
 beforeEach(() => {
   debugMock.mock.resetCalls()
+  warningMock.mock.resetCalls()
   createDeploymentStatusMock.mock.resetCalls()
   graphqlMock.mock.resetCalls()
   process.env['GITHUB_SERVER_URL'] = 'https://github.com'
@@ -238,7 +242,13 @@ test('returns false if the deployment is not active', async () => {
   )
 
   assert.strictEqual(
-    await activeDeployment(graphqlOctokit, context, environment, 'sha'),
+    await activeDeployment({
+      context,
+      environment,
+      octokit: graphqlOctokit,
+      scope: 'all',
+      sha: 'sha'
+    }),
     false
   )
   assertCalledTimes(graphqlMock, 1)
@@ -252,7 +262,13 @@ test('returns false if the deployment does not match the sha', async () => {
   )
 
   assert.strictEqual(
-    await activeDeployment(graphqlOctokit, context, environment, 'sha'),
+    await activeDeployment({
+      context,
+      environment,
+      octokit: graphqlOctokit,
+      scope: 'all',
+      sha: 'sha'
+    }),
     false
   )
   assertCalledTimes(graphqlMock, 1)
@@ -264,12 +280,13 @@ test('returns true if the deployment is active and matches the sha', async () =>
   )
 
   assert.strictEqual(
-    await activeDeployment(
-      graphqlOctokit,
+    await activeDeployment({
       context,
       environment,
-      '315cec138fc9d7dac8a47c6bba4217d3965ede3b'
-    ),
+      octokit: graphqlOctokit,
+      scope: 'all',
+      sha: '315cec138fc9d7dac8a47c6bba4217d3965ede3b'
+    }),
     true
   )
   assertCalledTimes(graphqlMock, 1)
@@ -279,11 +296,103 @@ test('returns false if the deployment is not found', async () => {
   graphqlMock.mock.mockImplementation(() => Promise.resolve(deploymentPage([])))
 
   assert.strictEqual(
-    await activeDeployment(graphqlOctokit, context, environment, 'sha'),
+    await activeDeployment({
+      context,
+      environment,
+      octokit: graphqlOctokit,
+      scope: 'all',
+      sha: 'sha'
+    }),
     false
   )
   assertCalledTimes(graphqlMock, 1)
 })
+
+test('branch-deploy scope ignores a newer unrelated deployment', async () => {
+  const unrelatedDeployment = {
+    ...activeDeploymentNode,
+    id: 'automatic-deployment',
+    payload: null,
+    commit: {oid: 'default-branch-sha'}
+  }
+  graphqlMock.mock.mockImplementation(() =>
+    Promise.resolve(deploymentPage([unrelatedDeployment, activeDeploymentNode]))
+  )
+
+  assert.strictEqual(
+    await activeDeployment({
+      context,
+      environment,
+      octokit: graphqlOctokit,
+      scope: 'branch-deploy',
+      sha: '315cec138fc9d7dac8a47c6bba4217d3965ede3b'
+    }),
+    true
+  )
+  assert.deepStrictEqual(graphqlMock.mock.calls[0]?.arguments[1], {
+    repo_owner: 'corp',
+    repo_name: 'test',
+    environment,
+    first: 100,
+    cursor: null
+  })
+})
+
+test('all scope keeps a newer unrelated deployment authoritative', async () => {
+  graphqlMock.mock.mockImplementation(() =>
+    Promise.resolve(
+      deploymentPage([
+        {
+          ...activeDeploymentNode,
+          id: 'automatic-deployment',
+          payload: null,
+          commit: {oid: 'default-branch-sha'}
+        },
+        activeDeploymentNode
+      ])
+    )
+  )
+
+  assert.strictEqual(
+    await activeDeployment({
+      context,
+      environment,
+      octokit: graphqlOctokit,
+      scope: 'all',
+      sha: '315cec138fc9d7dac8a47c6bba4217d3965ede3b'
+    }),
+    false
+  )
+  assert.deepStrictEqual(graphqlMock.mock.calls[0]?.arguments[1], {
+    repo_owner: 'corp',
+    repo_name: 'test',
+    environment,
+    first: 1,
+    cursor: null
+  })
+})
+
+for (const deployment of [
+  {...activeDeploymentNode, state: 'INACTIVE'},
+  {...activeDeploymentNode, commit: {oid: 'different-sha'}}
+] as const) {
+  test(`branch-deploy scope rejects its newest ${deployment.state === 'INACTIVE' ? 'inactive' : 'different-SHA'} deployment`, async () => {
+    graphqlMock.mock.mockImplementation(() =>
+      Promise.resolve(deploymentPage([deployment, activeDeploymentNode]))
+    )
+
+    assert.strictEqual(
+      await activeDeployment({
+        context,
+        environment,
+        octokit: graphqlOctokit,
+        scope: 'branch-deploy',
+        sha: '315cec138fc9d7dac8a47c6bba4217d3965ede3b'
+      }),
+      false
+    )
+  })
+}
 
 test('paginates with cursor variables to find the newest branch-deploy deployment', async () => {
   graphqlMock.mock.mockImplementationOnce(
@@ -404,6 +513,10 @@ for (const payload of [
     assert.strictEqual(
       await latestBranchDeployDeployment(graphqlOctokit, context, environment),
       null
+    )
+    assertCalledWith(
+      warningMock,
+      'deployment history for production contains a malformed payload; refusing to search older records'
     )
   })
 }

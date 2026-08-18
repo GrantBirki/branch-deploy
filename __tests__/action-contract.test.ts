@@ -13,6 +13,7 @@ import {
 } from '../src/action-io.ts'
 import {
   CHECKS_MODE_VALUES,
+  DEPLOYMENT_ORDER_SCOPE_VALUES,
   LITERAL_ACTION_INPUT_KEYS,
   LITERAL_ACTION_INPUT_VALUES,
   OUTDATED_MODE_VALUES,
@@ -83,6 +84,7 @@ const expectedInputContract = {
     required: false
   },
   enforced_deployment_order: {default: '', required: false},
+  deployment_order_scope: {default: 'all', required: false},
   use_security_warnings: {default: 'true', required: false},
   allow_non_default_target_branch_deployments: {
     default: 'false',
@@ -118,7 +120,8 @@ const expectedIntegerInputKeys = [
 const expectedLiteralInputKeys = [
   'update_branch',
   'outdated_mode',
-  'checks'
+  'checks',
+  'deployment_order_scope'
 ] as const satisfies readonly ActionInputKey[]
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
@@ -169,7 +172,7 @@ test('action input and output registries exactly match action.yml', () => {
     [...ACTION_OUTPUT_KEYS].sort(),
     Object.keys(outputs).sort()
   )
-  assert.strictEqual(ACTION_INPUT_KEYS.length, 50)
+  assert.strictEqual(ACTION_INPUT_KEYS.length, 51)
   assert.strictEqual(ACTION_OUTPUT_KEYS.length, 41)
 })
 
@@ -193,6 +196,10 @@ test('action input defaults, required flags, and accepted literals stay fixed', 
     'strict'
   ])
   assert.deepStrictEqual(CHECKS_MODE_VALUES, ['all', 'required'])
+  assert.deepStrictEqual(DEPLOYMENT_ORDER_SCOPE_VALUES, [
+    'all',
+    'branch-deploy'
+  ])
 })
 
 test('typed input registries stay complete and exact', () => {
@@ -203,7 +210,8 @@ test('typed input registries stay complete and exact', () => {
   assert.deepStrictEqual(LITERAL_ACTION_INPUT_VALUES, {
     update_branch: ['disabled', 'warn', 'force'],
     outdated_mode: ['pr_base', 'default_branch', 'strict'],
-    checks: ['all', 'required']
+    checks: ['all', 'required'],
+    deployment_order_scope: ['all', 'branch-deploy']
   })
 
   const registeredInputs: ReadonlySet<string> = new Set(ACTION_INPUT_KEYS)

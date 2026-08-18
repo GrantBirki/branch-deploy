@@ -490,6 +490,16 @@ inputs:
     default:
       type: string
       required: false
+  deployment_order_scope:
+    description:
+      type: string
+      required: true
+    required:
+      type: boolean
+      required: true
+    default:
+      type: string
+      required: false
   use_security_warnings:
     description:
       type: string

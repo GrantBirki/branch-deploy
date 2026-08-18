@@ -13,7 +13,10 @@ import {branchRulesetChecks} from './branch-ruleset-checks.ts'
 import {COLORS} from './colors.ts'
 import {commitSafetyChecks} from './commit-safety-checks.ts'
 import {dedent} from './dedent.ts'
-import {createDeploymentStatus} from './deployment.ts'
+import {
+  BRANCH_DEPLOY_PAYLOAD_TYPE,
+  createDeploymentStatus
+} from './deployment.ts'
 import {deploymentConfirmation} from './deployment-confirmation.ts'
 import {environmentTargets} from './environment-targets.ts'
 import {jsonCodeBlock} from './json-code-block.ts'
@@ -97,13 +100,14 @@ async function enforceDeploymentOrder(
   const {context, inputs, octokit, reactionId} = request
   let order
   try {
-    order = await validDeploymentOrder(
-      octokit,
+    order = await validDeploymentOrder({
       context,
-      inputs.enforced_deployment_order,
+      enforcedDeploymentOrder: inputs.enforced_deployment_order,
       environment,
+      octokit,
+      scope: inputs.deployment_order_scope,
       sha
-    )
+    })
   } catch (error) {
     const apiError = legacyApiError(error)
     const message = dedent(`
@@ -563,7 +567,7 @@ async function createDeployment(
     environment,
     production_environment: production,
     payload: {
-      type: 'branch-deploy',
+      type: BRANCH_DEPLOY_PAYLOAD_TYPE,
       sha: precheck.sha,
       params: environmentResult.environmentObj.params,
       parsed_params: environmentResult.environmentObj.parsed_params,

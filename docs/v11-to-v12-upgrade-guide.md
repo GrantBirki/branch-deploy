@@ -109,7 +109,7 @@ V12 uses strict cursor pagination and the newest relevant deployment state.
 2. Remove accidental duplicate environment entries.
 3. Ensure every environment that users can request while order enforcement is enabled appears in the configured order.
 4. Do not reorder environments unless the existing deployment policy clearly requires it.
-5. Understand that each preceding environment's newest deployment must be active at the selected SHA. An older active deployment no longer overrides a newer failed or inactive deployment.
+5. By default, each preceding environment's newest deployment must be active at the selected SHA. An older active deployment no longer overrides a newer failed or inactive deployment. If `deployment_order_scope` is set to `branch-deploy`, apply that rule to the newest deployment whose payload identifies it as Branch Deploy instead.
 6. If `merge_deploy_mode` is used, preserve it. V12 skips only when the newest identifiable Branch Deploy deployment completed successfully and its tree matches the current default branch. Failed, pending, malformed, or missing history causes deployment to run again.
 7. Update tests or operational documentation that assumed an older successful deployment could override newer failed or pending history.
 
@@ -336,7 +336,7 @@ Deployments that explicitly use the configured stable branch or an enabled exact
 
 ### What changed
 
-Enforced deployment order now checks only the newest deployment for each preceding environment. That deployment must be `ACTIVE` at the selected SHA. An older active deployment cannot satisfy the order after a newer failed or inactive deployment. Duplicate environments in `enforced_deployment_order` and requested environments missing from that order are rejected as invalid configuration.
+By default, enforced deployment order checks only the newest deployment for each preceding environment. That deployment must be `ACTIVE` at the selected SHA. An older active deployment cannot satisfy the order after a newer failed or inactive deployment. Duplicate environments in `enforced_deployment_order` and requested environments missing from that order are rejected as invalid configuration.
 
 Merge deploy mode now skips deployment only when the newest identifiable `branch-deploy` deployment is active and its commit tree matches the current default branch. A failed, pending, missing, or malformed latest deployment requires another deployment. Deployment-history pagination also validates repository identity, environment identity, and cursor progress.
 

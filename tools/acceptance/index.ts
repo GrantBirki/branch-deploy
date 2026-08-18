@@ -344,6 +344,31 @@ function seedDeployment(
   state.nextDeploymentId += 1
 }
 
+function seedUnrelatedDeployment(
+  state: MockGitHubState,
+  sha: string,
+  environment: string
+): void {
+  const status = {
+    environment,
+    environmentUrl: null,
+    id: state.nextStatusId,
+    state: 'success' as const
+  }
+  state.nextStatusId += 1
+  state.deployments.unshift({
+    createdAt: '2026-01-01T00:16:30Z',
+    environment,
+    id: state.nextDeploymentId,
+    payload: null,
+    ref: 'main',
+    sha,
+    statuses: [status],
+    updatedAt: '2026-01-01T00:17:00Z'
+  })
+  state.nextDeploymentId += 1
+}
+
 async function withMockGitHub(
   name: string,
   run: (context: ScenarioContext) => Promise<void>
@@ -3204,6 +3229,55 @@ const scenarios = [
           setTriggerComment(context.state, '.deploy')
 
           const result = await runMain(context, {
+            enforced_deployment_order: 'development,production'
+          })
+
+          assertExit(context, result, 0)
+          assertReason(context, result, 'deployment_ready')
+        }
+      )
+  },
+  {
+    name: 'deployment order rejects a newer unrelated deployment by default',
+    run: () =>
+      withMockGitHub(
+        'deployment order rejects a newer unrelated deployment by default',
+        async context => {
+          seedDeployment(context.state, ACCEPTANCE_SHAS.feature, 'development')
+          seedUnrelatedDeployment(
+            context.state,
+            ACCEPTANCE_SHAS.default,
+            'development'
+          )
+          setTriggerComment(context.state, '.deploy')
+
+          const result = await runMain(context, {
+            enforced_deployment_order: 'development,production'
+          })
+
+          assertExit(context, result, 1)
+          assertReason(context, result, 'deployment_order_failed')
+          assertOutput(context, result, 'needs_to_be_deployed', 'development')
+          assert.equal(context.state.deployments.length, 2)
+        }
+      )
+  },
+  {
+    name: 'deployment order ignores a newer unrelated deployment when scoped',
+    run: () =>
+      withMockGitHub(
+        'deployment order ignores a newer unrelated deployment when scoped',
+        async context => {
+          seedDeployment(context.state, ACCEPTANCE_SHAS.feature, 'development')
+          seedUnrelatedDeployment(
+            context.state,
+            ACCEPTANCE_SHAS.default,
+            'development'
+          )
+          setTriggerComment(context.state, '.deploy')
+
+          const result = await runMain(context, {
+            deployment_order_scope: 'branch-deploy',
             enforced_deployment_order: 'development,production'
           })
 

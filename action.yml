@@ -189,6 +189,10 @@ inputs:
     description: 'A comma separated list of environments that must be deployed in a specific order. Example: `"development,staging,production"`. If this is set then you cannot deploy to latter environments unless the former ones have a successful and active deployment on the latest commit first.'
     required: false
     default: ""
+  deployment_order_scope:
+    description: 'Controls which deployment history records are considered by enforced deployment order. "all" uses the newest deployment from any system. "branch-deploy" uses the newest deployment whose payload identifies it as Branch Deploy and ignores newer deployments from other systems. Use "branch-deploy" only when Branch Deploy is authoritative for promotion.'
+    required: false
+    default: "all"
   use_security_warnings:
     description: 'Whether or not to leave security related warnings in log messages during deployments. Default is "true"'
     required: false
