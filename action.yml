@@ -255,7 +255,7 @@ outputs:
   environment_url:
     description: The environment URL detected and used for the deployment (sourced from the environment_urls input)
   initial_reaction_id:
-    description: The reaction id for the initial reaction on the trigger comment
+    description: The reaction id for the initial reaction on the trigger comment. This can be empty when decorative reactions are disabled or the best-effort reaction request fails
   initial_comment_id:
     description: The comment id for the "Deployment Triggered 🚀" comment created by the action
   actor_handle:
