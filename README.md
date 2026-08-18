@@ -349,7 +349,7 @@ As seen above, we have two steps. One for a noop deploy, and one for a regular d
 | `fork_label` | The API label field returned for the fork |
 | `fork_checkout` | The console command presented in the GitHub UI to checkout a given fork locally |
 | `fork_full_name` | The full name of the fork in "org/repo" format |
-| `initial_reaction_id` | The reaction id for the initial reaction on the trigger comment. This is empty when decorative reactions are disabled. |
+| `initial_reaction_id` | The reaction id for the initial reaction on the trigger comment. This can be empty when decorative reactions are disabled or the best-effort reaction request fails. |
 | `initial_comment_id` | The comment id for the "Deployment Triggered 🚀" comment created by the action |
 | `actor_handle` | The handle of the user who triggered the action |
 | `global_lock_claimed` | The string "true" if the global lock was claimed |
