@@ -156,6 +156,7 @@ test('successfully calls help with non-defaults again', async () => {
     checks: 'required',
     ignored_checks: ['lint'],
     commit_verification: false,
+    deployment_order_scope: 'branch-deploy',
     enforced_deployment_order: ['development', 'staging', 'production'],
     use_security_warnings: false,
     allow_non_default_target_branch_deployments: false
@@ -166,11 +167,21 @@ test('successfully calls help with non-defaults again', async () => {
   assertDebugMatches(/## 📚 Branch Deployment Help/)
 
   assertDebugMatches(/a specific deployment order by environment/)
+  assertDebugMatches(
+    /Only deployments whose payload identifies them as Branch Deploy count toward this order; newer deployments from other systems are ignored/
+  )
 
-  const inputsSecond = {...inputs, update_branch: 'disabled'} as const
+  const inputsSecond = {
+    ...inputs,
+    deployment_order_scope: 'all',
+    update_branch: 'disabled'
+  } as const
   assert.strictEqual(await help(octokit, context, 123, inputsSecond), undefined)
 
   assertDebugMatches(/## 📚 Branch Deployment Help/)
+  assertDebugMatches(
+    /The newest deployment from any system counts toward this order/
+  )
 })
 
 test('successfully calls help with non-defaults and unknown update_branch setting', async () => {

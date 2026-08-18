@@ -4,6 +4,7 @@ import type {ActionInputKey, IntegerActionInputKey} from '../action-io.ts'
 import type {
   ActionInputs,
   ChecksInput,
+  DeploymentOrderScope,
   OutdatedMode,
   UpdateBranchMode
 } from '../types.ts'
@@ -22,11 +23,16 @@ export const CHECKS_MODE_VALUES = [
   'all',
   'required'
 ] as const satisfies readonly Extract<ChecksInput, string>[]
+export const DEPLOYMENT_ORDER_SCOPE_VALUES = [
+  'all',
+  'branch-deploy'
+] as const satisfies readonly DeploymentOrderScope[]
 
 export const LITERAL_ACTION_INPUT_KEYS = [
   'update_branch',
   'outdated_mode',
-  'checks'
+  'checks',
+  'deployment_order_scope'
 ] as const satisfies readonly ActionInputKey[]
 
 export type LiteralActionInputKey = (typeof LITERAL_ACTION_INPUT_KEYS)[number]
@@ -34,7 +40,8 @@ export type LiteralActionInputKey = (typeof LITERAL_ACTION_INPUT_KEYS)[number]
 export const LITERAL_ACTION_INPUT_VALUES = {
   update_branch: UPDATE_BRANCH_VALUES,
   outdated_mode: OUTDATED_MODE_VALUES,
-  checks: CHECKS_MODE_VALUES
+  checks: CHECKS_MODE_VALUES,
+  deployment_order_scope: DEPLOYMENT_ORDER_SCOPE_VALUES
 } as const satisfies Readonly<Record<LiteralActionInputKey, readonly string[]>>
 
 // Helper function to validate the input values
@@ -137,6 +144,11 @@ export function getInputs(): ActionInputs {
     getActionInput('outdated_mode'),
     OUTDATED_MODE_VALUES
   )
+  const deployment_order_scope: DeploymentOrderScope = validateInput(
+    'deployment_order_scope',
+    getActionInput('deployment_order_scope'),
+    DEPLOYMENT_ORDER_SCOPE_VALUES
+  )
 
   let checks: ChecksInput
   if (rawChecks === 'all' || rawChecks === 'required') {
@@ -178,6 +190,7 @@ export function getInputs(): ActionInputs {
     sticky_locks: sticky_locks,
     sticky_locks_for_noop: sticky_locks_for_noop,
     disable_lock: disable_lock,
+    deployment_order_scope: deployment_order_scope,
     enforced_deployment_order: enforced_deployment_order,
     commit_verification: commit_verification,
     ignored_checks: ignored_checks,

@@ -117,9 +117,13 @@ export async function help(
 
   let enforced_deployment_order_message = defaultSpecificMessage
   if (inputs.enforced_deployment_order.length > 0) {
+    const deploymentOrderScopeMessage =
+      inputs.deployment_order_scope === 'branch-deploy'
+        ? 'Only deployments whose payload identifies them as Branch Deploy count toward this order; newer deployments from other systems are ignored.'
+        : 'The newest deployment from any system counts toward this order.'
     enforced_deployment_order_message = `Deployments are required to follow a specific deployment order by environment before the next one can proceed: ${inputs.enforced_deployment_order.join(
       ', '
-    )}`
+    )}. ${deploymentOrderScopeMessage}`
   } else {
     enforced_deployment_order_message = `Deployments can be made to any environment in any order`
   }

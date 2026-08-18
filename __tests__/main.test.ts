@@ -259,6 +259,7 @@ const environmentDefaults = {
   INPUT_OUTDATED_MODE: 'default_branch',
   INPUT_CHECKS: 'all',
   INPUT_ENFORCED_DEPLOYMENT_ORDER: '',
+  INPUT_DEPLOYMENT_ORDER_SCOPE: 'all',
   INPUT_COMMIT_VERIFICATION: 'false',
   INPUT_IGNORED_CHECKS: '',
   INPUT_USE_SECURITY_WARNINGS: 'true',
@@ -1192,6 +1193,7 @@ test('successfully runs the action with an environment url used', async () => {
 
 test('runs the action and fails due to invalid environment deployment order', async () => {
   setEnv('INPUT_ENFORCED_DEPLOYMENT_ORDER', 'development,staging,production')
+  setEnv('INPUT_DEPLOYMENT_ORDER_SCOPE', 'branch-deploy')
 
   validDeploymentOrderMock.mock.mockImplementation(() =>
     Promise.resolve({
@@ -1236,13 +1238,14 @@ test('runs the action and fails due to invalid environment deployment order', as
 
   const deploymentOrderCall = validDeploymentOrderMock.mock.calls.at(-1)
   assert.ok(deploymentOrderCall !== undefined)
-  assert.strictEqual(deploymentOrderCall.arguments[0], octokit)
-  assert.strictEqual(deploymentOrderCall.arguments[1], githubContext)
-  assert.deepStrictEqual(deploymentOrderCall.arguments.slice(2), [
-    ['development', 'staging', 'production'],
-    'production',
-    'deadbeef'
-  ])
+  assert.deepStrictEqual(deploymentOrderCall.arguments[0], {
+    context: githubContext,
+    enforcedDeploymentOrder: ['development', 'staging', 'production'],
+    environment: 'production',
+    octokit,
+    scope: 'branch-deploy',
+    sha: 'deadbeef'
+  })
 })
 
 test('runs the action and passes environment deployment order checks', async () => {
@@ -2183,6 +2186,20 @@ test('handles an input validation error and exits', async () => {
     operation: 'none'
   })
   assert.ok(setFailedMock.mock.callCount() > 0)
+})
+
+test('rejects an invalid deployment order scope', async () => {
+  setEnv('INPUT_DEPLOYMENT_ORDER_SCOPE', 'external')
+  assert.strictEqual(await run(), undefined)
+  assertOperationResult({
+    decision: 'failure',
+    reason_code: 'unexpected_error',
+    operation: 'none'
+  })
+  assertCalledWith(
+    setFailedMock,
+    "Invalid value for 'deployment_order_scope': external. Must be one of: all, branch-deploy"
+  )
 })
 
 test('handles an unexpected error and exits', async () => {

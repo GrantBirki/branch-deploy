@@ -7,8 +7,11 @@ import {
 import type {
   BranchDeployContext,
   BranchDeployOctokit,
-  DeploymentGraphqlNode
+  DeploymentGraphqlNode,
+  DeploymentOrderScope
 } from '../types.ts'
+
+export const BRANCH_DEPLOY_PAYLOAD_TYPE = 'branch-deploy'
 
 type CreateDeploymentStatusMethod =
   BranchDeployOctokit['rest']['repos']['createDeploymentStatus']
@@ -35,6 +38,14 @@ export interface DeploymentGraphqlOctokit {
     query: string,
     variables: Readonly<Record<string, unknown>>
   ) => Promise<DeploymentHistoryResult>
+}
+
+interface ActiveDeploymentRequest {
+  readonly context: BranchDeployContext
+  readonly environment: string
+  readonly octokit: DeploymentGraphqlOctokit
+  readonly scope: DeploymentOrderScope
+  readonly sha: string
 }
 
 interface DeploymentHistoryNode extends DeploymentGraphqlNode {
@@ -110,13 +121,17 @@ export async function createDeploymentStatus(
 // :param environment: The environment to check for (ex: production)
 // :param sha: The sha to check for (ex: cb2bc0193184e779a5efc05e48acdfd1026f59a7)
 // :returns: true if the deployment is active for the given environment at the given commit sha, false otherwise
-export async function activeDeployment(
-  octokit: DeploymentGraphqlOctokit,
-  context: BranchDeployContext,
-  environment: string,
-  sha: string
-): Promise<boolean> {
-  const deployment = await latestActiveDeployment(octokit, context, environment)
+export async function activeDeployment({
+  context,
+  environment,
+  octokit,
+  scope,
+  sha
+}: ActiveDeploymentRequest): Promise<boolean> {
+  const deployment =
+    scope === BRANCH_DEPLOY_PAYLOAD_TYPE
+      ? await latestBranchDeployDeployment(octokit, context, environment)
+      : await latestActiveDeployment(octokit, context, environment)
 
   // If no deployment was found, return false
   if (deployment === null) {
@@ -244,7 +259,7 @@ async function deploymentPage(
 
 function deploymentPayloadKind(
   payload: unknown
-): 'branch-deploy' | 'malformed' | 'other' {
+): typeof BRANCH_DEPLOY_PAYLOAD_TYPE | 'malformed' | 'other' {
   let parsed = payload
   for (let layer = 0; layer < 2 && typeof parsed === 'string'; layer += 1) {
     try {
@@ -258,7 +273,9 @@ function deploymentPayloadKind(
     return parsed === null ? 'other' : 'malformed'
   }
   if (!('type' in parsed)) return 'other'
-  if (parsed.type === 'branch-deploy') return 'branch-deploy'
+  if (parsed.type === BRANCH_DEPLOY_PAYLOAD_TYPE) {
+    return BRANCH_DEPLOY_PAYLOAD_TYPE
+  }
   return typeof parsed.type === 'string' ? 'other' : 'malformed'
 }
 
@@ -282,8 +299,13 @@ export async function latestBranchDeployDeployment(
     repositoryId = repository.id
     for (const deployment of repository.deployments.nodes) {
       const payloadKind = deploymentPayloadKind(deployment.payload)
-      if (payloadKind === 'branch-deploy') return deployment
-      if (payloadKind === 'malformed') return null
+      if (payloadKind === BRANCH_DEPLOY_PAYLOAD_TYPE) return deployment
+      if (payloadKind === 'malformed') {
+        core.warning(
+          `deployment history for ${environment} contains a malformed payload; refusing to search older records`
+        )
+        return null
+      }
     }
 
     const pageInfo = repository.deployments.pageInfo
