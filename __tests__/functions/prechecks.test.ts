@@ -6,6 +6,7 @@ import type {
   PrechecksOctokit
 } from '../../src/functions/prechecks.ts'
 import type {PrStackSnapshot} from '../../src/functions/pr-stacks.ts'
+import type {PrStackRequiredCheck} from '../../src/functions/pr-stack-checks.ts'
 import {COLORS} from '../../src/functions/colors.ts'
 import type {
   BranchDeployContext,
@@ -34,6 +35,8 @@ type ActionsCoreModule = typeof import('../../src/actions-core.ts')
 type AdminModule = typeof import('../../src/functions/admin.ts')
 type OutdatedModule = typeof import('../../src/functions/outdated-check.ts')
 type PrStacksModule = typeof import('../../src/functions/pr-stacks.ts')
+type PrStackChecksModule =
+  typeof import('../../src/functions/pr-stack-checks.ts')
 
 const infoMock = createMock<ActionsCoreModule['info']>()
 const warningMock = createMock<ActionsCoreModule['warning']>()
@@ -50,6 +53,9 @@ const isOutdatedMock = createMock<OutdatedModule['isOutdated']>(() =>
 const resolvePrStackMock = createMock<PrStacksModule['resolvePrStack']>(() =>
   Promise.resolve(null)
 )
+const loadPrStackRequiredChecksMock = createMock<
+  PrStackChecksModule['loadPrStackRequiredChecks']
+>(() => Promise.resolve([]))
 
 installModuleMock(mock, new URL('../../src/actions-core.ts', import.meta.url), {
   debug: debugMock,
@@ -75,6 +81,11 @@ installModuleMock(
   mock,
   new URL('../../src/functions/pr-stacks.ts', import.meta.url),
   {resolvePrStack: resolvePrStackMock}
+)
+installModuleMock(
+  mock,
+  new URL('../../src/functions/pr-stack-checks.ts', import.meta.url),
+  {loadPrStackRequiredChecks: loadPrStackRequiredChecksMock}
 )
 
 const {filterChecks, prechecks} =
@@ -104,6 +115,7 @@ interface PrechecksOctokitFixture {
     repos: {
       compareCommits: Mock<PrechecksOctokit['rest']['repos']['compareCommits']>
       getBranch: Mock<PrechecksOctokit['rest']['repos']['getBranch']>
+      getBranchRules: Mock<PrechecksOctokit['rest']['repos']['getBranchRules']>
       getCollaboratorPermissionLevel: Mock<
         PrechecksOctokit['rest']['repos']['getCollaboratorPermissionLevel']
       >
@@ -142,6 +154,9 @@ let compareCommitsMock: Mock<
   PrechecksOctokit['rest']['repos']['compareCommits']
 >
 let getBranchMock: Mock<PrechecksOctokit['rest']['repos']['getBranch']>
+let getBranchRulesMock: Mock<
+  PrechecksOctokit['rest']['repos']['getBranchRules']
+>
 let updateBranchMock: Mock<PrechecksOctokit['rest']['pulls']['updateBranch']>
 let octokit: PrechecksOctokitFixture
 let data: DeepMutable<PrecheckData>
@@ -166,6 +181,10 @@ beforeEach(testContext => {
   )
   resolvePrStackMock.mock.resetCalls()
   resolvePrStackMock.mock.mockImplementation(() => Promise.resolve(null))
+  loadPrStackRequiredChecksMock.mock.resetCalls()
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.resolve([])
+  )
   stubEnv(testContext, 'INPUT_PERMISSIONS', 'admin,write')
 
   baseCommitWithOid = {
@@ -300,6 +319,9 @@ beforeEach(testContext => {
         }
       })
   )
+  getBranchRulesMock = createMock<
+    PrechecksOctokit['rest']['repos']['getBranchRules']
+  >(() => Promise.resolve({data: []}))
   updateBranchMock = createMock<
     PrechecksOctokit['rest']['pulls']['updateBranch']
   >(() => Promise.resolve({status: 202}))
@@ -309,6 +331,7 @@ beforeEach(testContext => {
       repos: {
         compareCommits: compareCommitsMock,
         getBranch: getBranchMock,
+        getBranchRules: getBranchRulesMock,
         getCollaboratorPermissionLevel: getCollabOK
       },
       pulls: {
@@ -501,6 +524,60 @@ function stackPolicy({
   }
 }
 
+const STACK_REQUIRED_CHECKS = [
+  {context: 'test1', appId: 15368},
+  {context: 'security', appId: null}
+] as const satisfies readonly PrStackRequiredCheck[]
+
+const STACK_TEST_CHECK = {
+  name: 'test1',
+  isRequired: true,
+  conclusion: 'SUCCESS',
+  checkSuite: {app: {databaseId: 15368}}
+} as const satisfies RawCheckResult
+
+const STACK_SECURITY_CHECK = {
+  context: 'security',
+  isRequired: true,
+  state: 'SUCCESS'
+} as const satisfies RawCheckResult
+
+function stackChecksRollup(
+  nodes: readonly RawCheckResult[],
+  state = 'SUCCESS'
+): NonNullable<TestStatusCheckRollup> {
+  return {state, contexts: {nodes, pageInfo: LAST_PAGE}}
+}
+
+function mockStackRequiredChecks({
+  requiredChecks = STACK_REQUIRED_CHECKS,
+  rollups = new Map<number, TestStatusCheckRollup>()
+}: {
+  readonly requiredChecks?: readonly PrStackRequiredCheck[]
+  readonly rollups?: ReadonlyMap<number, TestStatusCheckRollup>
+} = {}): void {
+  mockNativeStack({
+    policies: new Map(
+      NATIVE_STACK.pullRequests.map(pull => {
+        const rollup = rollups.get(pull.number)
+        return [
+          pull.number,
+          stackPolicy({
+            headSha: pull.headSha,
+            rollup:
+              rollup === undefined
+                ? stackChecksRollup([STACK_TEST_CHECK, STACK_SECURITY_CHECK])
+                : rollup
+          })
+        ]
+      })
+    )
+  })
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.resolve(requiredChecks)
+  )
+}
+
 function stackWithDraft(pullNumber: number): PrStackSnapshot {
   return {
     ...NATIVE_STACK,
@@ -615,6 +692,7 @@ test('does not resolve PR stacks while the feature is disabled', async () => {
   assert.strictEqual(result.status, false)
   assert.match(result.message, /not the default branch/u)
   assertCalledTimes(resolvePrStackMock, 0)
+  assertCalledTimes(loadPrStackRequiredChecksMock, 0)
   assertCalledTimes(graphQLOK, 0)
 })
 
@@ -636,6 +714,7 @@ test('keeps standalone PR behavior when stack support is enabled', async () => {
     expectedHeadSha: 'abc123',
     stableBranch: 'main'
   })
+  assertCalledTimes(loadPrStackRequiredChecksMock, 0)
 })
 
 for (const allowed of [false, true]) {
@@ -652,6 +731,7 @@ for (const allowed of [false, true]) {
       assert.strictEqual(result.status, allowed)
       assert.strictEqual('stack' in result, false)
       assertCalledTimes(resolvePrStackMock, 1)
+      assertCalledTimes(loadPrStackRequiredChecksMock, 0)
       assertCalledTimes(graphQLOK, allowed ? 1 : 0)
       if (allowed) {
         assert.ok(
@@ -855,7 +935,337 @@ test('requires explicitly named CI checks on each lower stack PR', async () => {
   data.inputs.checks = ['legacy-ci']
 
   await assertLowerStackFailure(/following checks are missing: .legacy-ci./u)
+  assertCalledTimes(loadPrStackRequiredChecksMock, 0)
 })
+
+const missingStackCheckCases = [
+  ['null rollup', null, 'test1'],
+  ['empty rollup', stackChecksRollup([]), 'test1'],
+  [
+    'optional-only checks',
+    stackChecksRollup([
+      {
+        ...STACK_TEST_CHECK,
+        name: 'optional-ci',
+        isRequired: false
+      }
+    ]),
+    'test1'
+  ],
+  [
+    'partially missing checks',
+    stackChecksRollup([STACK_TEST_CHECK]),
+    'security'
+  ],
+  [
+    'wrong GitHub App',
+    stackChecksRollup([
+      {...STACK_TEST_CHECK, checkSuite: {app: {databaseId: 1}}},
+      STACK_SECURITY_CHECK
+    ]),
+    'test1'
+  ],
+  [
+    'missing GitHub App identity',
+    stackChecksRollup([
+      {...STACK_TEST_CHECK, checkSuite: {app: null}},
+      STACK_SECURITY_CHECK
+    ]),
+    'test1'
+  ],
+  [
+    'app-bound legacy status',
+    stackChecksRollup([
+      {context: 'test1', isRequired: true, state: 'SUCCESS'},
+      STACK_SECURITY_CHECK
+    ]),
+    'test1'
+  ],
+  [
+    'non-required matching check',
+    stackChecksRollup([
+      {...STACK_TEST_CHECK, isRequired: false},
+      STACK_SECURITY_CHECK
+    ]),
+    'test1'
+  ]
+] as const satisfies readonly (readonly [
+  string,
+  TestStatusCheckRollup,
+  string
+])[]
+
+for (const mode of ['all', 'required', 'empty list'] as const) {
+  for (const pullNumber of [121, 123]) {
+    for (const [
+      description,
+      rollup,
+      missingContext
+    ] of missingStackCheckCases) {
+      test(
+        'rejects ' +
+          description +
+          ' on stack PR #' +
+          String(pullNumber) +
+          ' with checks ' +
+          mode,
+        async () => {
+          mockStackRequiredChecks({rollups: new Map([[pullNumber, rollup]])})
+          data.inputs.checks = mode === 'empty list' ? [] : mode
+
+          const result = await prechecks(context, octokit, data)
+
+          assert.strictEqual(result.status, false)
+          assert.match(result.message, /commitStatus: `MISSING`/u)
+          assert.ok(result.message.includes(missingContext))
+          if (pullNumber === 121) {
+            assert.ok(result.message.includes('PR #121 in stack #7'))
+          } else {
+            assertCalledWith(setOutputMock, 'commit_status', 'MISSING')
+          }
+          assertCalledTimes(loadPrStackRequiredChecksMock, 1)
+          assertCalledTimes(updateBranchMock, 0)
+        }
+      )
+    }
+  }
+
+  test('accepts every expected stack check with checks ' + mode, async () => {
+    mockStackRequiredChecks()
+    data.inputs.checks = mode === 'empty list' ? [] : mode
+
+    assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+    assertCalledWith(setOutputMock, 'commit_status', 'SUCCESS')
+    assertCalledWith(loadPrStackRequiredChecksMock, octokit, {
+      owner: 'corp',
+      repo: 'test',
+      stableBranch: 'main',
+      stableSha: STACK_STABLE_SHA,
+      branch: {
+        commit: {
+          sha: STACK_STABLE_SHA,
+          commit: {tree: {sha: 'beefdead'}}
+        },
+        name: 'main'
+      }
+    })
+    assertCalledTimes(loadPrStackRequiredChecksMock, 1)
+  })
+
+  test('honors ignored required stack checks with checks ' + mode, async () => {
+    mockStackRequiredChecks({
+      rollups: new Map(
+        NATIVE_STACK.pullRequests.map(pull => [
+          pull.number,
+          stackChecksRollup([STACK_TEST_CHECK])
+        ])
+      )
+    })
+    data.inputs.checks = mode === 'empty list' ? [] : mode
+    data.inputs.ignored_checks = ['security']
+
+    assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+    assertCalledTimes(loadPrStackRequiredChecksMock, 1)
+  })
+
+  for (const [description, rollup] of [
+    ['null', null],
+    ['empty', stackChecksRollup([])]
+  ] as const) {
+    test(
+      'accepts a proven empty stack inventory with ' +
+        description +
+        ' CI and checks ' +
+        mode,
+      async () => {
+        mockStackRequiredChecks({
+          requiredChecks: [],
+          rollups: new Map(
+            NATIVE_STACK.pullRequests.map(pull => [pull.number, rollup])
+          )
+        })
+        data.inputs.checks = mode === 'empty list' ? [] : mode
+
+        assert.strictEqual(
+          (await prechecks(context, octokit, data)).status,
+          true
+        )
+        assertCalledWith(
+          setOutputMock,
+          'commit_status',
+          rollup === null ? null : 'SUCCESS'
+        )
+        assertCalledTimes(loadPrStackRequiredChecksMock, 1)
+      }
+    )
+  }
+}
+
+test('allows null stack rollups when every expected check is ignored', async () => {
+  mockStackRequiredChecks({
+    rollups: new Map(NATIVE_STACK.pullRequests.map(pull => [pull.number, null]))
+  })
+  data.inputs.checks = 'required'
+  data.inputs.ignored_checks = ['test1', 'security']
+
+  assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+  assertCalledTimes(loadPrStackRequiredChecksMock, 1)
+})
+
+test('accepts unbound legacy status contexts from the stack inventory', async () => {
+  mockNativeStack()
+  data.inputs.checks = 'required'
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.resolve([{context: 'legacy-ci', appId: null}])
+  )
+
+  assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+  assertCalledTimes(loadPrStackRequiredChecksMock, 1)
+})
+
+test('does not use another app to replace a pending required stack rerun', async () => {
+  mockStackRequiredChecks({
+    rollups: new Map([
+      [
+        121,
+        stackChecksRollup([
+          {...STACK_TEST_CHECK, databaseId: 10},
+          {...STACK_TEST_CHECK, databaseId: 11, conclusion: null},
+          {
+            ...STACK_TEST_CHECK,
+            checkSuite: {app: {databaseId: 1}},
+            isRequired: false
+          },
+          STACK_SECURITY_CHECK
+        ])
+      ]
+    ])
+  })
+  data.inputs.checks = 'required'
+
+  await assertLowerStackFailure(/commitStatus: `PENDING`/u)
+})
+
+for (const mode of ['all', 'required'] as const) {
+  test(
+    'rejects ambiguous required stack check sources with checks ' + mode,
+    async () => {
+      mockStackRequiredChecks({
+        rollups: new Map([
+          [
+            121,
+            stackChecksRollup([
+              {
+                ...STACK_TEST_CHECK,
+                checkSuite: {app: null},
+                databaseId: 10
+              },
+              {
+                ...STACK_TEST_CHECK,
+                checkSuite: {app: null},
+                databaseId: 11
+              },
+              STACK_SECURITY_CHECK
+            ])
+          ]
+        ])
+      })
+      data.inputs.checks = mode
+      data.inputs.ignored_checks = ['unrelated-ci']
+
+      await assertLowerStackFailure(/could not verify all CI checks/u)
+    }
+  )
+}
+
+for (const mode of ['ignored', 'optional'] as const) {
+  test(
+    'preserves ' + mode + ' ambiguous checks in a stack inventory',
+    async () => {
+      const ambiguous = {
+        ...STACK_TEST_CHECK,
+        name: 'optional-ci',
+        checkSuite: {app: null},
+        isRequired: mode === 'ignored'
+      }
+      mockStackRequiredChecks({
+        rollups: new Map([
+          [
+            121,
+            stackChecksRollup([
+              STACK_TEST_CHECK,
+              STACK_SECURITY_CHECK,
+              {...ambiguous, databaseId: 10},
+              {...ambiguous, databaseId: 11}
+            ])
+          ]
+        ])
+      })
+      data.inputs.checks = mode === 'ignored' ? 'all' : 'required'
+      data.inputs.ignored_checks =
+        mode === 'ignored' ? ['optional-ci'] : ['unrelated-ci']
+
+      assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+    }
+  )
+}
+
+test('keeps nonempty explicit stack check lists independent of the inventory', async () => {
+  mockNativeStack()
+  data.inputs.checks = ['legacy-ci']
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.reject(new Error('Inventory must not be read'))
+  )
+
+  assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+  assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+})
+
+test('fails closed when the stack required-check inventory is unavailable', async () => {
+  mockNativeStack()
+  data.inputs.checks = 'required'
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.reject(new Error('Required checks are unavailable'))
+  )
+
+  assert.deepStrictEqual(await prechecks(context, octokit, data), {
+    message:
+      '### ⚠️ Cannot proceed with deployment\n\nThe Action could not read the required CI checks for this pull request stack. Make sure its base-branch rules are readable. Required-workflow rules are not yet supported by this preview.',
+    status: false
+  })
+  assertCalledTimes(loadPrStackRequiredChecksMock, 1)
+  assertCalledTimes(graphQLOK, 0)
+  assertCalledTimes(updateBranchMock, 0)
+})
+
+for (const enabled of [false, true]) {
+  for (const mode of ['all', 'required', 'empty list'] as const) {
+    for (const [description, rollup] of [
+      ['null', null],
+      ['empty', stackChecksRollup([])]
+    ] as const) {
+      test(
+        'preserves ordinary PR ' +
+          description +
+          ' CI with checks ' +
+          mode +
+          ' and stacks ' +
+          String(enabled),
+        async () => {
+          data.inputs.enable_pr_stacks = enabled
+          data.inputs.checks = mode === 'empty list' ? [] : mode
+          mockApprovedCi(rollup)
+
+          assert.strictEqual(
+            (await prechecks(context, octokit, data)).status,
+            true
+          )
+          assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+        }
+      )
+    }
+  }
+}
 
 test('fails closed when a lower stack PR has incomplete CI data', async () => {
   mockNativeStack({
@@ -1098,9 +1508,13 @@ test('honors skip_ci for lower stack PRs', async () => {
     ])
   })
   data.inputs.skipCi = 'production'
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.reject(new Error('Inventory must not be read'))
+  )
 
   assert.strictEqual((await prechecks(context, octokit, data)).status, true)
   assertCalledWith(setOutputMock, 'commit_status', 'skip_ci')
+  assertCalledTimes(loadPrStackRequiredChecksMock, 0)
 })
 
 test('keeps the admin review exception for lower stack PRs', async () => {
@@ -1286,6 +1700,7 @@ test('keeps stable-branch rollbacks outside stack resolution', async () => {
     isFork: false
   })
   assertCalledTimes(resolvePrStackMock, 0)
+  assertCalledTimes(loadPrStackRequiredChecksMock, 0)
 })
 
 for (const allowed of [false, true]) {
@@ -1314,6 +1729,7 @@ for (const allowed of [false, true]) {
         assert.match(result.message, /sha deployments have not been enabled/u)
       }
       assertCalledTimes(resolvePrStackMock, 0)
+      assertCalledTimes(loadPrStackRequiredChecksMock, 0)
     }
   )
 }
@@ -1325,6 +1741,7 @@ test('preserves ordinary PR policy-query errors when stack support is enabled', 
 
   await assert.rejects(prechecks(context, octokit, data), failure)
   assertCalledTimes(resolvePrStackMock, 1)
+  assertCalledTimes(loadPrStackRequiredChecksMock, 0)
 })
 
 test('treats an unfinished check run without a conclusion as unhealthy', () => {

@@ -21,6 +21,10 @@ For a stack `main <- PR1 <- PR2 <- PR3`, running `.deploy` on PR2 deploys PR2's 
 
 The `required_contexts` input keeps its existing meaning: GitHub checks those commit statuses on the commit being deployed. It does not add a separate status requirement to every lower commit. Use `checks` and `ignored_checks` to choose which CI checks must pass on each included PR.
 
+With `checks: required` or `checks: all`, Branch Deploy also reads the trunk's branch protection and active rulesets. Every required status check must have been reported, including by the expected GitHub App when one is specified. A check that has not started yet is not treated as a passing check. Empty `checks` has the same behavior as `all`. The existing explicit check-list, `ignored_checks`, and `skip_ci` settings still apply.
+
+Automatic CI selection cannot yet verify required-workflow rules or commit statuses that must come from a specific GitHub App. It stops if those rules cannot be verified. Ordinary check runs from a required App, including GitHub Actions, are supported. These deployment checks do not replace GitHub's final merge rules.
+
 Branch Deploy verifies the stack's membership and commit ancestry before continuing. It stops if the stack has changed, is not linear, or GitHub cannot provide the stack metadata needed to verify it. The deployment uses the exact checked commit without asking GitHub to auto-merge another branch. Existing outputs keep their meanings: `ref` identifies the selected PR branch and `sha` is the checked commit to use in subsequent checkout steps. This does not enable unchecked SHA deployment commands.
 
 ## Updating a stack

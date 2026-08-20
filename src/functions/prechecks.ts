@@ -8,6 +8,8 @@ import {API_HEADERS} from './api-headers.ts'
 import {evaluatePrecheckGates} from './precheck-gates.ts'
 import {resolvePrStack} from './pr-stacks.ts'
 import type {PrStackSnapshot} from './pr-stacks.ts'
+import {loadPrStackRequiredChecks} from './pr-stack-checks.ts'
+import type {PrStackRequiredCheck} from './pr-stack-checks.ts'
 import {saveActionState, setActionOutput} from '../action-io.ts'
 import {
   legacyApiError,
@@ -44,6 +46,9 @@ type PullUpdateParameters = Parameters<PullUpdateMethod>[0]
 type BranchGetMethod = BranchDeployOctokit['rest']['repos']['getBranch']
 type BranchGetParameters = Parameters<BranchGetMethod>[0]
 type FullBranchGetResponse = Awaited<ReturnType<BranchGetMethod>>
+type BranchRulesParameters = Parameters<
+  BranchDeployOctokit['rest']['repos']['getBranchRules']
+>[0]
 type CompareMethod = BranchDeployOctokit['rest']['repos']['compareCommits']
 type CompareParameters = Parameters<CompareMethod>[0]
 type FullCompareResponse = Awaited<ReturnType<CompareMethod>>
@@ -114,6 +119,9 @@ export interface PrechecksOctokit {
       readonly getBranch: (
         parameters?: BranchGetParameters
       ) => Promise<PrechecksBranchResponse>
+      readonly getBranchRules: (
+        parameters?: BranchRulesParameters
+      ) => Promise<{readonly data: unknown}>
       readonly getCollaboratorPermissionLevel: (
         parameters?: PermissionParameters
       ) => Promise<{
@@ -252,6 +260,7 @@ export async function prechecks(
   const securityWarningsEnabled = data.inputs.use_security_warnings
 
   let stack: PrStackSnapshot | null = null
+  let stackRequiredChecks: readonly PrStackRequiredCheck[] | null = null
   if (
     data.inputs.enable_pr_stacks &&
     isNotStableBranchDeploy &&
@@ -274,6 +283,30 @@ export async function prechecks(
       }
     } catch (error) {
       return stackPrecheckUnavailable(error)
+    }
+  }
+
+  if (
+    stack !== null &&
+    !skipCi &&
+    (typeof checks === 'string' || checks.length === 0)
+  ) {
+    try {
+      stackRequiredChecks = await loadPrStackRequiredChecks(octokit, {
+        ...context.repo,
+        stableBranch: stack.stableBranch,
+        stableSha: stack.stableSha,
+        branch: stableBaseBranch.data
+      })
+    } catch (error) {
+      core.debug(
+        `PR stack required CI verification failed: ${legacyApiError(error).message}`
+      )
+      return {
+        message:
+          '### ⚠️ Cannot proceed with deployment\n\nThe Action could not read the required CI checks for this pull request stack. Make sure its base-branch rules are readable. Required-workflow rules are not yet supported by this preview.',
+        status: false
+      }
     }
   }
 
@@ -471,7 +504,8 @@ export async function prechecks(
     octokit,
     pullRequestNumber: context.issue.number,
     result,
-    skipCi
+    skipCi,
+    stackRequiredChecks
   })
   const commitStatus = checkEvaluation.commitStatus
   const filterChecksResults =
@@ -512,6 +546,7 @@ export async function prechecks(
       isFork,
       skipCi,
       skipReviews,
+      stackRequiredChecks,
       userIsAdmin
     })
     if (stackFailure !== null) return stackFailure
@@ -726,6 +761,7 @@ interface StackPrecheckRequest extends PrechecksRequest {
   readonly skipCi: boolean
   readonly skipReviews: boolean
   readonly stack: PrStackSnapshot
+  readonly stackRequiredChecks: readonly PrStackRequiredCheck[] | null
   readonly userIsAdmin: boolean
 }
 
@@ -740,6 +776,7 @@ async function checkStackPrerequisites({
   isFork,
   skipCi,
   skipReviews,
+  stackRequiredChecks,
   userIsAdmin
 }: StackPrecheckRequest): Promise<PrecheckFailure | null> {
   try {
@@ -762,7 +799,8 @@ async function checkStackPrerequisites({
         octokit,
         pullRequestNumber: pull.number,
         result,
-        skipCi
+        skipCi,
+        stackRequiredChecks
       })
       const gate = evaluatePrecheckGates({
         allowDraftDeploy,
@@ -811,6 +849,7 @@ interface EvaluateCommitChecksRequest {
   readonly pullRequestNumber: number
   readonly result: PrechecksGraphqlResult
   readonly skipCi: boolean
+  readonly stackRequiredChecks: readonly PrStackRequiredCheck[] | null
 }
 
 async function evaluateCommitChecks({
@@ -820,7 +859,8 @@ async function evaluateCommitChecks({
   octokit,
   pullRequestNumber,
   result,
-  skipCi
+  skipCi,
+  stackRequiredChecks
 }: EvaluateCommitChecksRequest): Promise<CommitCheckEvaluation> {
   if (skipCi) {
     core.info(
@@ -847,6 +887,13 @@ async function evaluateCommitChecks({
     }
 
     if (statusCheckRollup === null) {
+      const missing = missingRequiredStackChecks({
+        checks,
+        checkResults: [],
+        ignoredChecks,
+        requiredChecks: stackRequiredChecks
+      })
+      if (missing !== null) return missing
       core.info('💡 no CI checks have been defined for this pull request')
       return {commitStatus: null, kind: 'no-checks'}
     }
@@ -861,6 +908,13 @@ async function evaluateCommitChecks({
       commit,
       statusCheckRollup
     )
+    const missing = missingRequiredStackChecks({
+      checks,
+      checkResults,
+      ignoredChecks,
+      requiredChecks: stackRequiredChecks
+    })
+    if (missing !== null) return missing
     const filterChecksResult = filterChecks(
       checks,
       checkResults,
@@ -889,6 +943,55 @@ async function evaluateCommitChecks({
     }
   } catch (error) {
     return {commitStatus: 'UNAVAILABLE', error, kind: 'unavailable'}
+  }
+}
+
+function missingRequiredStackChecks({
+  checks,
+  checkResults,
+  ignoredChecks,
+  requiredChecks
+}: {
+  readonly checks: PrecheckData['inputs']['checks']
+  readonly checkResults: readonly RawCheckResult[]
+  readonly ignoredChecks: readonly string[]
+  readonly requiredChecks: readonly PrStackRequiredCheck[] | null
+}): Extract<CommitCheckEvaluation, {kind: 'missing'}> | null {
+  if (requiredChecks === null || requiredChecks.length === 0) return null
+
+  // isRequired describes reported checks; the branch rules also name checks
+  // that GitHub has not created yet.
+  const latest = latestCheckResults(
+    checkResults,
+    check =>
+      !ignoredChecks.some(ignored => ignored === checkName(check)) &&
+      (checks !== 'required' || check.isRequired)
+  )
+  const missing = requiredChecks.filter(
+    expected =>
+      !ignoredChecks.includes(expected.context) &&
+      !latest.some(
+        check =>
+          check.isRequired &&
+          checkName(check) === expected.context &&
+          (expected.appId === null ||
+            // Legacy commit statuses do not expose an authoritative App ID.
+            (isCheckRun(check) && checkIntegrationId(check) === expected.appId))
+      )
+  )
+  if (missing.length === 0) return null
+
+  const names = missing.map(check =>
+    check.appId === null
+      ? check.context
+      : `${check.context} (GitHub App ${String(check.appId)})`
+  )
+  const message = `Required CI checks have not been reported for this stack: \`${names.join(', ')}\``
+  core.warning(message)
+  return {
+    commitStatus: 'MISSING',
+    filterChecksResult: {message, status: 'MISSING'},
+    kind: 'missing'
   }
 }
 

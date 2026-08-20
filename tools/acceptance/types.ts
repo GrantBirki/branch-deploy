@@ -10,8 +10,21 @@ export interface AcceptanceRunResult {
   readonly stdout: string
 }
 
+export interface MockClassicRequiredCheck {
+  readonly context: string
+  readonly app_id: number | null
+}
+
 export interface MockBranch {
   readonly name: string
+  readonly protection?: {
+    readonly enabled: boolean
+    readonly required_status_checks: {
+      readonly enforcement_level: 'everyone' | 'non_admins' | 'off'
+      readonly contexts: readonly string[]
+      readonly checks: readonly MockClassicRequiredCheck[]
+    }
+  }
   readonly sha: string
   readonly treeSha: string
 }

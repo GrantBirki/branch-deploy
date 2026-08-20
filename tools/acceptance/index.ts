@@ -17,10 +17,12 @@ import {
 import {runAcceptanceProcess, runAction} from './runner.ts'
 import type {
   AcceptanceRunResult,
+  MockClassicRequiredCheck,
   MockDeployment,
   MockDeploymentStatus,
   MockGitHubState,
   MockPullRequestStack,
+  MockRollupContext,
   MockRouteLog,
   MockStackMember,
   ScenarioContext
@@ -387,6 +389,37 @@ function requireStackMember(
   )
   assert.ok(member !== undefined)
   return member
+}
+
+function setClassicRequiredChecks(
+  state: MockGitHubState,
+  checks: readonly MockClassicRequiredCheck[],
+  contexts: readonly string[] = checks.map(check => check.context)
+): void {
+  const branch = state.branches.get('main')
+  assert.ok(branch !== undefined)
+  state.branches.set('main', {
+    ...branch,
+    protection: {
+      enabled: true,
+      required_status_checks: {
+        enforcement_level: 'non_admins',
+        contexts,
+        checks
+      }
+    }
+  })
+}
+
+function setStackRollupContexts(
+  state: MockGitHubState,
+  contexts: readonly MockRollupContext[]
+): void {
+  assert.ok(state.prStack !== null)
+  state.rollupContexts = contexts
+  for (const member of state.prStack.members) {
+    member.rollupContexts = contexts
+  }
 }
 
 function stackQueryRoutes(context: ScenarioContext): readonly MockRouteLog[] {
@@ -2901,6 +2934,428 @@ const scenarios = [
     }
   },
   {
+    name: 'native PR stacks require configured CI to be present',
+    run: async () => {
+      for (const [checks, number, missing] of [
+        ['required', 1, 'optional-only'],
+        ['all', 1, 'empty'],
+        ['', 1, 'optional-only'],
+        ['required', 3, 'empty'],
+        ['all', 3, 'not-required']
+      ] as const) {
+        await withMockGitHub(
+          `native stack ${checks} ${missing} CI on PR ${String(number)}`,
+          async context => {
+            seedPrStack(context.state)
+            setClassicRequiredChecks(context.state, [
+              {context: 'acceptance', app_id: 1}
+            ])
+            const pull =
+              number === context.state.pullRequest.number
+                ? context.state
+                : requireStackMember(context.state, number)
+            pull.rollupContexts =
+              missing === 'empty'
+                ? []
+                : [
+                    {
+                      conclusion: 'SUCCESS',
+                      integrationId: 1,
+                      isRequired: false,
+                      name:
+                        missing === 'optional-only'
+                          ? 'optional-lint'
+                          : 'acceptance',
+                      type: 'check-run'
+                    }
+                  ]
+
+            const result = await runMain(context, {
+              enable_pr_stacks: 'true',
+              checks
+            })
+
+            assertExit(context, result, 1)
+            assertReason(context, result, 'prechecks_failed')
+            assertNoDeployment(context, result)
+            assertNoLockRoutes(context)
+            assertCommentIncludes(
+              context,
+              'Required CI checks have not been reported for this stack'
+            )
+            if (number === context.state.pullRequest.number) {
+              assertOutput(context, result, 'commit_status', 'MISSING')
+            } else {
+              assertCommentIncludes(context, `PR #${String(number)}`)
+            }
+            const policyRoute = requireRoute(
+              context,
+              'GET',
+              apiPath('/rules/branches/main')
+            )
+            assert.equal(policyRoute.apiVersion, '2022-11-28')
+            assert.equal(
+              new URLSearchParams(policyRoute.query).get('per_page'),
+              '100'
+            )
+          }
+        )
+      }
+    }
+  },
+  {
+    name: 'native PR stacks combine classic and ruleset required CI',
+    run: async () => {
+      for (const missing of [
+        'legacy-required',
+        'second-ruleset-required',
+        null
+      ]) {
+        await withMockGitHub(
+          `native stack combined required CI ${String(missing)}`,
+          async context => {
+            seedPrStack(context.state)
+            setClassicRequiredChecks(
+              context.state,
+              [{context: 'acceptance', app_id: 1}],
+              ['acceptance', 'legacy-required']
+            )
+            context.state.branchRules = [
+              {
+                type: 'required_status_checks',
+                parameters: {
+                  required_status_checks: [
+                    {context: 'ruleset-required', integration_id: 15368}
+                  ],
+                  strict_required_status_checks_policy: true
+                }
+              },
+              {
+                type: 'required_status_checks',
+                parameters: {
+                  required_status_checks: [
+                    {context: 'second-ruleset-required'}
+                  ],
+                  strict_required_status_checks_policy: false
+                }
+              }
+            ]
+            const reported: readonly MockRollupContext[] = [
+              ...context.state.rollupContexts,
+              {
+                context: 'legacy-required',
+                isRequired: true,
+                state: 'SUCCESS',
+                type: 'status-context'
+              },
+              {
+                conclusion: 'SUCCESS',
+                integrationId: 15368,
+                isRequired: true,
+                name: 'ruleset-required',
+                type: 'check-run'
+              },
+              {
+                conclusion: 'SUCCESS',
+                isRequired: true,
+                name: 'second-ruleset-required',
+                type: 'check-run'
+              }
+            ]
+            setStackRollupContexts(context.state, reported)
+            if (missing !== null) {
+              requireStackMember(context.state, 1).rollupContexts =
+                reported.filter(
+                  check =>
+                    (check.type === 'check-run'
+                      ? check.name
+                      : check.context) !== missing
+                )
+            }
+
+            const result = await runMain(context, {
+              enable_pr_stacks: 'true',
+              checks: 'required'
+            })
+
+            if (missing === null) {
+              assertExit(context, result, 0)
+              assertReason(context, result, 'deployment_ready')
+              assert.equal(
+                requireDeployment(context).sha,
+                ACCEPTANCE_SHAS.stackTop
+              )
+            } else {
+              assertExit(context, result, 1)
+              assertReason(context, result, 'prechecks_failed')
+              assertNoDeployment(context, result)
+              assertNoLockRoutes(context)
+              assertCommentIncludes(context, missing)
+              assertCommentIncludes(context, 'PR #1')
+            }
+          }
+        )
+      }
+    }
+  },
+  {
+    name: 'native PR stacks enforce required CI App sources',
+    run: async () => {
+      const required: MockRollupContext = {
+        conclusion: 'SUCCESS',
+        integrationId: 15368,
+        isRequired: true,
+        name: 'acceptance',
+        type: 'check-run'
+      }
+      const cases = [
+        {
+          name: 'wrong App',
+          checks: 'required',
+          reported: {...required, integrationId: 7},
+          accepted: false
+        },
+        {
+          name: 'unknown App',
+          checks: 'all',
+          reported: {...required, integrationId: null},
+          accepted: false
+        },
+        {
+          name: 'legacy status without App identity',
+          checks: 'required',
+          reported: {
+            context: 'acceptance',
+            isRequired: true,
+            state: 'SUCCESS',
+            type: 'status-context'
+          },
+          accepted: false
+        },
+        {
+          name: 'optional result from the right App',
+          checks: 'all',
+          reported: {...required, isRequired: false},
+          accepted: false
+        },
+        {
+          name: 'required result from the right App',
+          checks: 'required',
+          reported: required,
+          accepted: true
+        }
+      ] satisfies readonly {
+        readonly name: string
+        readonly checks: string
+        readonly reported: MockRollupContext
+        readonly accepted: boolean
+      }[]
+      for (const testCase of cases) {
+        await withMockGitHub(`native stack ${testCase.name}`, async context => {
+          seedPrStack(context.state)
+          setClassicRequiredChecks(context.state, [
+            {context: 'acceptance', app_id: 15368}
+          ])
+          context.state.branchRules = [
+            {
+              type: 'required_status_checks',
+              parameters: {
+                required_status_checks: [
+                  {context: 'acceptance', integration_id: 15368}
+                ],
+                strict_required_status_checks_policy: true
+              }
+            }
+          ]
+          setStackRollupContexts(context.state, [required])
+          requireStackMember(context.state, 1).rollupContexts = [
+            testCase.reported
+          ]
+
+          const result = await runMain(context, {
+            enable_pr_stacks: 'true',
+            checks: testCase.checks
+          })
+
+          if (testCase.accepted) {
+            assertExit(context, result, 0)
+            assertReason(context, result, 'deployment_ready')
+            assert.equal(
+              requireDeployment(context).sha,
+              ACCEPTANCE_SHAS.stackTop
+            )
+          } else {
+            assertExit(context, result, 1)
+            assertReason(context, result, 'prechecks_failed')
+            assertNoDeployment(context, result)
+            assertNoLockRoutes(context)
+            assertCommentIncludes(context, 'acceptance (GitHub App 15368)')
+            assertCommentIncludes(context, 'PR #1')
+          }
+        })
+      }
+    }
+  },
+  {
+    name: 'native PR stacks read every required CI rules page',
+    run: async () => {
+      for (const complete of [false, true]) {
+        await withMockGitHub(
+          `native stack required CI pagination ${String(complete)}`,
+          async context => {
+            seedPrStack(context.state)
+            context.state.branchRules = [
+              ...Array.from({length: complete ? 99 : 100}, () => ({
+                type: 'deletion'
+              })),
+              {
+                type: 'required_status_checks',
+                parameters: {
+                  required_status_checks: [{context: 'late-required'}],
+                  strict_required_status_checks_policy: true
+                }
+              }
+            ]
+            const initial = context.state.rollupContexts
+            setStackRollupContexts(context.state, [
+              ...initial,
+              {
+                conclusion: 'SUCCESS',
+                isRequired: true,
+                name: 'late-required',
+                type: 'check-run'
+              }
+            ])
+            if (!complete) {
+              requireStackMember(context.state, 1).rollupContexts = initial
+            }
+
+            const result = await runMain(context, {
+              enable_pr_stacks: 'true',
+              checks: 'required',
+              use_security_warnings: 'false'
+            })
+
+            assert.deepEqual(
+              context.routeLog
+                .filter(route => route.path === apiPath('/rules/branches/main'))
+                .map(route => new URLSearchParams(route.query).get('page')),
+              ['1', '2'],
+              diagnostics(context, result)
+            )
+            if (complete) {
+              assertExit(context, result, 0)
+              assertReason(context, result, 'deployment_ready')
+            } else {
+              assertExit(context, result, 1)
+              assertReason(context, result, 'prechecks_failed')
+              assertNoDeployment(context, result)
+              assertNoLockRoutes(context)
+              assertCommentIncludes(context, 'late-required')
+            }
+          }
+        )
+      }
+    }
+  },
+  {
+    name: 'native PR stacks fail closed on unavailable required CI policy',
+    run: async () => {
+      for (const failure of [
+        'unreadable rules',
+        'malformed rule',
+        'required workflow rule'
+      ] as const) {
+        await withMockGitHub(`native stack ${failure}`, async context => {
+          seedPrStack(context.state)
+          switch (failure) {
+            case 'unreadable rules':
+              queueFault(context.state, {
+                method: 'GET',
+                path: apiPath('/rules/branches/main'),
+                response: {message: 'Resource not accessible', status: 403}
+              })
+              break
+            case 'malformed rule':
+              context.state.branchRules = [
+                {type: 'required_status_checks', parameters: {}}
+              ]
+              break
+            case 'required workflow rule':
+              context.state.branchRules = [
+                {type: 'workflows', parameters: {workflows: []}}
+              ]
+              break
+          }
+
+          const result = await runMain(context, {
+            enable_pr_stacks: 'true',
+            checks: 'required'
+          })
+
+          assertExit(context, result, 1)
+          assertReason(context, result, 'prechecks_failed')
+          assertNoDeployment(context, result)
+          assertNoLockRoutes(context)
+          assertCommentIncludes(
+            context,
+            'could not read the required CI checks for this pull request stack'
+          )
+        })
+      }
+    }
+  },
+  {
+    name: 'native PR stacks limit automatic required CI inventory',
+    run: async () => {
+      for (const mode of [
+        'ordinary PR',
+        'explicit checks',
+        'skip CI',
+        'disabled stacks'
+      ] as const) {
+        await withMockGitHub(`required CI inventory ${mode}`, async context => {
+          if (mode !== 'ordinary PR') seedPrStack(context.state)
+          setClassicRequiredChecks(context.state, [
+            {context: 'missing-required', app_id: 15368}
+          ])
+          context.state.branchRules = [
+            {
+              type: 'required_status_checks',
+              parameters: {
+                required_status_checks: [{context: 'missing-required'}],
+                strict_required_status_checks_policy: true
+              }
+            }
+          ]
+
+          const result = await runMain(context, {
+            enable_pr_stacks: mode === 'disabled stacks' ? 'false' : 'true',
+            checks: mode === 'explicit checks' ? 'acceptance' : 'required',
+            ...(mode === 'skip CI' ? {skip_ci: 'production'} : {}),
+            use_security_warnings: 'false'
+          })
+
+          if (mode === 'disabled stacks') {
+            assertExit(context, result, 1)
+            assertReason(context, result, 'prechecks_failed')
+            assertNoDeployment(context, result)
+          } else {
+            assertExit(context, result, 0)
+            assertReason(context, result, 'deployment_ready')
+          }
+          assert.deepEqual(
+            context.routeLog.filter(
+              route => route.path === apiPath('/rules/branches/main')
+            ),
+            [],
+            diagnostics(context, result)
+          )
+        })
+      }
+    }
+  },
+  {
     name: 'native PR stacks enforce lower-layer policy',
     run: async () => {
       for (const failure of [
@@ -4309,6 +4764,77 @@ const scenarios = [
           diagnostics(context, result)
         )
       })
+  },
+  {
+    name: 'mock branch protection and active rules pagination',
+    run: () =>
+      withMockGitHub(
+        'mock branch protection and active rules pagination',
+        async context => {
+          const branchPath = apiPath('/branches/main')
+          const unprotected = await getMockRoute(context.port, branchPath)
+          assert.equal(unprotected.status, 200)
+          const unprotectedBody = requireRecordValue(
+            JSON.parse(unprotected.body),
+            diagnostics(context)
+          )
+          assert.equal(unprotectedBody['protected'], false)
+          assert.deepEqual(unprotectedBody['protection'], {
+            enabled: false,
+            required_status_checks: {
+              enforcement_level: 'off',
+              contexts: [],
+              checks: []
+            }
+          })
+
+          const checks = [
+            {context: 'app-bound', app_id: 15368},
+            {context: 'any-app', app_id: null},
+            {context: 'legacy-any-app', app_id: -1}
+          ]
+          const contexts = [
+            'app-bound',
+            'any-app',
+            'legacy-any-app',
+            'legacy-context-only'
+          ]
+          setClassicRequiredChecks(context.state, checks, contexts)
+          const protectedBranch = await getMockRoute(context.port, branchPath)
+          assert.equal(protectedBranch.status, 200)
+          const protectedBody = requireRecordValue(
+            JSON.parse(protectedBranch.body),
+            diagnostics(context)
+          )
+          assert.equal(protectedBody['protected'], true)
+          assert.deepEqual(protectedBody['protection'], {
+            enabled: true,
+            required_status_checks: {
+              enforcement_level: 'non_admins',
+              contexts,
+              checks
+            }
+          })
+
+          context.state.branchRules = Array.from({length: 35}, (_, index) => ({
+            type: 'deletion',
+            ruleset_id: index + 1
+          }))
+          for (const [query, start, end] of [
+            ['', 0, 30],
+            ['?per_page=20&page=2', 20, 35],
+            ['?per_page=20&page=3', 40, 60]
+          ] as const) {
+            const result = await getMockRoute(
+              context.port,
+              `${apiPath('/rules/branches/main')}${query}`
+            )
+            assert.equal(result.status, 200)
+            const page: unknown = JSON.parse(result.body)
+            assert.deepEqual(page, context.state.branchRules.slice(start, end))
+          }
+        }
+      )
   },
   {
     name: 'mock GraphQL deployment lookup',

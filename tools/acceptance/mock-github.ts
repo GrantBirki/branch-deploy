@@ -312,8 +312,18 @@ function branchSha(state: MockGitHubState, ref: string): string {
 }
 
 function branchResponse(branch: MockBranch): unknown {
+  const protection = branch.protection ?? {
+    enabled: false,
+    required_status_checks: {
+      enforcement_level: 'off',
+      contexts: [],
+      checks: []
+    }
+  }
   return {
     name: branch.name,
+    protected: protection.enabled,
+    protection,
     commit: {
       sha: branch.sha,
       commit: {
@@ -967,7 +977,12 @@ function routeRest(
     parts.length === 6 &&
     part(parts, 4) === 'branches'
   ) {
-    return {status: 200, value: state.branchRules}
+    const page = Number(searchParams.get('page') ?? '1')
+    const perPage = Number(searchParams.get('per_page') ?? '30')
+    return {
+      status: 200,
+      value: state.branchRules.slice((page - 1) * perPage, page * perPage)
+    }
   }
 
   if (

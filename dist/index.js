@@ -39568,7 +39568,143 @@ async function prStackSnapshotMatches(octokit, snapshot) {
     return current !== null && (0,external_node_util_.isDeepStrictEqual)(snapshot, current);
 }
 
+;// CONCATENATED MODULE: ./src/functions/pr-stack-checks.ts
+
+
+function pr_stack_checks_invalid(reason) {
+    throw new Error(`Cannot verify pull request stack required checks: ${reason}`);
+}
+function pr_stack_checks_isRecord(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+function pr_stack_checks_record(value) {
+    if (!pr_stack_checks_isRecord(value))
+        pr_stack_checks_invalid('incomplete policy response');
+    return value;
+}
+function pr_stack_checks_isUnknownArray(value) {
+    return Array.isArray(value);
+}
+function pr_stack_checks_array(value) {
+    if (!pr_stack_checks_isUnknownArray(value))
+        pr_stack_checks_invalid('incomplete required-check inventory');
+    return value;
+}
+function pr_stack_checks_string(value) {
+    if (typeof value !== 'string' || value === '') {
+        pr_stack_checks_invalid('invalid string in policy response');
+    }
+    return value;
+}
+function pr_stack_checks_boolean(value) {
+    if (typeof value !== 'boolean')
+        pr_stack_checks_invalid('invalid classic protection state');
+    return value;
+}
+function pr_stack_checks_sha(value) {
+    const result = pr_stack_checks_string(value);
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(result)) {
+        pr_stack_checks_invalid('invalid stable commit SHA');
+    }
+    return result.toLowerCase();
+}
+function appId(value) {
+    if (value === null || value === -1)
+        return null;
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+        pr_stack_checks_invalid('invalid required-check app ID');
+    }
+    return value;
+}
+function requiredCheck(value, appKey) {
+    const result = pr_stack_checks_record(value);
+    const id = result[appKey];
+    return {
+        context: pr_stack_checks_string(result['context']),
+        appId: appKey === 'integration_id' && id === undefined ? null : appId(id)
+    };
+}
+function classicChecks(request) {
+    const branch = pr_stack_checks_record(request.branch);
+    if (pr_stack_checks_string(branch['name']) !== request.stableBranch ||
+        pr_stack_checks_sha(pr_stack_checks_record(branch['commit'])['sha']) !== pr_stack_checks_sha(request.stableSha)) {
+        pr_stack_checks_invalid('stable branch changed');
+    }
+    const protection = pr_stack_checks_record(branch['protection']);
+    const enabled = pr_stack_checks_boolean(protection['enabled']);
+    const policy = pr_stack_checks_record(protection['required_status_checks']);
+    const enforcement = policy['enforcement_level'];
+    if (enforcement !== 'off' &&
+        enforcement !== 'non_admins' &&
+        enforcement !== 'everyone') {
+        pr_stack_checks_invalid('invalid classic check enforcement');
+    }
+    const contexts = pr_stack_checks_array(policy['contexts']).map(pr_stack_checks_string);
+    const checks = pr_stack_checks_array(policy['checks']).map(value => requiredCheck(value, 'app_id'));
+    if (!enabled && enforcement !== 'off') {
+        pr_stack_checks_invalid('inconsistent classic protection state');
+    }
+    if (enforcement === 'off')
+        return [];
+    const detailedContexts = new Set(checks.map(check => check.context));
+    for (const context of contexts) {
+        if (!detailedContexts.has(context))
+            checks.push({ context, appId: null });
+    }
+    return checks;
+}
+function rulesetChecks(value) {
+    const rule = pr_stack_checks_record(value);
+    const type = pr_stack_checks_string(rule['type']);
+    if (type === 'workflows') {
+        pr_stack_checks_invalid('required workflows are not supported by this preview');
+    }
+    if (type !== 'required_status_checks')
+        return [];
+    const parameters = pr_stack_checks_record(rule['parameters']);
+    return pr_stack_checks_array(parameters['required_status_checks']).map(value => requiredCheck(value, 'integration_id'));
+}
+function compareChecks(left, right) {
+    if (left.context !== right.context) {
+        return left.context < right.context ? -1 : 1;
+    }
+    return (left.appId ?? 0) - (right.appId ?? 0);
+}
+async function loadPrStackRequiredChecks(octokit, request) {
+    const checks = [...classicChecks(request)];
+    const previousPages = [];
+    let page = 1;
+    while (true) {
+        const response = await octokit.rest.repos.getBranchRules({
+            owner: request.owner,
+            repo: request.repo,
+            branch: request.stableBranch,
+            per_page: 100,
+            page,
+            headers: API_HEADERS
+        });
+        const rules = pr_stack_checks_array(response.data);
+        if (rules.length > 100)
+            pr_stack_checks_invalid('invalid ruleset page size');
+        if (previousPages.some(previous => (0,external_node_util_.isDeepStrictEqual)(previous, rules))) {
+            pr_stack_checks_invalid('ruleset pagination did not advance');
+        }
+        for (const rule of rules)
+            checks.push(...rulesetChecks(rule));
+        if (rules.length < 100)
+            break;
+        previousPages.push(rules);
+        page += 1;
+    }
+    const unique = new Map();
+    for (const check of checks) {
+        unique.set(`${String(check.appId)}:${check.context}`, check);
+    }
+    return [...unique.values()].sort(compareChecks);
+}
+
 ;// CONCATENATED MODULE: ./src/functions/prechecks.ts
+
 
 
 
@@ -39647,6 +39783,7 @@ async function prechecks(context, octokit, data) {
     const nonDefaultDeploysAllowed = data.inputs.allow_non_default_target_branch_deployments;
     const securityWarningsEnabled = data.inputs.use_security_warnings;
     let stack = null;
+    let stackRequiredChecks = null;
     if (data.inputs.enable_pr_stacks &&
         isNotStableBranchDeploy &&
         data.environmentObj.sha === null) {
@@ -39666,6 +39803,25 @@ async function prechecks(context, octokit, data) {
         }
         catch (error) {
             return stackPrecheckUnavailable(error);
+        }
+    }
+    if (stack !== null &&
+        !skipCi &&
+        (typeof checks === 'string' || checks.length === 0)) {
+        try {
+            stackRequiredChecks = await loadPrStackRequiredChecks(octokit, {
+                ...context.repo,
+                stableBranch: stack.stableBranch,
+                stableSha: stack.stableSha,
+                branch: stableBaseBranch.data
+            });
+        }
+        catch (error) {
+            debug(`PR stack required CI verification failed: ${legacyApiError(error).message}`);
+            return {
+                message: '### ⚠️ Cannot proceed with deployment\n\nThe Action could not read the required CI checks for this pull request stack. Make sure its base-branch rules are readable. Required-workflow rules are not yet supported by this preview.',
+                status: false
+            };
         }
     }
     if (nonDefaultTargetBranchUsed) {
@@ -39835,7 +39991,8 @@ async function prechecks(context, octokit, data) {
         octokit,
         pullRequestNumber: context.issue.number,
         result,
-        skipCi
+        skipCi,
+        stackRequiredChecks
     });
     const commitStatus = checkEvaluation.commitStatus;
     const filterChecksResults = 'filterChecksResult' in checkEvaluation
@@ -39867,6 +40024,7 @@ async function prechecks(context, octokit, data) {
             isFork,
             skipCi,
             skipReviews,
+            stackRequiredChecks,
             userIsAdmin
         });
         if (stackFailure !== null)
@@ -40047,7 +40205,7 @@ function requireStackPolicyData(result, expectedSha) {
         throw new Error('The stack pull request policy data is incomplete or stale');
     }
 }
-async function checkStackPrerequisites({ context, data, octokit, query, stack, allowDraftDeploy, ignoredChecks, isFork, skipCi, skipReviews, userIsAdmin }) {
+async function checkStackPrerequisites({ context, data, octokit, query, stack, allowDraftDeploy, ignoredChecks, isFork, skipCi, skipReviews, stackRequiredChecks, userIsAdmin }) {
     try {
         for (const pull of stack.pullRequests) {
             if (pull.number === context.issue.number)
@@ -40066,7 +40224,8 @@ async function checkStackPrerequisites({ context, data, octokit, query, stack, a
                 octokit,
                 pullRequestNumber: pull.number,
                 result,
-                skipCi
+                skipCi,
+                stackRequiredChecks
             });
             const gate = evaluatePrecheckGates({
                 allowDraftDeploy,
@@ -40105,7 +40264,7 @@ async function checkStackPrerequisites({ context, data, octokit, query, stack, a
     }
     return null;
 }
-async function evaluateCommitChecks({ checks, environment, ignoredChecks, octokit, pullRequestNumber, result, skipCi }) {
+async function evaluateCommitChecks({ checks, environment, ignoredChecks, octokit, pullRequestNumber, result, skipCi, stackRequiredChecks }) {
     if (skipCi) {
         info(`⏩ CI checks have been ${COLORS.highlight}disabled${COLORS.reset} for the ${COLORS.highlight}${environment}${COLORS.reset} environment`);
         return { commitStatus: 'skip_ci', kind: 'skipped' };
@@ -40126,6 +40285,14 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
             };
         }
         if (statusCheckRollup === null) {
+            const missing = missingRequiredStackChecks({
+                checks,
+                checkResults: [],
+                ignoredChecks,
+                requiredChecks: stackRequiredChecks
+            });
+            if (missing !== null)
+                return missing;
             info('💡 no CI checks have been defined for this pull request');
             return { commitStatus: null, kind: 'no-checks' };
         }
@@ -40133,6 +40300,14 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
             throw new Error('The GraphQL response did not include a check rollup');
         }
         const checkResults = await loadAllCheckResults(octokit, pullRequestNumber, commit, statusCheckRollup);
+        const missing = missingRequiredStackChecks({
+            checks,
+            checkResults,
+            ignoredChecks,
+            requiredChecks: stackRequiredChecks
+        });
+        if (missing !== null)
+            return missing;
         const filterChecksResult = filterChecks(checks, checkResults, ignoredChecks, checks === 'required');
         if (filterChecksResult.status === 'SUCCESS') {
             return {
@@ -40157,6 +40332,32 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
     catch (error) {
         return { commitStatus: 'UNAVAILABLE', error, kind: 'unavailable' };
     }
+}
+function missingRequiredStackChecks({ checks, checkResults, ignoredChecks, requiredChecks }) {
+    if (requiredChecks === null || requiredChecks.length === 0)
+        return null;
+    // isRequired describes reported checks; the branch rules also name checks
+    // that GitHub has not created yet.
+    const latest = latestCheckResults(checkResults, check => !ignoredChecks.some(ignored => ignored === checkName(check)) &&
+        (checks !== 'required' || check.isRequired));
+    const missing = requiredChecks.filter(expected => !ignoredChecks.includes(expected.context) &&
+        !latest.some(check => check.isRequired &&
+            checkName(check) === expected.context &&
+            (expected.appId === null ||
+                // Legacy commit statuses do not expose an authoritative App ID.
+                (isCheckRun(check) && checkIntegrationId(check) === expected.appId))));
+    if (missing.length === 0)
+        return null;
+    const names = missing.map(check => check.appId === null
+        ? check.context
+        : `${check.context} (GitHub App ${String(check.appId)})`);
+    const message = `Required CI checks have not been reported for this stack: \`${names.join(', ')}\``;
+    warning(message);
+    return {
+        commitStatus: 'MISSING',
+        filterChecksResult: { message, status: 'MISSING' },
+        kind: 'missing'
+    };
 }
 async function loadAllCheckResults(octokit, pullRequestNumber, commit, statusCheckRollup) {
     const checkResults = [...statusCheckRollup.contexts.nodes];
