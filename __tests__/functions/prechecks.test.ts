@@ -5,6 +5,7 @@ import type {
   PrechecksBranchResponse,
   PrechecksOctokit
 } from '../../src/functions/prechecks.ts'
+import type {PrStackSnapshot} from '../../src/functions/pr-stacks.ts'
 import {COLORS} from '../../src/functions/colors.ts'
 import type {
   BranchDeployContext,
@@ -32,6 +33,7 @@ import {unsafeInvalidValue} from '../unsafe-fixtures.ts'
 type ActionsCoreModule = typeof import('../../src/actions-core.ts')
 type AdminModule = typeof import('../../src/functions/admin.ts')
 type OutdatedModule = typeof import('../../src/functions/outdated-check.ts')
+type PrStacksModule = typeof import('../../src/functions/pr-stacks.ts')
 
 const infoMock = createMock<ActionsCoreModule['info']>()
 const warningMock = createMock<ActionsCoreModule['warning']>()
@@ -44,6 +46,9 @@ const isAdminMock = createMock<AdminModule['isAdmin']>(() =>
 )
 const isOutdatedMock = createMock<OutdatedModule['isOutdated']>(() =>
   Promise.resolve({outdated: false, branch: 'test-branch'})
+)
+const resolvePrStackMock = createMock<PrStacksModule['resolvePrStack']>(() =>
+  Promise.resolve(null)
 )
 
 installModuleMock(mock, new URL('../../src/actions-core.ts', import.meta.url), {
@@ -65,6 +70,11 @@ installModuleMock(
   mock,
   new URL('../../src/functions/outdated-check.ts', import.meta.url),
   {isOutdated: isOutdatedMock}
+)
+installModuleMock(
+  mock,
+  new URL('../../src/functions/pr-stacks.ts', import.meta.url),
+  {resolvePrStack: resolvePrStackMock}
 )
 
 const {filterChecks, prechecks} =
@@ -154,6 +164,8 @@ beforeEach(testContext => {
   isOutdatedMock.mock.mockImplementation(() =>
     Promise.resolve({outdated: false, branch: 'test-branch'})
   )
+  resolvePrStackMock.mock.resetCalls()
+  resolvePrStackMock.mock.mockImplementation(() => Promise.resolve(null))
   stubEnv(testContext, 'INPUT_PERMISSIONS', 'admin,write')
 
   baseCommitWithOid = {
@@ -402,6 +414,918 @@ async function assertChecksUnavailable(): Promise<void> {
   })
   assertCalledWith(setOutputMock, 'commit_status', 'UNAVAILABLE')
 }
+
+const STACK_STABLE_SHA = '1'.repeat(40)
+const STACK_LOWER_SHA = '2'.repeat(40)
+const STACK_MIDDLE_SHA = '3'.repeat(40)
+const STACK_SELECTED_SHA = '4'.repeat(40)
+const NATIVE_STACK = {
+  repositoryId: 'repository-node',
+  repository: 'corp/test',
+  stackId: 'stack-node',
+  stackNumber: 7,
+  stableBranch: 'main',
+  stableSha: STACK_STABLE_SHA,
+  selectedPullNumber: 123,
+  selectedPosition: 3,
+  selectedHeadSha: STACK_SELECTED_SHA,
+  pullRequests: [
+    {
+      id: 'pull-121',
+      number: 121,
+      position: 1,
+      baseRef: 'main',
+      baseSha: STACK_STABLE_SHA,
+      headRef: 'feature-1',
+      headSha: STACK_LOWER_SHA,
+      state: 'OPEN',
+      isDraft: false
+    },
+    {
+      id: 'pull-122',
+      number: 122,
+      position: 2,
+      baseRef: 'feature-1',
+      baseSha: STACK_LOWER_SHA,
+      headRef: 'feature-2',
+      headSha: STACK_MIDDLE_SHA,
+      state: 'OPEN',
+      isDraft: false
+    },
+    {
+      id: 'pull-123',
+      number: 123,
+      position: 3,
+      baseRef: 'feature-2',
+      baseSha: STACK_MIDDLE_SHA,
+      headRef: 'feature-3',
+      headSha: STACK_SELECTED_SHA,
+      state: 'OPEN',
+      isDraft: false
+    }
+  ]
+} as const satisfies PrStackSnapshot
+
+function stackPolicy({
+  headSha,
+  reviewDecision = 'APPROVED',
+  mergeStateStatus = 'CLEAN',
+  rollup = checkRollup('SUCCESS'),
+  approvedReviewsCount = 1
+}: {
+  readonly headSha: string
+  readonly reviewDecision?: string | null
+  readonly mergeStateStatus?: string
+  readonly rollup?: TestStatusCheckRollup
+  readonly approvedReviewsCount?: number
+}): PrechecksGraphqlResult {
+  return {
+    repository: {
+      pullRequest: {
+        reviewDecision,
+        mergeStateStatus,
+        reviews: {totalCount: approvedReviewsCount},
+        commits: {
+          nodes: [
+            {
+              commit: {
+                id: 'stack-commit-' + headSha,
+                oid: headSha,
+                statusCheckRollup: rollup
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+
+function stackWithDraft(pullNumber: number): PrStackSnapshot {
+  return {
+    ...NATIVE_STACK,
+    pullRequests: NATIVE_STACK.pullRequests.map(pull =>
+      pull.number === pullNumber ? {...pull, isDraft: true} : pull
+    )
+  }
+}
+
+function mockNativeStack({
+  snapshot = NATIVE_STACK,
+  policies = new Map<number, unknown>(),
+  isFork = false,
+  restDraft = false,
+  restHeadRef,
+  restBaseRef
+}: {
+  readonly snapshot?: PrStackSnapshot
+  readonly policies?: ReadonlyMap<number, unknown>
+  readonly isFork?: boolean
+  readonly restDraft?: boolean
+  readonly restHeadRef?: string
+  readonly restBaseRef?: string
+} = {}): void {
+  const selected = snapshot.pullRequests.find(
+    pull => pull.number === context.issue.number
+  )
+  assert.ok(selected !== undefined)
+  data.inputs.enable_pr_stacks = true
+  resolvePrStackMock.mock.mockImplementation(() => Promise.resolve(snapshot))
+  getPullsOK.mock.mockImplementation(() =>
+    Promise.resolve({
+      data: {
+        head: {
+          ref: restHeadRef ?? selected.headRef,
+          sha: selected.headSha,
+          label: 'corp:' + selected.headRef,
+          repo: {fork: isFork, full_name: 'corp/test'}
+        },
+        base: {ref: restBaseRef ?? selected.baseRef},
+        draft: restDraft
+      },
+      status: 200
+    })
+  )
+  getBranchMock.mock.mockImplementation(parameters => {
+    const branch = parameters?.branch ?? 'main'
+    const member = snapshot.pullRequests.find(pull => pull.headRef === branch)
+    return Promise.resolve({
+      data: {
+        commit: {
+          sha: member?.headSha ?? STACK_STABLE_SHA,
+          commit: {tree: {sha: 'beefdead'}}
+        },
+        name: branch
+      },
+      status: 200
+    })
+  })
+  graphQLOK.mock.mockImplementation((_query, variables) => {
+    const pullNumber = variables['number']
+    if (typeof pullNumber !== 'number') {
+      throw new Error('Expected a pull request policy query')
+    }
+    if (policies.has(pullNumber)) {
+      const policy = policies.get(pullNumber)
+      if (policy instanceof Error) return Promise.reject(policy)
+      return Promise.resolve(policy)
+    }
+    const member = snapshot.pullRequests.find(
+      pull => pull.number === pullNumber
+    )
+    if (member === undefined) {
+      throw new Error('Unexpected stack policy request: ' + String(pullNumber))
+    }
+    return Promise.resolve(stackPolicy({headSha: member.headSha}))
+  })
+}
+
+async function assertStackUnavailable(): Promise<void> {
+  assert.deepStrictEqual(await prechecks(context, octokit, data), {
+    message:
+      '### ⚠️ Cannot proceed with deployment\n\nThe Action could not verify this pull request stack. Ensure it is a current, linear GitHub stack targeting the configured stable branch, then retry the command.',
+    status: false
+  })
+  assertCalledTimes(updateBranchMock, 0)
+}
+
+async function assertLowerStackFailure(
+  message: RegExp,
+  pullNumber = 121
+): Promise<void> {
+  const result = await prechecks(context, octokit, data)
+  assert.strictEqual(result.status, false)
+  assert.match(result.message, message)
+  assert.ok(
+    result.message.includes(
+      'PR #' +
+        String(pullNumber) +
+        ' in stack #7 did not pass deployment checks'
+    )
+  )
+  assertCalledTimes(updateBranchMock, 0)
+}
+
+test('does not resolve PR stacks while the feature is disabled', async () => {
+  mockNativeStack()
+  data.inputs.enable_pr_stacks = false
+
+  const result = await prechecks(context, octokit, data)
+
+  assert.strictEqual(result.status, false)
+  assert.match(result.message, /not the default branch/u)
+  assertCalledTimes(resolvePrStackMock, 0)
+  assertCalledTimes(graphQLOK, 0)
+})
+
+test('keeps standalone PR behavior when stack support is enabled', async () => {
+  data.inputs.enable_pr_stacks = true
+
+  assert.deepStrictEqual(await prechecks(context, octokit, data), {
+    message: '✅ PR is approved and all CI checks passed',
+    noopMode: false,
+    ref: 'test-ref',
+    status: true,
+    sha: 'abc123',
+    isFork: false
+  })
+  assertCalledWith(resolvePrStackMock, octokit, {
+    owner: 'corp',
+    repo: 'test',
+    pullNumber: 123,
+    expectedHeadSha: 'abc123',
+    stableBranch: 'main'
+  })
+})
+
+for (const allowed of [false, true]) {
+  test(
+    'keeps the separate non-default override for an unregistered PR: ' +
+      String(allowed),
+    async () => {
+      mockNativeStack()
+      resolvePrStackMock.mock.mockImplementation(() => Promise.resolve(null))
+      data.inputs.allow_non_default_target_branch_deployments = allowed
+
+      const result = await prechecks(context, octokit, data)
+
+      assert.strictEqual(result.status, allowed)
+      assert.strictEqual('stack' in result, false)
+      assertCalledTimes(resolvePrStackMock, 1)
+      assertCalledTimes(graphQLOK, allowed ? 1 : 0)
+      if (allowed) {
+        assert.ok(
+          warningMock.mock.calls.some(
+            call =>
+              typeof call.arguments[0] === 'string' &&
+              call.arguments[0].includes('potentially dangerous')
+          )
+        )
+      }
+    }
+  )
+}
+
+test('checks only the selected native stack prefix', async () => {
+  mockNativeStack()
+  data.inputs.allow_non_default_target_branch_deployments = true
+
+  assert.deepStrictEqual(await prechecks(context, octokit, data), {
+    message: '✅ PR is approved and all CI checks passed',
+    noopMode: false,
+    ref: 'feature-3',
+    status: true,
+    sha: STACK_SELECTED_SHA,
+    isFork: false,
+    stack: NATIVE_STACK
+  })
+  assertCalledWith(resolvePrStackMock, octokit, {
+    owner: 'corp',
+    repo: 'test',
+    pullNumber: 123,
+    expectedHeadSha: STACK_SELECTED_SHA,
+    stableBranch: 'main'
+  })
+  assert.deepStrictEqual(
+    graphQLOK.mock.calls.map(call => call.arguments[1]['number']),
+    [123, 121, 122]
+  )
+  assertCalledWith(infoMock, '✅ stack PR #121 passed deployment checks')
+  assertCalledWith(infoMock, '✅ stack PR #122 passed deployment checks')
+  assertCalledWith(setOutputMock, 'non_default_target_branch_used', 'true')
+  assert.strictEqual(
+    warningMock.mock.calls.some(
+      call =>
+        typeof call.arguments[0] === 'string' &&
+        call.arguments[0].includes('potentially dangerous')
+    ),
+    false
+  )
+  assertCalledTimes(updateBranchMock, 0)
+})
+
+for (const reason of [
+  'stack metadata is unavailable',
+  'stack does not target the configured stable branch',
+  'stack is not linear'
+]) {
+  test('fails closed when the stack resolver rejects: ' + reason, async () => {
+    mockNativeStack()
+    data.inputs.allow_non_default_target_branch_deployments = true
+    resolvePrStackMock.mock.mockImplementation(() =>
+      Promise.reject(new Error(reason))
+    )
+
+    await assertStackUnavailable()
+    assertCalledTimes(graphQLOK, 0)
+  })
+}
+
+test('rejects a trunk SHA that changed while resolving the stack', async () => {
+  mockNativeStack({
+    snapshot: {...NATIVE_STACK, stableSha: '5'.repeat(40)}
+  })
+
+  await assertStackUnavailable()
+  assertCalledTimes(graphQLOK, 0)
+  assertCalledWith(
+    debugMock,
+    'PR stack verification failed: The stack changed during prechecks'
+  )
+})
+
+for (const [description, restRefs] of [
+  ['head ref', {restHeadRef: 'renamed-feature'}],
+  ['base ref', {restBaseRef: 'main'}]
+] as const) {
+  test('rejects a changed selected stack ' + description, async () => {
+    mockNativeStack(restRefs)
+
+    await assertStackUnavailable()
+    assertCalledTimes(graphQLOK, 0)
+  })
+}
+
+const selectedStackPolicy = stackPolicy({headSha: STACK_SELECTED_SHA})
+for (const [description, policy] of [
+  ['missing pull request', {repository: {}}],
+  [
+    'missing commit',
+    {
+      repository: {
+        pullRequest: {
+          reviewDecision: 'APPROVED',
+          mergeStateStatus: 'CLEAN'
+        }
+      }
+    }
+  ],
+  ['changed head', stackPolicy({headSha: '5'.repeat(40)})],
+  [
+    'missing review decision',
+    {
+      repository: {
+        pullRequest: {
+          ...selectedStackPolicy.repository.pullRequest,
+          reviewDecision: undefined
+        }
+      }
+    }
+  ],
+  [
+    'unknown review decision',
+    stackPolicy({headSha: STACK_SELECTED_SHA, reviewDecision: 'UNKNOWN'})
+  ],
+  [
+    'missing merge state',
+    {
+      repository: {
+        pullRequest: {
+          ...selectedStackPolicy.repository.pullRequest,
+          mergeStateStatus: undefined
+        }
+      }
+    }
+  ],
+  [
+    'unknown merge state',
+    stackPolicy({headSha: STACK_SELECTED_SHA, mergeStateStatus: 'UNKNOWN'})
+  ],
+  ['unavailable policy query', new Error('Policy query unavailable')]
+] as const) {
+  test('rejects incomplete selected stack policy: ' + description, async () => {
+    mockNativeStack({policies: new Map([[123, policy]])})
+
+    await assertStackUnavailable()
+    assertCalledTimes(graphQLOK, 1)
+  })
+}
+
+for (const [description, policy] of [
+  ['changed head', stackPolicy({headSha: '5'.repeat(40)})],
+  [
+    'unknown review decision',
+    stackPolicy({headSha: STACK_LOWER_SHA, reviewDecision: 'UNKNOWN'})
+  ],
+  [
+    'unknown merge state',
+    stackPolicy({headSha: STACK_LOWER_SHA, mergeStateStatus: 'UNKNOWN'})
+  ],
+  ['unavailable policy query', new Error('Lower policy query unavailable')]
+] as const) {
+  test('rejects incomplete lower stack policy: ' + description, async () => {
+    mockNativeStack({policies: new Map([[121, policy]])})
+
+    await assertStackUnavailable()
+    assert.deepStrictEqual(
+      graphQLOK.mock.calls.map(call => call.arguments[1]['number']),
+      [123, 121]
+    )
+  })
+}
+
+for (const state of ['FAILURE', 'PENDING']) {
+  test('rejects ' + state + ' CI on a lower stack PR', async () => {
+    mockNativeStack({
+      policies: new Map([
+        [
+          121,
+          stackPolicy({
+            headSha: STACK_LOWER_SHA,
+            rollup: checkRollup(state)
+          })
+        ]
+      ])
+    })
+
+    await assertLowerStackFailure(new RegExp(state, 'u'))
+    assert.deepStrictEqual(
+      graphQLOK.mock.calls.map(call => call.arguments[1]['number']),
+      [123, 121]
+    )
+  })
+}
+
+test('requires explicitly named CI checks on each lower stack PR', async () => {
+  mockNativeStack({
+    policies: new Map([
+      [121, stackPolicy({headSha: STACK_LOWER_SHA, rollup: null})]
+    ])
+  })
+  data.inputs.checks = ['legacy-ci']
+
+  await assertLowerStackFailure(/following checks are missing: .legacy-ci./u)
+})
+
+test('fails closed when a lower stack PR has incomplete CI data', async () => {
+  mockNativeStack({
+    policies: new Map([
+      [
+        121,
+        {
+          repository: {
+            pullRequest: {
+              reviewDecision: 'APPROVED',
+              mergeStateStatus: 'CLEAN',
+              commits: {nodes: [{commit: {oid: STACK_LOWER_SHA}}]}
+            }
+          }
+        }
+      ]
+    ])
+  })
+
+  await assertLowerStackFailure(/could not verify all CI checks/u)
+})
+
+test('paginates required checks using the lower stack PR number', async () => {
+  mockNativeStack()
+  data.inputs.checks = 'required'
+  queueMockImplementation(
+    graphQLOK,
+    () => Promise.resolve(stackPolicy({headSha: STACK_SELECTED_SHA})),
+    () =>
+      Promise.resolve(
+        stackPolicy({
+          headSha: STACK_LOWER_SHA,
+          rollup: {
+            state: 'SUCCESS',
+            contexts: {
+              nodes: [
+                {
+                  context: 'legacy-ci',
+                  isRequired: true,
+                  state: 'SUCCESS'
+                }
+              ],
+              pageInfo: {endCursor: 'next-check-page', hasNextPage: true}
+            }
+          }
+        })
+      ),
+    (_query, variables) => {
+      assert.deepStrictEqual(variables, {
+        commitId: 'stack-commit-' + STACK_LOWER_SHA,
+        cursor: 'next-check-page',
+        number: 121
+      })
+      return Promise.resolve({
+        node: {
+          id: 'stack-commit-' + STACK_LOWER_SHA,
+          oid: STACK_LOWER_SHA,
+          statusCheckRollup: {
+            state: 'FAILURE',
+            contexts: {
+              nodes: [
+                {
+                  context: 'security',
+                  isRequired: true,
+                  state: 'FAILURE'
+                }
+              ],
+              pageInfo: LAST_PAGE
+            }
+          }
+        }
+      })
+    }
+  )
+
+  await assertLowerStackFailure(/FAILURE/u)
+  assertCalledTimes(graphQLOK, 3)
+})
+
+test('applies required-only CI policy to lower stack PRs', async () => {
+  mockNativeStack({
+    policies: new Map([
+      [
+        121,
+        stackPolicy({
+          headSha: STACK_LOWER_SHA,
+          rollup: {
+            state: 'FAILURE',
+            contexts: {
+              nodes: [
+                {context: 'required-ci', isRequired: true, state: 'SUCCESS'},
+                {context: 'optional-ci', isRequired: false, state: 'FAILURE'}
+              ],
+              pageInfo: LAST_PAGE
+            }
+          }
+        })
+      ]
+    ])
+  })
+  data.inputs.checks = 'required'
+
+  assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+})
+
+test('applies ignored CI checks to lower stack PRs', async () => {
+  mockNativeStack({
+    policies: new Map([
+      [
+        121,
+        stackPolicy({
+          headSha: STACK_LOWER_SHA,
+          rollup: {
+            state: 'FAILURE',
+            contexts: {
+              nodes: [
+                {context: 'legacy-ci', isRequired: true, state: 'SUCCESS'},
+                {context: 'ignored-ci', isRequired: true, state: 'FAILURE'}
+              ],
+              pageInfo: LAST_PAGE
+            }
+          }
+        })
+      ]
+    ])
+  })
+  data.inputs.ignored_checks = ['ignored-ci']
+
+  assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+})
+
+for (const reviewDecision of ['REVIEW_REQUIRED', 'CHANGES_REQUESTED']) {
+  test('requires lower stack reviews for ' + reviewDecision, async () => {
+    mockNativeStack({
+      policies: new Map([
+        [121, stackPolicy({headSha: STACK_LOWER_SHA, reviewDecision})]
+      ])
+    })
+
+    await assertLowerStackFailure(/an approval is required/u)
+  })
+}
+
+test('rejects a lower draft PR in a native stack', async () => {
+  mockNativeStack({snapshot: stackWithDraft(121)})
+  data.environmentObj.noop = true
+
+  await assertLowerStackFailure(/pull request is in a draft state/u)
+})
+
+test('honors draft-permitted environments for lower stack PRs', async () => {
+  mockNativeStack({snapshot: stackWithDraft(121)})
+  data.inputs.draft_permitted_targets = 'production'
+
+  assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+})
+
+test('uses the selected stack draft state instead of older REST data', async () => {
+  mockNativeStack({snapshot: stackWithDraft(123), restDraft: false})
+
+  const result = await prechecks(context, octokit, data)
+
+  assert.strictEqual(result.status, false)
+  assert.match(result.message, /pull request is in a draft state/u)
+})
+
+test('accepts a selected stack PR that is no longer a draft', async () => {
+  mockNativeStack({restDraft: true})
+
+  assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+})
+
+test('keeps the usual noop review exception for lower stack PRs', async () => {
+  mockNativeStack({
+    policies: new Map([
+      [
+        121,
+        stackPolicy({
+          headSha: STACK_LOWER_SHA,
+          reviewDecision: 'REVIEW_REQUIRED'
+        })
+      ]
+    ])
+  })
+  data.environmentObj.noop = true
+
+  assert.partialDeepStrictEqual(await prechecks(context, octokit, data), {
+    status: true,
+    noopMode: true,
+    stack: NATIVE_STACK
+  })
+})
+
+test('still requires passing lower stack CI for a noop', async () => {
+  mockNativeStack({
+    policies: new Map([
+      [
+        121,
+        stackPolicy({
+          headSha: STACK_LOWER_SHA,
+          reviewDecision: 'REVIEW_REQUIRED',
+          rollup: checkRollup('PENDING')
+        })
+      ]
+    ])
+  })
+  data.environmentObj.noop = true
+
+  await assertLowerStackFailure(/CI checks must be passing/u)
+})
+
+test('honors skip_reviews for lower same-repository stack PRs', async () => {
+  mockNativeStack({
+    policies: new Map([
+      [
+        121,
+        stackPolicy({
+          headSha: STACK_LOWER_SHA,
+          reviewDecision: 'CHANGES_REQUESTED'
+        })
+      ]
+    ])
+  })
+  data.inputs.skipReviews = 'production'
+
+  assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+  assertCalledWith(setOutputMock, 'review_decision', 'skip_reviews')
+})
+
+test('honors skip_ci for lower stack PRs', async () => {
+  mockNativeStack({
+    policies: new Map([
+      [
+        121,
+        stackPolicy({
+          headSha: STACK_LOWER_SHA,
+          rollup: checkRollup('FAILURE')
+        })
+      ]
+    ])
+  })
+  data.inputs.skipCi = 'production'
+
+  assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+  assertCalledWith(setOutputMock, 'commit_status', 'skip_ci')
+})
+
+test('keeps the admin review exception for lower stack PRs', async () => {
+  mockNativeStack({
+    policies: new Map([
+      [
+        121,
+        stackPolicy({
+          headSha: STACK_LOWER_SHA,
+          reviewDecision: 'REVIEW_REQUIRED'
+        })
+      ]
+    ])
+  })
+  isAdminMock.mock.mockImplementation(() => Promise.resolve(true))
+
+  assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+})
+
+test('does not let admins bypass failing lower stack CI', async () => {
+  mockNativeStack({
+    policies: new Map([
+      [
+        121,
+        stackPolicy({
+          headSha: STACK_LOWER_SHA,
+          rollup: checkRollup('FAILURE')
+        })
+      ]
+    ])
+  })
+  isAdminMock.mock.mockImplementation(() => Promise.resolve(true))
+
+  await assertLowerStackFailure(/CI checks are failing/u)
+})
+
+test('preserves fork review restrictions for lower stack PRs', async () => {
+  mockNativeStack({
+    isFork: true,
+    policies: new Map([
+      [
+        121,
+        stackPolicy({
+          headSha: STACK_LOWER_SHA,
+          reviewDecision: 'REVIEW_REQUIRED'
+        })
+      ]
+    ])
+  })
+  data.inputs.skipReviews = 'production'
+  data.environmentObj.noop = true
+  isAdminMock.mock.mockImplementation(() => Promise.resolve(true))
+
+  await assertLowerStackFailure(/All deployments from forks/u)
+})
+
+test('does not require stack merge readiness before creating a required deployment', async () => {
+  mockNativeStack({
+    policies: new Map(
+      NATIVE_STACK.pullRequests.map(pull => [
+        pull.number,
+        stackPolicy({headSha: pull.headSha, mergeStateStatus: 'BLOCKED'})
+      ])
+    )
+  })
+
+  assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+  assertCalledWith(setOutputMock, 'merge_state_status', 'BLOCKED')
+})
+
+test('does not replace selected PR outputs or state with lower stack policy', async () => {
+  mockNativeStack({
+    policies: new Map([
+      [
+        121,
+        stackPolicy({
+          headSha: STACK_LOWER_SHA,
+          reviewDecision: null,
+          rollup: null,
+          approvedReviewsCount: 0
+        })
+      ],
+      [
+        122,
+        stackPolicy({
+          headSha: STACK_MIDDLE_SHA,
+          approvedReviewsCount: 2
+        })
+      ],
+      [
+        123,
+        stackPolicy({
+          headSha: STACK_SELECTED_SHA,
+          mergeStateStatus: 'BLOCKED',
+          approvedReviewsCount: 9
+        })
+      ]
+    ])
+  })
+
+  assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+  const selectedOutputKeys = [
+    'commit_status',
+    'review_decision',
+    'merge_state_status',
+    'approved_reviews_count'
+  ]
+  assert.deepStrictEqual(
+    setOutputMock.mock.calls
+      .filter(call => selectedOutputKeys.includes(call.arguments[0]))
+      .map(call => call.arguments),
+    [
+      ['commit_status', 'SUCCESS'],
+      ['review_decision', 'APPROVED'],
+      ['merge_state_status', 'BLOCKED'],
+      ['approved_reviews_count', 9]
+    ]
+  )
+  assert.deepStrictEqual(
+    saveStateMock.mock.calls
+      .filter(
+        call =>
+          call.arguments[0] === 'review_decision' ||
+          call.arguments[0] === 'approved_reviews_count'
+      )
+      .map(call => call.arguments),
+    [
+      ['review_decision', 'APPROVED'],
+      ['approved_reviews_count', 9]
+    ]
+  )
+})
+
+test('refuses automatic branch updates for a stale native stack', async () => {
+  mockNativeStack()
+  data.inputs.update_branch = 'force'
+  isOutdatedMock.mock.mockImplementation(() =>
+    Promise.resolve({outdated: true, branch: 'main'})
+  )
+
+  const result = await prechecks(context, octokit, data)
+
+  assert.strictEqual(result.status, false)
+  assert.match(result.message, /Rebase the stack and rerun its checks/u)
+  assertCalledTimes(updateBranchMock, 0)
+})
+
+test('does not bypass a stale lower stack PR when branch updates are disabled', async () => {
+  mockNativeStack({
+    policies: new Map([
+      [
+        122,
+        stackPolicy({
+          headSha: STACK_MIDDLE_SHA,
+          mergeStateStatus: 'BEHIND'
+        })
+      ]
+    ])
+  })
+  data.inputs.update_branch = 'disabled'
+
+  await assertLowerStackFailure(/branch is behind the base branch/u, 122)
+})
+
+test('keeps stable-branch rollbacks outside stack resolution', async () => {
+  data.inputs.enable_pr_stacks = true
+  data.environmentObj.stable_branch_used = true
+  resolvePrStackMock.mock.mockImplementation(() =>
+    Promise.reject(new Error('Stack endpoint unavailable'))
+  )
+
+  assert.deepStrictEqual(await prechecks(context, octokit, data), {
+    message:
+      '✅ deployment to the ' +
+      COLORS.highlight +
+      'stable' +
+      COLORS.reset +
+      ' branch requested',
+    noopMode: false,
+    ref: 'main',
+    status: true,
+    sha: 'deadbeef',
+    isFork: false
+  })
+  assertCalledTimes(resolvePrStackMock, 0)
+})
+
+for (const allowed of [false, true]) {
+  test(
+    'keeps explicit SHA command behavior with stack support enabled: ' +
+      String(allowed),
+    async () => {
+      data.inputs.enable_pr_stacks = true
+      data.inputs.allow_sha_deployments = allowed
+      data.environmentObj.sha = STACK_SELECTED_SHA
+      resolvePrStackMock.mock.mockImplementation(() =>
+        Promise.reject(new Error('Stack endpoint unavailable'))
+      )
+
+      const result = await prechecks(context, octokit, data)
+
+      assert.strictEqual(result.status, allowed)
+      assert.strictEqual('stack' in result, false)
+      if (allowed) {
+        assert.partialDeepStrictEqual(result, {
+          ref: STACK_SELECTED_SHA,
+          sha: STACK_SELECTED_SHA
+        })
+        assertCalledWith(setOutputMock, 'sha_deployment', STACK_SELECTED_SHA)
+      } else {
+        assert.match(result.message, /sha deployments have not been enabled/u)
+      }
+      assertCalledTimes(resolvePrStackMock, 0)
+    }
+  )
+}
+
+test('preserves ordinary PR policy-query errors when stack support is enabled', async () => {
+  data.inputs.enable_pr_stacks = true
+  const failure = new Error('Ordinary policy query unavailable')
+  graphQLOK.mock.mockImplementation(() => Promise.reject(failure))
+
+  await assert.rejects(prechecks(context, octokit, data), failure)
+  assertCalledTimes(resolvePrStackMock, 1)
+})
 
 test('treats an unfinished check run without a conclusion as unhealthy', () => {
   assert.deepStrictEqual(

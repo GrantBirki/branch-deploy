@@ -6,6 +6,7 @@ import {
   mockErrorMessage,
   mockHeaderValue,
   mockLockContents,
+  mockPrStackResponse,
   mockServerCloseAction,
   mockServerPort,
   queueFault,
@@ -19,7 +20,9 @@ import type {
   MockDeployment,
   MockDeploymentStatus,
   MockGitHubState,
+  MockPullRequestStack,
   MockRouteLog,
+  MockStackMember,
   ScenarioContext
 } from './types.ts'
 
@@ -317,6 +320,104 @@ function addBranch(
     sha,
     treeSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   })
+}
+
+function seedPrStack(
+  state: MockGitHubState,
+  selectedNumber = 3
+): MockPullRequestStack {
+  const commit = state.commits.get(ACCEPTANCE_SHAS.feature)
+  assert.ok(commit !== undefined)
+  const members: MockStackMember[] = []
+  let baseRef = 'main'
+  let baseSha: string = ACCEPTANCE_SHAS.default
+  for (const [number, headRef, headSha, treeSha] of [
+    [1, 'stack-bottom', ACCEPTANCE_SHAS.stackBottom, 'c'.repeat(40)],
+    [2, 'stack-middle', ACCEPTANCE_SHAS.stackMiddle, 'd'.repeat(40)],
+    [3, 'stack-top', ACCEPTANCE_SHAS.stackTop, 'e'.repeat(40)]
+  ] as const) {
+    const pullRequest = {
+      baseRef,
+      draft: false,
+      headLabel: `${state.owner}:${headRef}`,
+      headRef,
+      headRepoFork: false,
+      headRepoFullName: `${state.owner}/${state.repo}`,
+      headSha,
+      merged: false,
+      number
+    }
+    members.push({
+      baseSha,
+      graphqlCommitOid: null,
+      mergeStateStatus: 'CLEAN',
+      pullRequest,
+      reviewDecision: 'APPROVED',
+      rollupAvailable: true,
+      rollupContexts: state.rollupContexts,
+      rollupState: 'SUCCESS',
+      state: 'OPEN'
+    })
+    state.branches.set(headRef, {name: headRef, sha: headSha, treeSha})
+    state.commits.set(headSha, {
+      ...commit,
+      htmlUrl: `https://github.com/${state.owner}/${state.repo}/commit/${headSha}`,
+      sha: headSha,
+      treeSha
+    })
+    baseRef = headRef
+    baseSha = headSha
+  }
+  const selected = members.find(
+    member => member.pullRequest.number === selectedNumber
+  )
+  assert.ok(selected !== undefined)
+  state.pullRequest = selected.pullRequest
+  state.prStack = {baseRef: 'main', members}
+  return state.prStack
+}
+
+function requireStackMember(
+  state: MockGitHubState,
+  number: number
+): MockStackMember {
+  assert.ok(state.prStack !== null)
+  const member = state.prStack.members.find(
+    item => item.pullRequest.number === number
+  )
+  assert.ok(member !== undefined)
+  return member
+}
+
+function stackQueryRoutes(context: ScenarioContext): readonly MockRouteLog[] {
+  return context.routeLog.filter(
+    route =>
+      route.path === '/graphql' &&
+      route.body.includes('BranchDeployPullRequestStack')
+  )
+}
+
+function prechecksQueryNumbers(context: ScenarioContext): readonly number[] {
+  return context.routeLog
+    .filter(
+      route =>
+        route.path === '/graphql' &&
+        route.body.includes('pullRequest(number:$number)') &&
+        route.body.includes('statusCheckRollup')
+    )
+    .map(route => {
+      const body = requireRecordValue(
+        JSON.parse(route.body),
+        diagnostics(context)
+      )
+      const variables = requireRecordValue(
+        body['variables'],
+        diagnostics(context)
+      )
+      const number = variables['number']
+      assert.equal(typeof number, 'number')
+      return Number(number)
+    })
 }
 
 function seedDeployment(
@@ -2598,6 +2699,574 @@ const scenarios = [
       })
   },
   {
+    name: 'PR stacks disabled preserve the existing base check',
+    run: async () => {
+      for (const inputs of [{}, {enable_pr_stacks: 'false'}] as const) {
+        await withMockGitHub('PR stacks disabled', async context => {
+          seedPrStack(context.state)
+
+          const result = await runMain(context, inputs)
+
+          assertExit(context, result, 1)
+          assertReason(context, result, 'prechecks_failed')
+          assertOutput(
+            context,
+            result,
+            'non_default_target_branch_used',
+            'true'
+          )
+          assertCommentIncludes(
+            context,
+            'not the default branch of this repository'
+          )
+          assertNoDeployment(context, result)
+          assertNoLockRoutes(context)
+          assert.deepEqual(stackQueryRoutes(context), [])
+        })
+      }
+    }
+  },
+  {
+    name: 'PR stacks enabled preserve ordinary deployments',
+    run: () =>
+      withMockGitHub('PR stacks enabled on an ordinary PR', async context => {
+        const result = await runMain(context, {enable_pr_stacks: 'true'})
+
+        assertExit(context, result, 0)
+        assertReason(context, result, 'deployment_ready')
+        assertOutput(context, result, 'sha', ACCEPTANCE_SHAS.feature)
+        assertOutput(context, result, 'ref', 'feature-branch')
+        const deploymentBody = routeBody(
+          context,
+          'POST',
+          apiPath('/deployments')
+        )
+        assert.equal(deploymentBody['ref'], 'feature-branch')
+        assert.equal(deploymentBody['auto_merge'], true)
+      })
+  },
+  {
+    name: 'native PR stacks deploy the selected cumulative SHA',
+    run: async () => {
+      for (const selectedNumber of [2, 3]) {
+        await withMockGitHub(
+          `native stack layer ${String(selectedNumber)}`,
+          async context => {
+            seedPrStack(context.state, selectedNumber)
+            const selected = context.state.pullRequest
+            const inputs = {enable_pr_stacks: 'true', checks: 'acceptance'}
+            if (selectedNumber === 2) {
+              requireStackMember(context.state, 3).reviewDecision =
+                'CHANGES_REQUESTED'
+            }
+
+            const result = await runMain(context, inputs)
+
+            assertExit(context, result, 0)
+            assertReason(context, result, 'deployment_ready')
+            assertOutput(context, result, 'sha', selected.headSha)
+            assertOutput(context, result, 'ref', selected.headRef)
+            assertOutput(context, result, 'base_ref', selected.baseRef)
+            assertResultField(context, result, 'deployment_type', 'branch')
+            const deployment = requireDeployment(context)
+            assert.equal(deployment.sha, selected.headSha)
+            assert.equal(deployment.ref, selected.headSha)
+            const deploymentBody = routeBody(
+              context,
+              'POST',
+              apiPath('/deployments')
+            )
+            assert.equal(deploymentBody['ref'], selected.headSha)
+            assert.equal(deploymentBody['auto_merge'], false)
+            const payload = requireRecordValue(
+              deploymentBody['payload'],
+              diagnostics(context, result)
+            )
+            assert.equal(payload['sha'], selected.headSha)
+            const checkedNumbers = prechecksQueryNumbers(context)
+            assert.deepEqual(
+              [...new Set(checkedNumbers)].sort(),
+              selectedNumber === 2 ? [1, 2] : [1, 2, 3]
+            )
+            for (const route of stackQueryRoutes(context)) {
+              assert.equal(route.authorizationPresent, true)
+            }
+            assert.ok(
+              stackQueryRoutes(context).length >= 2,
+              diagnostics(context, result)
+            )
+            requireRoute(
+              context,
+              'GET',
+              apiPath(
+                `/compare/${ACCEPTANCE_SHAS.default}...${ACCEPTANCE_SHAS.stackBottom}`
+              )
+            )
+            requireRoute(
+              context,
+              'GET',
+              apiPath(
+                `/compare/${ACCEPTANCE_SHAS.stackBottom}...${ACCEPTANCE_SHAS.stackMiddle}`
+              )
+            )
+
+            const postResult = await runPost(context, result, inputs)
+
+            assertExit(context, postResult, 0)
+            assert.equal(
+              requireDeploymentStatus(context, deployment, 1).state,
+              'success'
+            )
+            assert.equal(
+              context.state.branches.has(lockBranch('production')),
+              false,
+              diagnostics(context, postResult)
+            )
+          }
+        )
+      }
+    }
+  },
+  {
+    name: 'native PR stacks preserve deployment required contexts',
+    run: async () => {
+      for (const accepted of [true, false]) {
+        await withMockGitHub(
+          `native stack required contexts ${String(accepted)}`,
+          async context => {
+            seedPrStack(context.state)
+            requireStackMember(context.state, 1).rollupContexts = [
+              {
+                type: 'status-context',
+                context: 'artifact-ready',
+                isRequired: false,
+                state: 'FAILURE'
+              }
+            ]
+            context.state.rollupContexts = [
+              {
+                type: 'status-context',
+                context: 'artifact-ready',
+                isRequired: false,
+                state: accepted ? 'SUCCESS' : 'FAILURE'
+              }
+            ]
+            if (!accepted) {
+              queueFault(context.state, {
+                method: 'POST',
+                path: apiPath('/deployments'),
+                response: {
+                  message: 'Required deployment status is not successful',
+                  status: 409
+                }
+              })
+            }
+
+            const result = await runMain(context, {
+              enable_pr_stacks: 'true',
+              skip_ci: 'production',
+              required_contexts: 'artifact-ready'
+            })
+
+            const deploymentBody = routeBody(
+              context,
+              'POST',
+              apiPath('/deployments')
+            )
+            assert.equal(deploymentBody['ref'], ACCEPTANCE_SHAS.stackTop)
+            assert.deepEqual(deploymentBody['required_contexts'], [
+              'artifact-ready'
+            ])
+            if (accepted) {
+              assertExit(context, result, 0)
+              assertReason(context, result, 'deployment_ready')
+              assert.equal(
+                requireDeployment(context).sha,
+                ACCEPTANCE_SHAS.stackTop
+              )
+            } else {
+              assertExit(context, result, 1)
+              assertReason(context, result, 'unexpected_error')
+              assertNoDeployment(context, result)
+              assert.equal(context.state.faults.length, 0)
+              assert.equal(
+                context.state.branches.has(lockBranch('production')),
+                false,
+                diagnostics(context, result)
+              )
+            }
+          }
+        )
+      }
+    }
+  },
+  {
+    name: 'native PR stacks enforce lower-layer policy',
+    run: async () => {
+      for (const failure of [
+        'failed check',
+        'pending check',
+        'missing check',
+        'missing approval',
+        'changes requested',
+        'draft'
+      ] as const) {
+        await withMockGitHub(`native stack lower ${failure}`, async context => {
+          seedPrStack(context.state)
+          const lower = requireStackMember(context.state, 1)
+          switch (failure) {
+            case 'failed check':
+              lower.rollupState = 'FAILURE'
+              lower.rollupContexts = [
+                {
+                  conclusion: 'FAILURE',
+                  isRequired: true,
+                  name: 'acceptance',
+                  type: 'check-run'
+                }
+              ]
+              break
+            case 'pending check':
+              lower.rollupState = 'PENDING'
+              lower.rollupContexts = [
+                {
+                  conclusion: null,
+                  isRequired: true,
+                  name: 'acceptance',
+                  type: 'check-run'
+                }
+              ]
+              break
+            case 'missing check':
+              lower.rollupContexts = []
+              break
+            case 'missing approval':
+              lower.reviewDecision = 'REVIEW_REQUIRED'
+              break
+            case 'changes requested':
+              lower.reviewDecision = 'CHANGES_REQUESTED'
+              break
+            case 'draft':
+              lower.pullRequest = {...lower.pullRequest, draft: true}
+              break
+          }
+
+          const result = await runMain(context, {
+            enable_pr_stacks: 'true',
+            checks: 'acceptance'
+          })
+
+          assertExit(context, result, 1)
+          assertReason(context, result, 'prechecks_failed')
+          assertNoDeployment(context, result)
+          assertNoLockRoutes(context)
+          assert.ok(
+            prechecksQueryNumbers(context).includes(1),
+            diagnostics(context, result)
+          )
+        })
+      }
+    }
+  },
+  {
+    name: 'native PR stacks preserve noop review policy',
+    run: () =>
+      withMockGitHub('native stack noop review policy', async context => {
+        seedPrStack(context.state)
+        setTriggerComment(context.state, '.noop')
+        requireStackMember(context.state, 1).reviewDecision = 'REVIEW_REQUIRED'
+        const inputs = {enable_pr_stacks: 'true'}
+
+        const result = await runMain(context, inputs)
+
+        assertExit(context, result, 0)
+        assertReason(context, result, 'noop_ready')
+        assertResultField(context, result, 'deployment_type', 'noop')
+        assertOutput(context, result, 'sha', ACCEPTANCE_SHAS.stackTop)
+        assertOutput(context, result, 'ref', 'stack-top')
+        assertOutput(context, result, 'noop', 'true')
+        assertNoDeployment(context, result)
+        assert.ok(prechecksQueryNumbers(context).includes(1))
+        assert.ok(stackQueryRoutes(context).length >= 2)
+
+        const postResult = await runPost(context, result, inputs)
+
+        assertExit(context, postResult, 0)
+        assertNoDeployment(context, postResult)
+        assert.equal(
+          context.state.branches.has(lockBranch('production')),
+          false,
+          diagnostics(context, postResult)
+        )
+      })
+  },
+  {
+    name: 'native PR stacks handle a merged lower layer',
+    run: () =>
+      withMockGitHub('native stack merged lower layer', async context => {
+        seedPrStack(context.state, 2)
+        const bottom = requireStackMember(context.state, 1)
+        bottom.state = 'MERGED'
+        bottom.pullRequest = {...bottom.pullRequest, merged: true}
+        const bottomBranch = context.state.branches.get('stack-bottom')
+        assert.ok(bottomBranch !== undefined)
+        context.state.branches.set('main', {...bottomBranch, name: 'main'})
+        const middle = requireStackMember(context.state, 2)
+        middle.pullRequest = {...middle.pullRequest, baseRef: 'main'}
+        context.state.pullRequest = middle.pullRequest
+
+        const result = await runMain(context, {enable_pr_stacks: 'true'})
+
+        assertExit(context, result, 0)
+        assertReason(context, result, 'deployment_ready')
+        assertOutput(context, result, 'base_ref', 'main')
+        assertOutput(context, result, 'ref', 'stack-middle')
+        assertOutput(context, result, 'sha', ACCEPTANCE_SHAS.stackMiddle)
+        assert.deepEqual([...new Set(prechecksQueryNumbers(context))], [2])
+        const deploymentBody = routeBody(
+          context,
+          'POST',
+          apiPath('/deployments')
+        )
+        assert.equal(deploymentBody['ref'], ACCEPTANCE_SHAS.stackMiddle)
+        assert.equal(deploymentBody['auto_merge'], false)
+        assert.equal(
+          requireDeployment(context).sha,
+          ACCEPTANCE_SHAS.stackMiddle
+        )
+      })
+  },
+  {
+    name: 'native PR stacks reject stale lower policy data',
+    run: () =>
+      withMockGitHub('native stack stale lower policy data', async context => {
+        seedPrStack(context.state)
+        requireStackMember(context.state, 1).graphqlCommitOid =
+          ACCEPTANCE_SHAS.oldDeployment
+
+        const result = await runMain(context, {enable_pr_stacks: 'true'})
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertNoDeployment(context, result)
+        assertNoLockRoutes(context)
+        assert.ok(prechecksQueryNumbers(context).includes(1))
+        assertCommentIncludes(
+          context,
+          'could not verify this pull request stack'
+        )
+      })
+  },
+  {
+    name: 'native PR stacks read every lower-layer CI page',
+    run: () =>
+      withMockGitHub('native stack lower CI pagination', async context => {
+        seedPrStack(context.state)
+        const lower = requireStackMember(context.state, 1)
+        lower.rollupContexts = [
+          ...Array.from({length: 100}, (_, index) => ({
+            conclusion: 'SUCCESS',
+            databaseId: index + 1,
+            isRequired: true,
+            name: `check-${String(index)}`,
+            type: 'check-run' as const
+          })),
+          {
+            conclusion: 'FAILURE',
+            databaseId: 101,
+            isRequired: true,
+            name: 'late-failure',
+            type: 'check-run'
+          }
+        ]
+
+        const result = await runMain(context, {enable_pr_stacks: 'true'})
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'prechecks_failed')
+        assertNoDeployment(context, result)
+        assertNoLockRoutes(context)
+        assert.ok(
+          context.routeLog.some(
+            route =>
+              route.path === '/graphql' &&
+              route.body.includes('C_acceptance_1') &&
+              route.body.includes('"cursor":"100"')
+          ),
+          diagnostics(context, result)
+        )
+      })
+  },
+  {
+    name: 'native PR stacks reject invalid membership and ancestry',
+    run: async () => {
+      for (const failure of [
+        'wrong trunk',
+        'unregistered chain',
+        'malformed response',
+        'missing selected member',
+        'cross-repository member',
+        'non-linear stack',
+        'behind trunk'
+      ] as const) {
+        await withMockGitHub(`native stack ${failure}`, async context => {
+          const stack = seedPrStack(context.state)
+          const lower = requireStackMember(context.state, 1)
+          switch (failure) {
+            case 'wrong trunk':
+              addBranch(context.state, 'release')
+              stack.baseRef = 'release'
+              lower.pullRequest = {...lower.pullRequest, baseRef: 'release'}
+              break
+            case 'unregistered chain':
+              context.state.prStack = null
+              break
+            case 'malformed response':
+              context.state.prStackResponses.push({repository: null})
+              break
+            case 'missing selected member':
+              stack.members = stack.members.filter(
+                member =>
+                  member.pullRequest.number !== context.state.pullRequest.number
+              )
+              break
+            case 'cross-repository member':
+              lower.pullRequest = {
+                ...lower.pullRequest,
+                headRepoFork: true,
+                headRepoFullName: 'other/branch-deploy'
+              }
+              break
+            case 'non-linear stack':
+              requireStackMember(context.state, 2).baseSha =
+                ACCEPTANCE_SHAS.default
+              break
+            case 'behind trunk':
+              context.state.comparisonBehindBy = 1
+              break
+          }
+
+          const result = await runMain(context, {enable_pr_stacks: 'true'})
+
+          assertExit(context, result, 1)
+          assertReason(context, result, 'prechecks_failed')
+          assertNoDeployment(context, result)
+          assertNoLockRoutes(context)
+        })
+      }
+    }
+  },
+  {
+    name: 'native PR stacks reject moved lower members',
+    run: () =>
+      withMockGitHub('native stack lower member moves', async context => {
+        seedPrStack(context.state)
+        const original = mockPrStackResponse(
+          context.state,
+          'refs/heads/main',
+          null
+        )
+        const lower = requireStackMember(context.state, 1)
+        const previous = lower.pullRequest
+        lower.pullRequest = {
+          ...previous,
+          headSha: ACCEPTANCE_SHAS.oldDeployment
+        }
+        const moved = mockPrStackResponse(
+          context.state,
+          'refs/heads/main',
+          null
+        )
+        lower.pullRequest = previous
+        context.state.prStackResponses.push(original, moved)
+
+        const result = await runMain(context, {enable_pr_stacks: 'true'})
+
+        assertExit(context, result, 1)
+        assertReason(context, result, 'ref_changed')
+        assert.equal(
+          context.state.pullRequest.headSha,
+          ACCEPTANCE_SHAS.stackTop
+        )
+        assertNoDeployment(context, result)
+        assert.equal(
+          context.state.branches.has(lockBranch('production')),
+          false,
+          diagnostics(context, result)
+        )
+      })
+  },
+  {
+    name: 'native PR stacks ignore changes above the selected layer',
+    run: () =>
+      withMockGitHub('native stack upper member moves', async context => {
+        seedPrStack(context.state, 2)
+        const original = mockPrStackResponse(
+          context.state,
+          'refs/heads/main',
+          null
+        )
+        const upper = requireStackMember(context.state, 3)
+        const previous = upper.pullRequest
+        upper.pullRequest = {
+          ...previous,
+          headSha: ACCEPTANCE_SHAS.oldDeployment
+        }
+        const moved = mockPrStackResponse(
+          context.state,
+          'refs/heads/main',
+          null
+        )
+        upper.pullRequest = previous
+        context.state.prStackResponses.push(original, moved)
+
+        const result = await runMain(context, {enable_pr_stacks: 'true'})
+
+        assertExit(context, result, 0)
+        assertReason(context, result, 'deployment_ready')
+        assertOutput(context, result, 'sha', ACCEPTANCE_SHAS.stackMiddle)
+        assert.equal(
+          requireDeployment(context).sha,
+          ACCEPTANCE_SHAS.stackMiddle
+        )
+      })
+  },
+  {
+    name: 'native PR stacks can satisfy required deployment rules',
+    run: () =>
+      withMockGitHub(
+        'native stack required production deployment',
+        async context => {
+          const stack = seedPrStack(context.state)
+          context.state.branchRules = [
+            {
+              type: 'required_deployments',
+              parameters: {required_deployment_environments: ['production']}
+            }
+          ]
+          context.state.mergeStateStatus = 'BLOCKED'
+          for (const member of stack.members) {
+            member.mergeStateStatus = 'BLOCKED'
+          }
+          assert.equal(context.state.deployments.length, 0)
+
+          const result = await runMain(context, {
+            enable_pr_stacks: 'true',
+            checks: 'required'
+          })
+
+          assertExit(context, result, 0)
+          assertReason(context, result, 'deployment_ready')
+          assert.equal(requireDeployment(context).environment, 'production')
+          assert.equal(requireDeployment(context).sha, ACCEPTANCE_SHAS.stackTop)
+          assert.equal(
+            routeBody(context, 'POST', apiPath('/deployments'))['auto_merge'],
+            false
+          )
+        }
+      )
+  },
+  {
     name: 'trusted deployment template',
     run: () =>
       withMockGitHub('trusted deployment template', async context => {
@@ -3713,6 +4382,191 @@ const scenarios = [
           ),
           true,
           diagnostics(context)
+        )
+      })
+  },
+  {
+    name: 'mock PR stack GraphQL contract',
+    run: () =>
+      withMockGitHub('mock PR stack GraphQL contract', async context => {
+        const query = 'query BranchDeployPullRequestStack { repository { id } }'
+        const variables = {
+          owner: ACCEPTANCE_REPOSITORY.owner,
+          repo: ACCEPTANCE_REPOSITORY.repo,
+          pullNumber: context.state.pullRequest.number,
+          stableRef: 'refs/heads/main',
+          cursor: null
+        }
+        const responseRepository = (
+          result: HttpResult
+        ): Record<string, unknown> => {
+          assert.equal(result.status, 200, diagnostics(context))
+          const body = requireRecordValue(
+            JSON.parse(result.body),
+            diagnostics(context)
+          )
+          const data = requireRecordValue(body['data'], diagnostics(context))
+          return requireRecordValue(data['repository'], diagnostics(context))
+        }
+        const standalone = responseRepository(
+          await requestMockRoute(context.port, '/graphql', 'POST', {
+            query,
+            variables
+          })
+        )
+        assert.equal(
+          requireRecordValue(standalone['pullRequest'], diagnostics(context))[
+            'stack'
+          ],
+          null
+        )
+        context.state.pullRequest = {
+          ...context.state.pullRequest,
+          merged: false
+        }
+        const missingStable = responseRepository(
+          await requestMockRoute(context.port, '/graphql', 'POST', {
+            query,
+            variables: {...variables, stableRef: 'refs/heads/missing'}
+          })
+        )
+        assert.equal(missingStable['ref'], null)
+
+        for (const [override, error] of [
+          [{owner: 'Other'}, 'unexpected pull request stack GraphQL variables'],
+          [{repo: 'other'}, 'unexpected pull request stack GraphQL variables'],
+          [
+            {pullNumber: 999},
+            'unexpected pull request stack GraphQL variables'
+          ],
+          [{cursor: 1}, 'unexpected pull request stack GraphQL cursor']
+        ] as const) {
+          const invalid = await requestMockRoute(
+            context.port,
+            '/graphql',
+            'POST',
+            {query, variables: {...variables, ...override}}
+          )
+          assert.equal(invalid.status, 500, diagnostics(context))
+          assert.ok(invalid.body.includes(error), diagnostics(context))
+        }
+
+        const prechecksQuery =
+          'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}'
+        const prechecksVariables = {
+          owner: ACCEPTANCE_REPOSITORY.owner,
+          name: ACCEPTANCE_REPOSITORY.repo,
+          number: 999
+        }
+        const noStackMember = await requestMockRoute(
+          context.port,
+          '/graphql',
+          'POST',
+          {query: prechecksQuery, variables: prechecksVariables}
+        )
+        assert.equal(noStackMember.status, 500, diagnostics(context))
+        assert.ok(
+          noStackMember.body.includes('unexpected prechecks GraphQL variables'),
+          diagnostics(context)
+        )
+
+        const stack = seedPrStack(context.state)
+        let previous = requireStackMember(context.state, 3)
+        for (let number = 4; number <= 101; number += 1) {
+          const headRef = `stack-${String(number)}`
+          const member: MockStackMember = {
+            ...previous,
+            baseSha: previous.pullRequest.headSha,
+            pullRequest: {
+              ...previous.pullRequest,
+              baseRef: previous.pullRequest.headRef,
+              headLabel: `${ACCEPTANCE_REPOSITORY.owner}:${headRef}`,
+              headRef,
+              headSha: number.toString(16).padStart(40, '0'),
+              number
+            }
+          }
+          stack.members.push(member)
+          previous = member
+        }
+        const stackedVariables = {
+          ...variables,
+          pullNumber: context.state.pullRequest.number
+        }
+        for (const [cursor, expectedLength, hasNextPage, endCursor] of [
+          [null, 100, true, '100'],
+          ['100', 1, false, null]
+        ] as const) {
+          const repository = responseRepository(
+            await requestMockRoute(context.port, '/graphql', 'POST', {
+              query,
+              variables: {...stackedVariables, cursor}
+            })
+          )
+          const pull = requireRecordValue(
+            repository['pullRequest'],
+            diagnostics(context)
+          )
+          const stackResponse = requireRecordValue(
+            pull['stack'],
+            diagnostics(context)
+          )
+          const entries = requireRecordValue(
+            stackResponse['entries'],
+            diagnostics(context)
+          )
+          const nodes = entries['nodes']
+          assert.ok(Array.isArray(nodes), diagnostics(context))
+          assert.equal(nodes.length, expectedLength)
+          assert.deepEqual(entries['pageInfo'], {hasNextPage, endCursor})
+        }
+
+        for (const invalidVariables of [
+          prechecksVariables,
+          {...prechecksVariables, number: 1, name: 'other'}
+        ]) {
+          const invalid = await requestMockRoute(
+            context.port,
+            '/graphql',
+            'POST',
+            {query: prechecksQuery, variables: invalidVariables}
+          )
+          assert.equal(invalid.status, 500, diagnostics(context))
+          assert.ok(
+            invalid.body.includes('unexpected prechecks GraphQL variables'),
+            diagnostics(context)
+          )
+        }
+        const unknownPaginatedMember = await requestMockRoute(
+          context.port,
+          '/graphql',
+          'POST',
+          {
+            query:
+              'query($commitId:ID!,$cursor:String!,$number:Int!){node(id:$commitId){... on Commit{statusCheckRollup{contexts(first:100,after:$cursor){nodes{id}}}}}}',
+            variables: {commitId: 'C_missing', cursor: '100', number: 999}
+          }
+        )
+        assert.equal(unknownPaginatedMember.status, 500, diagnostics(context))
+        assert.ok(
+          unknownPaginatedMember.body.includes(
+            'unexpected paginated prechecks GraphQL variables'
+          ),
+          diagnostics(context)
+        )
+
+        const identical = await getMockRoute(
+          context.port,
+          apiPath(
+            `/compare/${ACCEPTANCE_SHAS.default}...${ACCEPTANCE_SHAS.default}`
+          )
+        )
+        assert.equal(identical.status, 200, diagnostics(context))
+        assert.equal(
+          requireRecordValue(JSON.parse(identical.body), diagnostics(context))[
+            'status'
+          ],
+          'identical'
         )
       })
   },

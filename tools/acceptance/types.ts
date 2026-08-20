@@ -112,7 +112,27 @@ export type MockRollupContext =
       readonly updatedAt?: string
     }
 
-export interface MockGitHubState {
+export interface MockPullRequestChecks {
+  graphqlCommitOid: string | null
+  mergeStateStatus: string
+  reviewDecision: string | null
+  rollupAvailable: boolean
+  rollupContexts: readonly MockRollupContext[]
+  rollupState: string | null
+}
+
+export interface MockStackMember extends MockPullRequestChecks {
+  baseSha: string
+  pullRequest: MockPullRequest
+  state: 'CLOSED' | 'MERGED' | 'OPEN'
+}
+
+export interface MockPullRequestStack {
+  baseRef: string
+  members: MockStackMember[]
+}
+
+export interface MockGitHubState extends MockPullRequestChecks {
   blobs: Map<string, string>
   branchRules: readonly unknown[]
   branches: Map<string, MockBranch>
@@ -125,10 +145,8 @@ export interface MockGitHubState {
   deploymentResponseSha: string | null
   failInitialReaction: boolean
   faults: MockFault[]
-  graphqlCommitOid: string | null
   labels: Set<string>
   lockFiles: Map<string, string>
-  mergeStateStatus: string
   nextCommentId: number
   nextDeploymentId: number
   nextGitId: number
@@ -136,6 +154,8 @@ export interface MockGitHubState {
   nextStatusId: number
   owner: string
   permission: string
+  prStack: MockPullRequestStack | null
+  prStackResponses: unknown[]
   pullRequest: MockPullRequest
   pullRequestMoveAfterReads: number
   pullRequestMoveSha: string | null
@@ -146,10 +166,6 @@ export interface MockGitHubState {
   repo: string
   repositoryFiles: Map<string, string>
   repositoryDefaultBranch: string
-  reviewDecision: string | null
-  rollupAvailable: boolean
-  rollupContexts: readonly MockRollupContext[]
-  rollupState: string | null
   stableBranchMoveSha: string | null
   trees: Map<string, string>
 }
