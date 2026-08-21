@@ -39794,6 +39794,7 @@ async function prechecks(context, octokit, data) {
     const securityWarningsEnabled = data.inputs.use_security_warnings;
     let stack = null;
     let stackRequiredChecks = null;
+    let expectNoStack = false;
     if (data.inputs.enable_pr_stacks &&
         isNotStableBranchDeploy &&
         data.environmentObj.sha === null) {
@@ -39816,6 +39817,17 @@ async function prechecks(context, octokit, data) {
                     stack.pullRequests.at(-1)?.baseRef !== baseRef) {
                     throw new Error('The stack changed during prechecks');
                 }
+            }
+            else {
+                // A fork repository can contain same-repository PRs. Only a known
+                // cross-repository fork can skip the ordinary membership recheck.
+                const headRepository = prData.head.repo?.full_name;
+                expectNoStack =
+                    !isFork ||
+                        typeof headRepository !== 'string' ||
+                        !/^[^/\s]+\/[^/\s]+$/u.test(headRepository) ||
+                        headRepository.toLowerCase() ===
+                            `${context.repo.owner}/${context.repo.repo}`.toLowerCase();
             }
         }
         catch (error) {
@@ -40189,6 +40201,7 @@ async function prechecks(context, octokit, data) {
         noopMode: noopMode,
         sha: sha,
         isFork: isFork,
+        ...(expectNoStack ? { expectNoStack: true } : {}),
         ...(stack === null ? {} : { stack })
     };
 }
@@ -40679,7 +40692,10 @@ function checkStatus(check) {
 ;// CONCATENATED MODULE: ./src/functions/selected-ref-check.ts
 
 async function selectedRefMatches(octokit, context, request) {
-    if (request.exactSha || (request.isFork && !request.stableBranchUsed)) {
+    if (request.exactSha ||
+        (request.isFork &&
+            !request.stableBranchUsed &&
+            request.expectNoStack !== true)) {
         return true;
     }
     if (request.stableBranchUsed) {
@@ -40700,7 +40716,8 @@ async function selectedRefMatches(octokit, context, request) {
         pull.data.stack !== undefined) {
         return false;
     }
-    return pull.data.head.sha === request.expectedSha;
+    // Fork deployments keep their checked SHA even if the head branch moves.
+    return request.isFork || pull.data.head.sha === request.expectedSha;
 }
 
 ;// CONCATENATED MODULE: ./src/functions/unlock-if-unchanged.ts
@@ -41081,7 +41098,7 @@ async function changedRefOutcome(request, ready, lease, deploymentType) {
     if (ready.precheck.stack === undefined) {
         unchanged = await selectedRefMatches(octokit, context, {
             exactSha: ready.environmentResult.environmentObj.sha !== null,
-            ...(inputs.enable_pr_stacks ? { expectNoStack: true } : {}),
+            ...(ready.precheck.expectNoStack === true ? { expectNoStack: true } : {}),
             expectedSha: ready.precheck.sha,
             isFork: ready.precheck.isFork,
             stableBranch: inputs.stable_branch,

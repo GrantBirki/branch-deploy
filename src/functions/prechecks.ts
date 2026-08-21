@@ -263,6 +263,7 @@ export async function prechecks(
 
   let stack: PrStackSnapshot | null = null
   let stackRequiredChecks: readonly PrStackRequiredCheck[] | null = null
+  let expectNoStack = false
   if (
     data.inputs.enable_pr_stacks &&
     isNotStableBranchDeploy &&
@@ -289,6 +290,16 @@ export async function prechecks(
         ) {
           throw new Error('The stack changed during prechecks')
         }
+      } else {
+        // A fork repository can contain same-repository PRs. Only a known
+        // cross-repository fork can skip the ordinary membership recheck.
+        const headRepository = prData.head.repo?.full_name
+        expectNoStack =
+          !isFork ||
+          typeof headRepository !== 'string' ||
+          !/^[^/\s]+\/[^/\s]+$/u.test(headRepository) ||
+          headRepository.toLowerCase() ===
+            `${context.repo.owner}/${context.repo.repo}`.toLowerCase()
       }
     } catch (error) {
       return stackPrecheckUnavailable(error)
@@ -720,6 +731,7 @@ export async function prechecks(
     noopMode: noopMode,
     sha: sha,
     isFork: isFork,
+    ...(expectNoStack ? {expectNoStack: true} : {}),
     ...(stack === null ? {} : {stack})
   }
 }

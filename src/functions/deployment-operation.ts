@@ -372,7 +372,7 @@ async function changedRefOutcome(
   if (ready.precheck.stack === undefined) {
     unchanged = await selectedRefMatches(octokit, context, {
       exactSha: ready.environmentResult.environmentObj.sha !== null,
-      ...(inputs.enable_pr_stacks ? {expectNoStack: true} : {}),
+      ...(ready.precheck.expectNoStack === true ? {expectNoStack: true} : {}),
       expectedSha: ready.precheck.sha,
       isFork: ready.precheck.isFork,
       stableBranch: inputs.stable_branch,

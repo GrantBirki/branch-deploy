@@ -760,7 +760,8 @@ for (const membership of [undefined, null]) {
           ref: 'test-ref',
           status: true,
           sha: 'abc123',
-          isFork: false
+          isFork: false,
+          expectNoStack: true
         })
         assertCalledTimes(resolvePrStackMock, 0)
         assertCalledTimes(loadPrStackRequiredChecksMock, 0)
@@ -768,6 +769,71 @@ for (const membership of [undefined, null]) {
         assertCalledWith(parsePrStackMembershipMock, membership)
       }
     )
+  }
+}
+
+for (const [description, fullName, requiresRecheck] of [
+  ['same repository', 'corp/test', true],
+  ['same repository with different case', 'CoRp/TeSt', true],
+  ['different owner', 'other/test', false],
+  ['different repository', 'corp/other', false],
+  ['missing repository name', undefined, true],
+  ['null repository name', null, true],
+  ['empty repository name', '', true],
+  ['incomplete repository name', 'corp', true],
+  ['extra repository separator', 'corp/test/extra', true],
+  ['whitespace in repository name', 'corp /test', true],
+  ['non-string repository name', false, true]
+] as const) {
+  for (const enabled of [false, true]) {
+    test(`preserves fork behavior for ${description} with stacks ${String(enabled)}`, async () => {
+      data.inputs.enable_pr_stacks = enabled
+      getPullsOK.mock.mockImplementation(() =>
+        Promise.resolve({
+          data: {
+            head: {
+              ref: 'test-ref',
+              sha: 'abc123',
+              label: 'corp:test-ref',
+              repo: {
+                fork: true,
+                ...(fullName === undefined
+                  ? {}
+                  : {full_name: unsafeInvalidValue<string>(fullName)})
+              }
+            },
+            base: {ref: 'main'}
+          },
+          status: 200
+        })
+      )
+      resolvePrStackMock.mock.mockImplementation(() =>
+        Promise.reject(new Error('Stack preview unavailable'))
+      )
+      loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+        Promise.reject(new Error('Stack rules unavailable'))
+      )
+
+      assert.deepStrictEqual(await prechecks(context, octokit, data), {
+        message: '✅ PR is approved and all CI checks passed',
+        noopMode: false,
+        ref: 'abc123',
+        status: true,
+        sha: 'abc123',
+        isFork: true,
+        ...(enabled && requiresRecheck ? {expectNoStack: true} : {})
+      })
+      assertCalledWith(setOutputMock, 'fork', 'true')
+      assertCalledWith(saveStateMock, 'fork', 'true')
+      assertCalledWith(setOutputMock, 'fork_ref', 'test-ref')
+      assertCalledWith(setOutputMock, 'fork_label', 'corp:test-ref')
+      assertCalledWith(setOutputMock, 'fork_checkout', 'corp-test-ref test-ref')
+      assertCalledWith(setOutputMock, 'fork_full_name', fullName)
+      assertCalledTimes(getPullsOK, 1)
+      assertCalledTimes(resolvePrStackMock, 0)
+      assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+      assertCalledTimes(graphQLOK, 1)
+    })
   }
 }
 

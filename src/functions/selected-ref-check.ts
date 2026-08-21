@@ -38,7 +38,12 @@ export async function selectedRefMatches(
   context: BranchDeployContext,
   request: SelectedRefRequest
 ): Promise<boolean> {
-  if (request.exactSha || (request.isFork && !request.stableBranchUsed)) {
+  if (
+    request.exactSha ||
+    (request.isFork &&
+      !request.stableBranchUsed &&
+      request.expectNoStack !== true)
+  ) {
     return true
   }
 
@@ -63,5 +68,6 @@ export async function selectedRefMatches(
   ) {
     return false
   }
-  return pull.data.head.sha === request.expectedSha
+  // Fork deployments keep their checked SHA even if the head branch moves.
+  return request.isFork || pull.data.head.sha === request.expectedSha
 }

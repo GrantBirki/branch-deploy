@@ -253,6 +253,7 @@ export interface PrecheckFailure {
 }
 
 export interface PrecheckSuccess {
+  readonly expectNoStack?: boolean
   readonly isFork: boolean
   readonly message: string
   readonly noopMode: boolean

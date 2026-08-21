@@ -41,7 +41,8 @@ for (const immutable of [
   {...request, exactSha: true},
   {...request, isFork: true},
   {...request, exactSha: true, expectNoStack: true},
-  {...request, isFork: true, expectNoStack: true}
+  {...request, isFork: true, expectNoStack: false},
+  {...request, exactSha: true, isFork: true, expectNoStack: true}
 ] as const) {
   test(`does not re-fetch immutable ref ${JSON.stringify(immutable)}`, async () => {
     assert.strictEqual(
@@ -52,6 +53,28 @@ for (const immutable of [
     assertNotCalled(getBranchMock)
   })
 }
+
+test('rechecks stack membership for a same-repository PR hosted in a fork', async () => {
+  getPullMock.mock.mockImplementation(() =>
+    Promise.resolve({
+      data: {
+        head: {sha: 'expected'},
+        stack: {number: 7, position: 2, base: {ref: 'main'}}
+      }
+    })
+  )
+
+  assert.strictEqual(
+    await selectedRefMatches(octokit, context, {
+      ...request,
+      isFork: true,
+      expectNoStack: true
+    }),
+    false
+  )
+  assertCalledTimes(getPullMock, 1)
+  assertNotCalled(getBranchMock)
+})
 
 test('re-fetches and accepts an unchanged pull request head', async () => {
   getPullMock.mock.mockImplementation(() =>
@@ -95,6 +118,25 @@ for (const [description, marker] of [
     assertCalledTimes(getPullMock, 1)
     assertNotCalled(getBranchMock)
   })
+
+  for (const headSha of ['expected', 'changed']) {
+    test(`preserves the checked fork SHA with ${description} membership and head ${headSha}`, async () => {
+      getPullMock.mock.mockImplementation(() =>
+        Promise.resolve({data: {head: {sha: headSha}, ...marker}})
+      )
+
+      assert.strictEqual(
+        await selectedRefMatches(octokit, context, {
+          ...request,
+          isFork: true,
+          expectNoStack: true
+        }),
+        true
+      )
+      assertCalledTimes(getPullMock, 1)
+      assertNotCalled(getBranchMock)
+    })
+  }
 }
 
 for (const [description, stack] of [
@@ -105,22 +147,45 @@ for (const [description, stack] of [
   ['zero', 0],
   ['empty string', '']
 ] as const) {
-  test(`rejects newly present stack metadata (${description}) with an unchanged head`, async () => {
-    getPullMock.mock.mockImplementation(() =>
-      Promise.resolve({data: {head: {sha: 'expected'}, stack}})
-    )
+  for (const isFork of [false, true]) {
+    test(
+      `rejects newly present stack metadata (${description}) with an unchanged head` +
+        (isFork ? ' in a fork repository' : ''),
+      async () => {
+        getPullMock.mock.mockImplementation(() =>
+          Promise.resolve({data: {head: {sha: 'expected'}, stack}})
+        )
 
-    assert.strictEqual(
-      await selectedRefMatches(octokit, context, {
-        ...request,
-        expectNoStack: true
-      }),
-      false
+        assert.strictEqual(
+          await selectedRefMatches(octokit, context, {
+            ...request,
+            isFork,
+            expectNoStack: true
+          }),
+          false
+        )
+        assertCalledTimes(getPullMock, 1)
+        assertNotCalled(getBranchMock)
+      }
     )
-    assertCalledTimes(getPullMock, 1)
-    assertNotCalled(getBranchMock)
-  })
+  }
 }
+
+test('does not accept a fork membership recheck when the pull lookup fails', async () => {
+  const error = new Error('Pull request unavailable')
+  getPullMock.mock.mockImplementation(() => Promise.reject(error))
+
+  await assert.rejects(
+    selectedRefMatches(octokit, context, {
+      ...request,
+      isFork: true,
+      expectNoStack: true
+    }),
+    error
+  )
+  assertCalledTimes(getPullMock, 1)
+  assertNotCalled(getBranchMock)
+})
 
 for (const ordinaryRequest of [request, {...request, expectNoStack: false}]) {
   test(`ignores stack membership without an opt-in ${JSON.stringify(ordinaryRequest)}`, async () => {

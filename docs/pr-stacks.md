@@ -25,7 +25,7 @@ With `checks: required` or `checks: all`, Branch Deploy also reads the trunk's b
 
 Automatic CI selection cannot yet verify required-workflow rules or commit statuses that must come from a specific GitHub App. It stops if those rules cannot be verified. Ordinary check runs from a required App, including GitHub Actions, are supported. These deployment checks do not replace GitHub's final merge rules.
 
-Branch Deploy verifies the stack's membership and commit ancestry before continuing. It stops if the stack has changed, is not linear, or GitHub cannot provide the stack metadata needed to verify it. The deployment uses the exact checked commit without asking GitHub to auto-merge another branch. Existing outputs keep their meanings: `ref` identifies the selected PR branch and `sha` is the checked commit to use in subsequent checkout steps. This does not enable unchecked SHA deployment commands.
+Branch Deploy verifies the stack's membership and commit ancestry before continuing. It stops if the stack has changed, is not linear, or GitHub cannot provide the stack metadata needed to verify it. The deployment uses the exact checked commit without asking GitHub to auto-merge another branch. Existing outputs keep their meanings: `ref` identifies the selected PR branch, or the checked SHA for forks, and `sha` is the checked commit to use in subsequent checkout steps. This does not enable unchecked SHA deployment commands.
 
 ## Updating a stack
 
@@ -43,5 +43,7 @@ Wait for CI to finish, then run `.noop` or `.deploy` again. Branch Deploy does n
 With `enable_pr_stacks: false`, Branch Deploy makes no stack API calls and keeps its existing behavior. Stable-branch rollbacks and explicit SHA commands also keep their existing paths.
 
 With `enable_pr_stacks: true`, Branch Deploy uses the stack membership reported by its normal pull request lookup. Standalone PRs keep the existing deployment path without calling the preview stack API. Native stack members, including the bottom PR targeting `main`, must pass full stack validation. If a standalone PR joins a stack after its checks, retry the command so the stack can be checked.
+
+PRs within a forked repository also receive this membership recheck when stack support is enabled. They keep their checked SHA even if the head branch moves. PRs from a different repository keep the existing fork behavior.
 
 Enabling stacks does not enable `allow_non_default_target_branch_deployments`. Standalone PRs and unregistered branch chains still use that separate setting. When stack support is enabled, a recognized native stack must pass stack validation even if the broader non-default-branch override is also enabled.

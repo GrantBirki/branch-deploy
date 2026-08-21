@@ -577,7 +577,10 @@ beforeEach(() => {
       message: '✔️ PR is approved and all CI checks passed - OK',
       noopMode: false,
       sha: mock_sha,
-      isFork: false
+      isFork: false,
+      ...(process.env['INPUT_ENABLE_PR_STACKS'] === 'true'
+        ? {expectNoStack: true}
+        : {})
     })
   )
   prStackSnapshotMatchesMock.mock.mockImplementation(() =>
@@ -692,6 +695,113 @@ for (const phase of [
     })
   }
 }
+
+for (const phase of [
+  'after confirmation',
+  'after the started comment'
+] as const) {
+  for (const noop of [false, true]) {
+    for (const sticky of [false, true]) {
+      test(`rejects newly added stack membership in a fork repository ${phase}, noop ${String(noop)}, sticky ${String(sticky)}`, async () => {
+        setEnv('INPUT_ENABLE_PR_STACKS', 'true')
+        setEnv('INPUT_ALLOW_FORKS', 'true')
+        setEnv('INPUT_DEPLOYMENT_CONFIRMATION', 'true')
+        setEnv('INPUT_STICKY_LOCKS', String(sticky))
+        setEnv('INPUT_STICKY_LOCKS_FOR_NOOP', String(sticky))
+        setCommentBody(noop ? '.noop' : '.deploy')
+        setPrechecksResult({
+          ref: mock_sha,
+          status: true,
+          message: 'Fork checks passed',
+          noopMode: noop,
+          sha: mock_sha,
+          isFork: true,
+          expectNoStack: true
+        })
+        stackOnRefRead = phase === 'after confirmation' ? 1 : 2
+
+        assert.strictEqual(await run(), 'failure')
+        assertOperationResult({
+          decision: 'failure',
+          reason_code: 'ref_changed',
+          operation: noop ? 'noop' : 'deploy',
+          deployment_type: noop ? 'noop' : 'branch',
+          environment: 'production',
+          ref: mock_sha,
+          sha: mock_sha
+        })
+        assert.strictEqual(pullRefReads, stackOnRefRead)
+        assertCalledTimes(unlockIfUnchangedMock, sticky ? 0 : 1)
+        assertNotCalled(createDeploymentMock)
+        assertNotCalled(prStackSnapshotMatchesMock)
+        assertCalledWith(saveStateMock, 'bypass', 'true')
+        assertCalledWith(
+          setFailedMock,
+          'the selected deployment ref changed after prechecks'
+        )
+      })
+    }
+  }
+}
+
+for (const enabled of [false, true]) {
+  test(`keeps ineligible fork deployments on the immutable shortcut with stacks ${String(enabled)}`, async () => {
+    setEnv('INPUT_ENABLE_PR_STACKS', String(enabled))
+    setEnv('INPUT_ALLOW_FORKS', 'true')
+    setPrechecksResult({
+      ref: mock_sha,
+      status: true,
+      message: 'Fork checks passed',
+      noopMode: false,
+      sha: mock_sha,
+      isFork: true
+    })
+    stackOnRefRead = 1
+
+    assert.strictEqual(await run(), 'success')
+    assertOperationResult({
+      decision: 'continue',
+      reason_code: 'deployment_ready',
+      operation: 'deploy',
+      deployment_type: 'branch',
+      environment: 'production',
+      ref: mock_sha,
+      sha: mock_sha,
+      deployment_id: 123
+    })
+    assert.strictEqual(pullRefReads, 0)
+    assertNotCalled(prStackSnapshotMatchesMock)
+    const request = createDeploymentMock.mock.calls.at(-1)?.arguments[0]
+    assert.ok(request !== undefined)
+    assert.partialDeepStrictEqual(request, {ref: mock_sha, auto_merge: true})
+  })
+}
+
+test('keeps the checked fork SHA when only its branch head moves', async () => {
+  setEnv('INPUT_ENABLE_PR_STACKS', 'true')
+  setEnv('INPUT_ALLOW_FORKS', 'true')
+  setPrechecksResult({
+    ref: mock_sha,
+    status: true,
+    message: 'Fork checks passed',
+    noopMode: false,
+    sha: mock_sha,
+    isFork: true,
+    expectNoStack: true
+  })
+  liveRefSha = 'new-commit'
+
+  assert.strictEqual(await run(), 'success')
+  assert.strictEqual(pullRefReads, 2)
+  assertNotCalled(prStackSnapshotMatchesMock)
+  const request = createDeploymentMock.mock.calls.at(-1)?.arguments[0]
+  assert.ok(request !== undefined)
+  assert.partialDeepStrictEqual(request, {
+    ref: mock_sha,
+    auto_merge: true,
+    payload: {sha: mock_sha}
+  })
+})
 
 test('deploys a checked stack SHA without changing the public branch outputs', async () => {
   setStackPrechecksResult()
