@@ -42,4 +42,6 @@ Wait for CI to finish, then run `.noop` or `.deploy` again. Branch Deploy does n
 
 With `enable_pr_stacks: false`, Branch Deploy makes no stack API calls and keeps its existing behavior. Stable-branch rollbacks and explicit SHA commands also keep their existing paths.
 
+With `enable_pr_stacks: true`, Branch Deploy uses the stack membership reported by its normal pull request lookup. Standalone PRs keep the existing deployment path without calling the preview stack API. Native stack members, including the bottom PR targeting `main`, must pass full stack validation. If a standalone PR joins a stack after its checks, retry the command so the stack can be checked.
+
 Enabling stacks does not enable `allow_non_default_target_branch_deployments`. Standalone PRs and unregistered branch chains still use that separate setting. When stack support is enabled, a recognized native stack must pass stack validation even if the broader non-default-branch override is also enabled.

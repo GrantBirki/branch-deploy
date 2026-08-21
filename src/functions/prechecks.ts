@@ -6,7 +6,7 @@ import {stringToArray} from './string-to-array.ts'
 import {COLORS} from './colors.ts'
 import {API_HEADERS} from './api-headers.ts'
 import {evaluatePrecheckGates} from './precheck-gates.ts'
-import {resolvePrStack} from './pr-stacks.ts'
+import {parsePrStackMembership, resolvePrStack} from './pr-stacks.ts'
 import type {PrStackSnapshot} from './pr-stacks.ts'
 import {loadPrStackRequiredChecks} from './pr-stack-checks.ts'
 import type {PrStackRequiredCheck} from './pr-stack-checks.ts'
@@ -65,6 +65,7 @@ export interface PrechecksPullResponse {
   readonly data?: {
     readonly base?: Partial<Pick<FullPullGetResponse['data']['base'], 'ref'>>
     readonly draft?: Exclude<FullPullGetResponse['data']['draft'], undefined>
+    readonly stack?: unknown
     readonly head?: Partial<Pick<PullHead, 'label' | 'ref' | 'sha'>> & {
       readonly repo?: null | Partial<
         Pick<PullHeadRepository, 'fork' | 'full_name'>
@@ -77,6 +78,7 @@ export interface PrechecksPullResponse {
 export interface PrechecksPullData {
   readonly base: Pick<FullPullGetResponse['data']['base'], 'ref'>
   readonly draft?: Exclude<FullPullGetResponse['data']['draft'], undefined>
+  readonly stack?: unknown
   readonly head: Pick<PullHead, 'label' | 'ref' | 'sha'> & {
     readonly repo?: null | Partial<
       Pick<PullHeadRepository, 'fork' | 'full_name'>
@@ -267,19 +269,26 @@ export async function prechecks(
     data.environmentObj.sha === null
   ) {
     try {
-      stack = await resolvePrStack(octokit, {
-        ...context.repo,
-        pullNumber: context.issue.number,
-        expectedHeadSha: sha,
-        stableBranch: data.inputs.stable_branch
-      })
-      if (
-        stack !== null &&
-        (stack.stableSha !== stableBaseBranch.data.commit.sha ||
+      // Ordinary PRs must not depend on the preview stack APIs.
+      const membership = parsePrStackMembership(prData.stack)
+      if (membership !== null) {
+        stack = await resolvePrStack(octokit, {
+          ...context.repo,
+          pullNumber: context.issue.number,
+          expectedHeadSha: sha,
+          stableBranch: data.inputs.stable_branch
+        })
+        if (
+          stack === null ||
+          stack.stackNumber !== membership.number ||
+          stack.selectedPosition !== membership.position ||
+          stack.stableBranch !== membership.baseRef ||
+          stack.stableSha !== stableBaseBranch.data.commit.sha ||
           stack.pullRequests.at(-1)?.headRef !== ref ||
-          stack.pullRequests.at(-1)?.baseRef !== baseRef)
-      ) {
-        throw new Error('The stack changed during prechecks')
+          stack.pullRequests.at(-1)?.baseRef !== baseRef
+        ) {
+          throw new Error('The stack changed during prechecks')
+        }
       }
     } catch (error) {
       return stackPrecheckUnavailable(error)

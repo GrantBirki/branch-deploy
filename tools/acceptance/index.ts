@@ -2761,27 +2761,402 @@ const scenarios = [
   },
   {
     name: 'PR stacks enabled preserve ordinary deployments',
-    run: () =>
-      withMockGitHub('PR stacks enabled on an ordinary PR', async context => {
-        const result = await runMain(context, {enable_pr_stacks: 'true'})
+    run: async () => {
+      for (const [mode, inputs] of [
+        ['omitted', {}],
+        ['false', {enable_pr_stacks: 'false'}],
+        ['true', {enable_pr_stacks: 'true'}]
+      ] as const) {
+        for (const membership of [undefined, null]) {
+          for (const unavailable of [false, true]) {
+            await withMockGitHub(
+              `ordinary PR stacks ${mode}, membership ${String(membership)}, unavailable ${String(unavailable)}`,
+              async context => {
+                context.state.pullRequest = {
+                  ...context.state.pullRequest,
+                  merged: false
+                }
+                context.state.pullRequestStackResponses.push(
+                  membership,
+                  membership,
+                  membership
+                )
+                const previewResponse = unavailable
+                  ? new Error('Pull request stack preview is unavailable')
+                  : {repository: null}
+                context.state.prStackResponses.push(previewResponse)
+                seedLock(
+                  context.state,
+                  'development',
+                  'other-branch',
+                  'other',
+                  9
+                )
+                const otherLock = requireMockLock(
+                  context,
+                  lockBranch('development')
+                )
+                const otherLockSha = context.state.branches.get(
+                  lockBranch('development')
+                )?.sha
 
-        assertExit(context, result, 0)
-        assertReason(context, result, 'deployment_ready')
-        assertOutput(context, result, 'sha', ACCEPTANCE_SHAS.feature)
-        assertOutput(context, result, 'ref', 'feature-branch')
-        const deploymentBody = routeBody(
-          context,
-          'POST',
-          apiPath('/deployments')
+                const result = await runMain(context, inputs)
+
+                assertExit(context, result, 0)
+                assertDecision(context, result, 'continue')
+                assertReason(context, result, 'deployment_ready')
+                assertOutput(context, result, 'continue', 'true')
+                assertOutput(context, result, 'noop', 'false')
+                assertOutput(context, result, 'sha', ACCEPTANCE_SHAS.feature)
+                assertOutput(context, result, 'ref', 'feature-branch')
+                assertOutput(context, result, 'base_ref', 'main')
+                assertOutput(context, result, 'commit_status', 'SUCCESS')
+                assertOutput(context, result, 'review_decision', 'APPROVED')
+                assert.equal(
+                  result.output['non_default_target_branch_used'],
+                  undefined
+                )
+                assertResultField(context, result, 'deployment_type', 'branch')
+                assertResultField(context, result, 'ref', 'feature-branch')
+                assertResultField(
+                  context,
+                  result,
+                  'sha',
+                  ACCEPTANCE_SHAS.feature
+                )
+                const deployment = requireDeployment(context)
+                assert.equal(deployment.ref, 'feature-branch')
+                assert.equal(deployment.sha, ACCEPTANCE_SHAS.feature)
+                const deploymentBody = routeBody(
+                  context,
+                  'POST',
+                  apiPath('/deployments')
+                )
+                assert.equal(deploymentBody['ref'], 'feature-branch')
+                assert.equal(deploymentBody['auto_merge'], true)
+                assert.equal(
+                  requireDeploymentStatus(context, deployment, 0).state,
+                  'in_progress'
+                )
+                assert.equal(
+                  context.state.branches.has(lockBranch('production')),
+                  true
+                )
+
+                const postResult = await runPost(context, result, inputs)
+
+                assertExit(context, postResult, 0)
+                assert.equal(
+                  requireDeploymentStatus(context, deployment, 1).state,
+                  'success'
+                )
+                assert.equal(
+                  context.state.branches.has(lockBranch('production')),
+                  false
+                )
+                assert.deepEqual(
+                  requireMockLock(context, lockBranch('development')),
+                  otherLock
+                )
+                assert.equal(
+                  context.state.branches.get(lockBranch('development'))?.sha,
+                  otherLockSha
+                )
+                assert.equal(context.state.pullRequestReads, 3)
+                assert.deepEqual(stackQueryRoutes(context), [])
+                assert.deepEqual(context.state.prStackResponses, [
+                  previewResponse
+                ])
+              }
+            )
+          }
+        }
+      }
+    }
+  },
+  {
+    name: 'ordinary PR policy remains independent of stack preview',
+    run: async () => {
+      for (const failure of [
+        'CI',
+        'review',
+        'draft',
+        'force update'
+      ] as const) {
+        await withMockGitHub(`ordinary PR ${failure}`, async context => {
+          context.state.pullRequest = {
+            ...context.state.pullRequest,
+            merged: false
+          }
+          const previewResponse = new Error('Stack preview is unavailable')
+          context.state.prStackResponses.push(previewResponse)
+          const inputs = {
+            enable_pr_stacks: 'true',
+            update_branch: failure === 'force update' ? 'force' : 'warn'
+          }
+          switch (failure) {
+            case 'CI':
+              context.state.rollupState = 'FAILURE'
+              context.state.rollupContexts = [
+                {
+                  conclusion: 'FAILURE',
+                  isRequired: true,
+                  name: 'acceptance',
+                  type: 'check-run'
+                }
+              ]
+              break
+            case 'review':
+              context.state.reviewDecision = 'REVIEW_REQUIRED'
+              break
+            case 'draft':
+              context.state.pullRequest = {
+                ...context.state.pullRequest,
+                draft: true
+              }
+              break
+            case 'force update':
+              context.state.mergeStateStatus = 'BEHIND'
+              break
+          }
+
+          const result = await runMain(context, inputs)
+
+          assertExit(context, result, 1)
+          assertReason(context, result, 'prechecks_failed')
+          assertNoDeployment(context, result)
+          assertNoLockRoutes(context)
+          switch (failure) {
+            case 'CI':
+              assertOutput(context, result, 'commit_status', 'FAILURE')
+              assertCommentIncludes(context, 'CI checks are failing')
+              break
+            case 'review':
+              assertOutput(
+                context,
+                result,
+                'review_decision',
+                'REVIEW_REQUIRED'
+              )
+              assertCommentIncludes(
+                context,
+                'approval is required before you can proceed'
+              )
+              break
+            case 'draft':
+              assertCommentIncludes(context, 'pull request is in a draft state')
+              break
+            case 'force update': {
+              const update = requireRoute(
+                context,
+                'PUT',
+                apiPath('/pulls/1/update-branch')
+              )
+              assert.equal(update.body, '')
+              assertCommentIncludes(context, 'updated your branch with `main`')
+              context.state.mergeStateStatus = 'CLEAN'
+              const retry = await runMain(context, inputs)
+              assertExit(context, retry, 0)
+              assertReason(context, retry, 'deployment_ready')
+              assertOutput(context, retry, 'is_outdated', 'false')
+              const post = await runPost(context, retry, inputs)
+              assertExit(context, post, 0)
+              assert.equal(
+                requireDeploymentStatus(context, requireDeployment(context), 1)
+                  .state,
+                'success'
+              )
+              assert.equal(
+                context.state.branches.has(lockBranch('production')),
+                false
+              )
+              break
+            }
+          }
+          assert.deepEqual(stackQueryRoutes(context), [])
+          assert.deepEqual(context.state.prStackResponses, [previewResponse])
+        })
+      }
+    }
+  },
+  {
+    name: 'ordinary PR membership changes require fresh checks when enabled',
+    run: async () => {
+      for (const phase of [
+        'after prechecks',
+        'after confirmation',
+        'after started comment'
+      ] as const) {
+        for (const enabled of [false, true]) {
+          await withMockGitHub(
+            `ordinary PR joins a stack ${phase}, enabled ${String(enabled)}`,
+            async context => {
+              context.state.pullRequest = {
+                ...context.state.pullRequest,
+                merged: false
+              }
+              const membership = {
+                id: 1,
+                number: 1,
+                size: 1,
+                position: 1,
+                base: {ref: 'main', sha: ACCEPTANCE_SHAS.default}
+              }
+              context.state.pullRequestStackResponses.push(
+                undefined,
+                phase === 'after started comment' ? null : membership,
+                membership
+              )
+              const previewResponse = new Error('Stack preview is unavailable')
+              context.state.prStackResponses.push(previewResponse)
+              context.state.confirmationReaction = '+1'
+              const inputs = {
+                enable_pr_stacks: String(enabled),
+                deployment_confirmation: String(phase === 'after confirmation'),
+                deployment_confirmation_timeout: '1'
+              }
+
+              const result = await runMain(context, inputs)
+
+              assertExit(context, result, enabled ? 1 : 0)
+              assertReason(
+                context,
+                result,
+                enabled ? 'ref_changed' : 'deployment_ready'
+              )
+              assertOutput(context, result, 'sha', ACCEPTANCE_SHAS.feature)
+              if (phase === 'after confirmation') {
+                assertCommentIncludes(
+                  context,
+                  'Deployment confirmed by __octocat__'
+                )
+              }
+              if (enabled) {
+                assertNoDeployment(context, result)
+                assertResultField(context, result, 'deployment_id', null)
+                assert.equal(result.state['bypass'], 'true')
+                assert.equal(
+                  context.state.branches.has(lockBranch('production')),
+                  false
+                )
+                assert.equal(
+                  context.state.pullRequestReads,
+                  phase === 'after started comment' ? 3 : 2
+                )
+              } else {
+                assert.equal(requireDeployment(context).ref, 'feature-branch')
+              }
+              const post = await runPost(
+                context,
+                result,
+                inputs,
+                enabled ? 'failure' : 'success'
+              )
+              assertExit(context, post, 0)
+              assert.equal(
+                context.state.branches.has(lockBranch('production')),
+                false
+              )
+              assert.deepEqual(stackQueryRoutes(context), [])
+              assert.deepEqual(context.state.prStackResponses, [
+                previewResponse
+              ])
+            }
+          )
+        }
+      }
+    }
+  },
+  {
+    name: 'native REST membership fails closed on main-target PRs',
+    run: async () => {
+      const membership = {
+        id: 1,
+        number: 1,
+        size: 3,
+        position: 1,
+        base: {ref: 'main', sha: ACCEPTANCE_SHAS.default}
+      }
+      for (const [description, response] of [
+        ['false', false],
+        ['zero', 0],
+        ['empty string', ''],
+        ['empty object', {}],
+        ['missing base', {number: 1, position: 1}],
+        ['invalid position', {...membership, position: 0}],
+        ['different number', {...membership, number: 2}],
+        ['different position', {...membership, position: 2}],
+        ['different base', {...membership, base: {ref: 'release'}}]
+      ] as const) {
+        await withMockGitHub(
+          `native REST membership ${description}`,
+          async context => {
+            seedPrStack(context.state, 1)
+            context.state.pullRequestStackResponses.push(response)
+
+            const result = await runMain(context, {enable_pr_stacks: 'true'})
+
+            assertExit(context, result, 1)
+            assertReason(context, result, 'prechecks_failed')
+            assertOutput(context, result, 'base_ref', 'main')
+            assertNoDeployment(context, result)
+            assertNoLockRoutes(context)
+            assertCommentIncludes(
+              context,
+              'could not verify this pull request stack'
+            )
+          }
         )
-        assert.equal(deploymentBody['ref'], 'feature-branch')
-        assert.equal(deploymentBody['auto_merge'], true)
-      })
+      }
+      for (const failure of [
+        'disappeared',
+        'malformed',
+        'unavailable'
+      ] as const) {
+        await withMockGitHub(
+          `native stack preview ${failure}`,
+          async context => {
+            seedPrStack(context.state, 1)
+            let previewResponse: unknown
+            if (failure === 'disappeared') {
+              const stack = context.state.prStack
+              context.state.prStack = null
+              previewResponse = mockPrStackResponse(
+                context.state,
+                'refs/heads/main',
+                null
+              )
+              context.state.prStack = stack
+            } else {
+              previewResponse =
+                failure === 'malformed'
+                  ? {repository: null}
+                  : new Error('Pull request stack preview is unavailable')
+            }
+            context.state.prStackResponses.push(previewResponse)
+
+            const result = await runMain(context, {enable_pr_stacks: 'true'})
+
+            assertExit(context, result, 1)
+            assertReason(context, result, 'prechecks_failed')
+            assertOutput(context, result, 'base_ref', 'main')
+            assertNoDeployment(context, result)
+            assertNoLockRoutes(context)
+            assertCommentIncludes(
+              context,
+              'could not verify this pull request stack'
+            )
+            assert.equal(stackQueryRoutes(context).length, 1)
+            assert.deepEqual(context.state.prStackResponses, [])
+          }
+        )
+      }
+    }
   },
   {
     name: 'native PR stacks deploy the selected cumulative SHA',
     run: async () => {
-      for (const selectedNumber of [2, 3]) {
+      for (const selectedNumber of [1, 2, 3]) {
         await withMockGitHub(
           `native stack layer ${String(selectedNumber)}`,
           async context => {
@@ -2819,7 +3194,7 @@ const scenarios = [
             const checkedNumbers = prechecksQueryNumbers(context)
             assert.deepEqual(
               [...new Set(checkedNumbers)].sort(),
-              selectedNumber === 2 ? [1, 2] : [1, 2, 3]
+              [1, 2, 3].slice(0, selectedNumber)
             )
             for (const route of stackQueryRoutes(context)) {
               assert.equal(route.authorizationPresent, true)
@@ -2835,13 +3210,15 @@ const scenarios = [
                 `/compare/${ACCEPTANCE_SHAS.default}...${ACCEPTANCE_SHAS.stackBottom}`
               )
             )
-            requireRoute(
-              context,
-              'GET',
-              apiPath(
-                `/compare/${ACCEPTANCE_SHAS.stackBottom}...${ACCEPTANCE_SHAS.stackMiddle}`
+            if (selectedNumber > 1) {
+              requireRoute(
+                context,
+                'GET',
+                apiPath(
+                  `/compare/${ACCEPTANCE_SHAS.stackBottom}...${ACCEPTANCE_SHAS.stackMiddle}`
+                )
               )
-            )
+            }
 
             const postResult = await runPost(context, result, inputs)
 
@@ -3457,39 +3834,71 @@ const scenarios = [
   },
   {
     name: 'native PR stacks handle a merged lower layer',
-    run: () =>
-      withMockGitHub('native stack merged lower layer', async context => {
-        seedPrStack(context.state, 2)
-        const bottom = requireStackMember(context.state, 1)
-        bottom.state = 'MERGED'
-        bottom.pullRequest = {...bottom.pullRequest, merged: true}
-        const bottomBranch = context.state.branches.get('stack-bottom')
-        assert.ok(bottomBranch !== undefined)
-        context.state.branches.set('main', {...bottomBranch, name: 'main'})
-        const middle = requireStackMember(context.state, 2)
-        middle.pullRequest = {...middle.pullRequest, baseRef: 'main'}
-        context.state.pullRequest = middle.pullRequest
+    run: async () => {
+      for (const [selectedNumber, ref, sha] of [
+        [2, 'stack-middle', ACCEPTANCE_SHAS.stackMiddle],
+        [3, 'stack-top', ACCEPTANCE_SHAS.stackTop]
+      ] as const) {
+        await withMockGitHub(
+          `native stack merged lower layers before PR ${String(selectedNumber)}`,
+          async context => {
+            seedPrStack(context.state, selectedNumber)
+            for (const number of [1, 2].slice(0, selectedNumber - 1)) {
+              const lower = requireStackMember(context.state, number)
+              lower.state = 'MERGED'
+              lower.pullRequest = {...lower.pullRequest, merged: true}
+            }
+            const previous = requireStackMember(
+              context.state,
+              selectedNumber - 1
+            )
+            const mergedBranch = context.state.branches.get(
+              previous.pullRequest.headRef
+            )
+            assert.ok(mergedBranch !== undefined)
+            context.state.branches.set('main', {...mergedBranch, name: 'main'})
+            const selected = requireStackMember(context.state, selectedNumber)
+            selected.pullRequest = {...selected.pullRequest, baseRef: 'main'}
+            context.state.pullRequest = selected.pullRequest
+            const inputs = {enable_pr_stacks: 'true'}
 
-        const result = await runMain(context, {enable_pr_stacks: 'true'})
+            const result = await runMain(context, inputs)
 
-        assertExit(context, result, 0)
-        assertReason(context, result, 'deployment_ready')
-        assertOutput(context, result, 'base_ref', 'main')
-        assertOutput(context, result, 'ref', 'stack-middle')
-        assertOutput(context, result, 'sha', ACCEPTANCE_SHAS.stackMiddle)
-        assert.deepEqual([...new Set(prechecksQueryNumbers(context))], [2])
-        const deploymentBody = routeBody(
-          context,
-          'POST',
-          apiPath('/deployments')
+            assertExit(context, result, 0)
+            assertReason(context, result, 'deployment_ready')
+            assertOutput(context, result, 'base_ref', 'main')
+            assertOutput(context, result, 'ref', ref)
+            assertOutput(context, result, 'sha', sha)
+            assert.deepEqual(
+              [...new Set(prechecksQueryNumbers(context))],
+              [selectedNumber]
+            )
+            const deploymentBody = routeBody(
+              context,
+              'POST',
+              apiPath('/deployments')
+            )
+            assert.equal(deploymentBody['ref'], sha)
+            assert.equal(deploymentBody['auto_merge'], false)
+            const deployment = requireDeployment(context)
+            assert.equal(deployment.sha, sha)
+            assert.ok(stackQueryRoutes(context).length >= 2)
+
+            const post = await runPost(context, result, inputs)
+
+            assertExit(context, post, 0)
+            assert.equal(
+              requireDeploymentStatus(context, deployment, 1).state,
+              'success'
+            )
+            assert.equal(
+              context.state.branches.has(lockBranch('production')),
+              false
+            )
+          }
         )
-        assert.equal(deploymentBody['ref'], ACCEPTANCE_SHAS.stackMiddle)
-        assert.equal(deploymentBody['auto_merge'], false)
-        assert.equal(
-          requireDeployment(context).sha,
-          ACCEPTANCE_SHAS.stackMiddle
-        )
-      })
+      }
+    }
   },
   {
     name: 'native PR stacks reject stale lower policy data',
@@ -3580,6 +3989,13 @@ const scenarios = [
               context.state.prStackResponses.push({repository: null})
               break
             case 'missing selected member':
+              context.state.pullRequestStackResponses.push({
+                id: 1,
+                number: 1,
+                size: 3,
+                position: 3,
+                base: {ref: 'main', sha: ACCEPTANCE_SHAS.default}
+              })
               stack.members = stack.members.filter(
                 member =>
                   member.pullRequest.number !== context.state.pullRequest.number
@@ -3607,6 +4023,16 @@ const scenarios = [
           assertReason(context, result, 'prechecks_failed')
           assertNoDeployment(context, result)
           assertNoLockRoutes(context)
+          if (failure === 'unregistered chain') {
+            assertCommentIncludes(
+              context,
+              'not the default branch of this repository'
+            )
+            assert.deepEqual(stackQueryRoutes(context), [])
+          }
+          if (failure === 'missing selected member') {
+            assert.equal(stackQueryRoutes(context).length, 1)
+          }
         })
       }
     }

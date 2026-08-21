@@ -28,6 +28,12 @@ export interface PrStackRequest {
   readonly stableBranch: string
 }
 
+export interface PrStackMembership {
+  readonly number: number
+  readonly position: number
+  readonly baseRef: string
+}
+
 export interface PrStackPull {
   readonly id: string
   readonly number: number
@@ -126,6 +132,18 @@ function integer(value: unknown): number {
     invalid('invalid number in response')
   }
   return value
+}
+
+export function parsePrStackMembership(
+  value: unknown
+): PrStackMembership | null {
+  if (value === null || value === undefined) return null
+  const membership = record(value)
+  return {
+    number: integer(membership['number']),
+    position: integer(membership['position']),
+    baseRef: string(record(membership['base'])['ref'])
+  }
 }
 
 function boolean(value: unknown): boolean {

@@ -173,6 +173,7 @@ export interface MockGitHubState extends MockPullRequestChecks {
   pullRequestMoveAfterReads: number
   pullRequestMoveSha: string | null
   pullRequestReads: number
+  pullRequestStackResponses: unknown[]
   refCreationBarrierTarget: number
   reactionFailureConsumed: boolean
   reactions: MockReaction[]

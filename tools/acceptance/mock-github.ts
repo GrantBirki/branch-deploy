@@ -232,6 +232,7 @@ export function createMockState(): MockGitHubState {
     pullRequestMoveAfterReads: 2,
     pullRequestMoveSha: null,
     pullRequestReads: 0,
+    pullRequestStackResponses: [],
     refCreationBarrierTarget: 0,
     reactionFailureConsumed: false,
     reactions: [],
@@ -357,10 +358,29 @@ function commitResponse(commit: MockCommit): unknown {
 
 function pullResponse(state: MockGitHubState): unknown {
   const pr = state.pullRequest
+  const stack = state.prStack
   return {
     number: pr.number,
     draft: pr.draft,
     merged: pr.merged,
+    stack:
+      state.pullRequestStackResponses.length > 0
+        ? state.pullRequestStackResponses.shift()
+        : stack === null
+          ? undefined
+          : {
+              id: 1,
+              number: 1,
+              size: stack.members.length,
+              position:
+                stack.members.findIndex(
+                  member => member.pullRequest.number === pr.number
+                ) + 1,
+              base: {
+                ref: stack.baseRef,
+                sha: branchSha(state, stack.baseRef)
+              }
+            },
     base: {
       ref: pr.baseRef
     },
@@ -649,6 +669,9 @@ function routeGraphql(
       state.prStackResponses.length === 0
         ? mockPrStackResponse(state, stableRef, cursor)
         : state.prStackResponses.shift()
+    if (result instanceof Error) {
+      return {status: 200, value: {errors: [{message: result.message}]}}
+    }
     return {status: 200, value: {data: result}}
   }
   if (normalizedQuery.includes('updateRefs(input: $input)')) {

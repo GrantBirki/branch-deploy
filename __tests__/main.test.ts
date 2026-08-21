@@ -250,6 +250,7 @@ let selectedSha = mock_sha
 let liveRefSha: string | null = null
 let lateLiveRefSha: string | null = null
 let pullRefReads = 0
+let stackOnRefRead: number | null = null
 let createdDeploymentSha: string | null = null
 let deploymentStatusError: Error | null = null
 let commentError: Error | null = null
@@ -438,6 +439,7 @@ beforeEach(() => {
   liveRefSha = null
   lateLiveRefSha = null
   pullRefReads = 0
+  stackOnRefRead = null
   createdDeploymentSha = null
   deploymentStatusError = null
   commentError = null
@@ -534,7 +536,10 @@ beforeEach(() => {
             pullRefReads > 1 && lateLiveRefSha !== null
               ? lateLiveRefSha
               : (liveRefSha ?? selectedSha)
-        }
+        },
+        ...(stackOnRefRead !== null && pullRefReads >= stackOnRefRead
+          ? {stack: {id: 7}}
+          : {})
       }
     } else if (options.url.endsWith('/branches/{branch}')) {
       data = {commit: {sha: liveRefSha ?? selectedSha}}
@@ -644,6 +649,49 @@ test('successfully runs the action', async () => {
     `🚀 ${COLORS.success}deployment started!${COLORS.reset}`
   )
 })
+
+for (const phase of [
+  'after confirmation',
+  'after the started comment'
+] as const) {
+  for (const enabled of [false, true]) {
+    test(`rechecks newly added stack membership ${phase} with stacks ${String(enabled)}`, async () => {
+      setEnv('INPUT_ENABLE_PR_STACKS', String(enabled))
+      stackOnRefRead = phase === 'after confirmation' ? 1 : 2
+
+      assert.strictEqual(await run(), enabled ? 'failure' : 'success')
+      assertOperationResult({
+        decision: enabled ? 'failure' : 'continue',
+        reason_code: enabled ? 'ref_changed' : 'deployment_ready',
+        operation: 'deploy',
+        deployment_type: 'branch',
+        environment: 'production',
+        ref: 'test-ref',
+        sha: mock_sha,
+        ...(enabled ? {} : {deployment_id: 123})
+      })
+      assert.strictEqual(pullRefReads, enabled ? stackOnRefRead : 2)
+      assertNotCalled(prStackSnapshotMatchesMock)
+      if (enabled) {
+        assertCalledTimes(unlockIfUnchangedMock, 1)
+        assertNotCalled(createDeploymentMock)
+        assertCalledWith(saveStateMock, 'bypass', 'true')
+        assertCalledWith(
+          setFailedMock,
+          'the selected deployment ref changed after prechecks'
+        )
+      } else {
+        assertNotCalled(unlockIfUnchangedMock)
+        const request = createDeploymentMock.mock.calls.at(-1)?.arguments[0]
+        assert.ok(request !== undefined)
+        assert.partialDeepStrictEqual(request, {
+          ref: 'test-ref',
+          auto_merge: true
+        })
+      }
+    })
+  }
+}
 
 test('deploys a checked stack SHA without changing the public branch outputs', async () => {
   setStackPrechecksResult()

@@ -50,6 +50,9 @@ const isAdminMock = createMock<AdminModule['isAdmin']>(() =>
 const isOutdatedMock = createMock<OutdatedModule['isOutdated']>(() =>
   Promise.resolve({outdated: false, branch: 'test-branch'})
 )
+const parsePrStackMembershipMock = createMock<
+  PrStacksModule['parsePrStackMembership']
+>(() => null)
 const resolvePrStackMock = createMock<PrStacksModule['resolvePrStack']>(() =>
   Promise.resolve(null)
 )
@@ -80,7 +83,10 @@ installModuleMock(
 installModuleMock(
   mock,
   new URL('../../src/functions/pr-stacks.ts', import.meta.url),
-  {resolvePrStack: resolvePrStackMock}
+  {
+    parsePrStackMembership: parsePrStackMembershipMock,
+    resolvePrStack: resolvePrStackMock
+  }
 )
 installModuleMock(
   mock,
@@ -179,6 +185,8 @@ beforeEach(testContext => {
   isOutdatedMock.mock.mockImplementation(() =>
     Promise.resolve({outdated: false, branch: 'test-branch'})
   )
+  parsePrStackMembershipMock.mock.resetCalls()
+  parsePrStackMembershipMock.mock.mockImplementation(() => null)
   resolvePrStackMock.mock.resetCalls()
   resolvePrStackMock.mock.mockImplementation(() => Promise.resolve(null))
   loadPrStackRequiredChecksMock.mock.resetCalls()
@@ -593,7 +601,12 @@ function mockNativeStack({
   isFork = false,
   restDraft = false,
   restHeadRef,
-  restBaseRef
+  restBaseRef,
+  restStack = {
+    number: snapshot.stackNumber,
+    position: snapshot.selectedPosition,
+    base: {ref: snapshot.stableBranch}
+  }
 }: {
   readonly snapshot?: PrStackSnapshot
   readonly policies?: ReadonlyMap<number, unknown>
@@ -601,12 +614,18 @@ function mockNativeStack({
   readonly restDraft?: boolean
   readonly restHeadRef?: string
   readonly restBaseRef?: string
+  readonly restStack?: unknown
 } = {}): void {
   const selected = snapshot.pullRequests.find(
     pull => pull.number === context.issue.number
   )
   assert.ok(selected !== undefined)
   data.inputs.enable_pr_stacks = true
+  parsePrStackMembershipMock.mock.mockImplementation(() => ({
+    number: snapshot.stackNumber,
+    position: snapshot.selectedPosition,
+    baseRef: snapshot.stableBranch
+  }))
   resolvePrStackMock.mock.mockImplementation(() => Promise.resolve(snapshot))
   getPullsOK.mock.mockImplementation(() =>
     Promise.resolve({
@@ -618,7 +637,8 @@ function mockNativeStack({
           repo: {fork: isFork, full_name: 'corp/test'}
         },
         base: {ref: restBaseRef ?? selected.baseRef},
-        draft: restDraft
+        draft: restDraft,
+        stack: restStack
       },
       status: 200
     })
@@ -657,6 +677,25 @@ function mockNativeStack({
   })
 }
 
+function mockOrdinaryPrMembership(stack: unknown, draft = false): void {
+  getPullsOK.mock.mockImplementation(() =>
+    Promise.resolve({
+      data: {
+        head: {
+          ref: 'test-ref',
+          sha: 'abc123',
+          label: 'corp:test-ref',
+          repo: {fork: false, full_name: 'corp/test'}
+        },
+        base: {ref: 'main'},
+        draft,
+        ...(stack === undefined ? {} : {stack})
+      },
+      status: 200
+    })
+  )
+}
+
 async function assertStackUnavailable(): Promise<void> {
   assert.deepStrictEqual(await prechecks(context, octokit, data), {
     message:
@@ -691,29 +730,122 @@ test('does not resolve PR stacks while the feature is disabled', async () => {
 
   assert.strictEqual(result.status, false)
   assert.match(result.message, /not the default branch/u)
+  assertCalledTimes(parsePrStackMembershipMock, 0)
   assertCalledTimes(resolvePrStackMock, 0)
   assertCalledTimes(loadPrStackRequiredChecksMock, 0)
   assertCalledTimes(graphQLOK, 0)
 })
 
-test('keeps standalone PR behavior when stack support is enabled', async () => {
-  data.inputs.enable_pr_stacks = true
+for (const membership of [undefined, null]) {
+  for (const noop of [false, true]) {
+    test(
+      'keeps standalone PR behavior without preview APIs for membership ' +
+        String(membership) +
+        ' and noop ' +
+        String(noop),
+      async () => {
+        data.inputs.enable_pr_stacks = true
+        data.environmentObj.noop = noop
+        mockOrdinaryPrMembership(membership)
+        resolvePrStackMock.mock.mockImplementation(() =>
+          Promise.reject(new Error('Stack preview unavailable'))
+        )
+        loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+          Promise.reject(new Error('Stack rules unavailable'))
+        )
 
-  assert.deepStrictEqual(await prechecks(context, octokit, data), {
-    message: '✅ PR is approved and all CI checks passed',
-    noopMode: false,
-    ref: 'test-ref',
-    status: true,
-    sha: 'abc123',
-    isFork: false
-  })
-  assertCalledWith(resolvePrStackMock, octokit, {
-    owner: 'corp',
-    repo: 'test',
-    pullNumber: 123,
-    expectedHeadSha: 'abc123',
-    stableBranch: 'main'
-  })
+        assert.deepStrictEqual(await prechecks(context, octokit, data), {
+          message: '✅ PR is approved and all CI checks passed',
+          noopMode: noop,
+          ref: 'test-ref',
+          status: true,
+          sha: 'abc123',
+          isFork: false
+        })
+        assertCalledTimes(resolvePrStackMock, 0)
+        assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+        assertCalledTimes(graphQLOK, 1)
+        assertCalledWith(parsePrStackMembershipMock, membership)
+      }
+    )
+  }
+}
+
+for (const membership of [undefined, null]) {
+  for (const [scenario, message] of [
+    ['failing CI', /CI checks are failing/u],
+    ['pending CI', /CI checks must be passing/u],
+    ['missing named CI', /MISSING/u],
+    ['missing review', /approval is required/u],
+    ['draft', /draft state/u],
+    ['outdated warning', /branch is behind the base branch/u],
+    ['forced update', /went ahead and updated your branch/u],
+    ['noop review exception', /all CI checks passed/u]
+  ] as const) {
+    test(
+      'preserves ordinary PR ' +
+        scenario +
+        ' with stack membership ' +
+        String(membership),
+      async () => {
+        data.inputs.enable_pr_stacks = true
+        mockOrdinaryPrMembership(membership, scenario === 'draft')
+        resolvePrStackMock.mock.mockImplementation(() =>
+          Promise.reject(new Error('Stack preview unavailable'))
+        )
+        if (scenario === 'failing CI' || scenario === 'pending CI') {
+          mockApprovedCi(
+            checkRollup(scenario === 'failing CI' ? 'FAILURE' : 'PENDING')
+          )
+        } else if (scenario === 'missing named CI') {
+          data.inputs.checks = ['missing-check']
+        } else if (
+          scenario === 'missing review' ||
+          scenario === 'noop review exception'
+        ) {
+          data.environmentObj.noop = scenario === 'noop review exception'
+          graphQLOK.mock.mockImplementation(() =>
+            Promise.resolve(
+              stackPolicy({
+                headSha: 'abc123',
+                reviewDecision: 'REVIEW_REQUIRED'
+              })
+            )
+          )
+        } else if (
+          scenario === 'outdated warning' ||
+          scenario === 'forced update'
+        ) {
+          data.inputs.update_branch =
+            scenario === 'forced update' ? 'force' : 'warn'
+          isOutdatedMock.mock.mockImplementation(() =>
+            Promise.resolve({outdated: true, branch: 'main'})
+          )
+        }
+
+        const result = await prechecks(context, octokit, data)
+
+        assert.strictEqual(result.status, scenario === 'noop review exception')
+        assert.match(result.message, message)
+        assertCalledTimes(resolvePrStackMock, 0)
+        assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+        assertCalledTimes(
+          updateBranchMock,
+          scenario === 'forced update' ? 1 : 0
+        )
+        assertCalledTimes(graphQLOK, 1)
+        assertCalledWith(parsePrStackMembershipMock, membership)
+      }
+    )
+  }
+}
+
+test('ignores malformed stack metadata when stack support is disabled', async () => {
+  mockOrdinaryPrMembership(false)
+
+  assert.strictEqual((await prechecks(context, octokit, data)).status, true)
+  assertCalledTimes(parsePrStackMembershipMock, 0)
+  assertCalledTimes(resolvePrStackMock, 0)
   assertCalledTimes(loadPrStackRequiredChecksMock, 0)
 })
 
@@ -722,15 +854,18 @@ for (const allowed of [false, true]) {
     'keeps the separate non-default override for an unregistered PR: ' +
       String(allowed),
     async () => {
-      mockNativeStack()
-      resolvePrStackMock.mock.mockImplementation(() => Promise.resolve(null))
+      mockNativeStack({restStack: null})
+      parsePrStackMembershipMock.mock.mockImplementation(() => null)
+      resolvePrStackMock.mock.mockImplementation(() =>
+        Promise.reject(new Error('Stack preview unavailable'))
+      )
       data.inputs.allow_non_default_target_branch_deployments = allowed
 
       const result = await prechecks(context, octokit, data)
 
       assert.strictEqual(result.status, allowed)
       assert.strictEqual('stack' in result, false)
-      assertCalledTimes(resolvePrStackMock, 1)
+      assertCalledTimes(resolvePrStackMock, 0)
       assertCalledTimes(loadPrStackRequiredChecksMock, 0)
       assertCalledTimes(graphQLOK, allowed ? 1 : 0)
       if (allowed) {
@@ -783,6 +918,116 @@ test('checks only the selected native stack prefix', async () => {
   )
   assertCalledTimes(updateBranchMock, 0)
 })
+
+for (const [description, position] of [
+  ['bottom', 1],
+  ['last remaining', 3]
+] as const) {
+  for (const state of ['SUCCESS', 'FAILURE']) {
+    test(
+      'validates the ' +
+        description +
+        ' stack member targeting main with ' +
+        state,
+      async () => {
+        const snapshot: PrStackSnapshot = {
+          ...NATIVE_STACK,
+          selectedPosition: position,
+          pullRequests: [
+            {
+              ...NATIVE_STACK.pullRequests[2],
+              position,
+              baseRef: 'main',
+              baseSha: STACK_STABLE_SHA
+            }
+          ]
+        }
+        mockNativeStack({
+          snapshot,
+          policies: new Map([
+            [
+              123,
+              stackPolicy({
+                headSha: STACK_SELECTED_SHA,
+                rollup: checkRollup(state)
+              })
+            ]
+          ])
+        })
+
+        const result = await prechecks(context, octokit, data)
+
+        assert.strictEqual(result.status, state === 'SUCCESS')
+        if (result.status) assert.deepStrictEqual(result.stack, snapshot)
+        else assert.match(result.message, /CI checks are failing/u)
+        assertCalledTimes(resolvePrStackMock, 1)
+        assertCalledTimes(loadPrStackRequiredChecksMock, 1)
+        assertCalledTimes(graphQLOK, 1)
+      }
+    )
+  }
+}
+
+for (const [description, restStack] of [
+  ['false', false],
+  ['zero', 0],
+  ['empty string', ''],
+  ['array', []],
+  ['empty object', {}],
+  ['incomplete object', {number: 7, position: 3, base: {}}]
+] as const) {
+  test(
+    'fails closed for malformed REST stack metadata: ' + description,
+    async () => {
+      mockNativeStack({restStack})
+      parsePrStackMembershipMock.mock.mockImplementation(() => {
+        throw new Error('Cannot verify pull request stack: invalid membership')
+      })
+
+      await assertStackUnavailable()
+      assertCalledWith(parsePrStackMembershipMock, restStack)
+      assertCalledTimes(resolvePrStackMock, 0)
+      assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+      assertCalledTimes(graphQLOK, 0)
+    }
+  )
+}
+
+test('rejects a declared REST stack that disappears during discovery', async () => {
+  mockNativeStack()
+  data.inputs.allow_non_default_target_branch_deployments = true
+  resolvePrStackMock.mock.mockImplementation(() => Promise.resolve(null))
+
+  await assertStackUnavailable()
+  assertCalledTimes(resolvePrStackMock, 1)
+  assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+  assertCalledTimes(graphQLOK, 0)
+})
+
+for (const [description, membership] of [
+  ['number', {number: 8, position: 3, baseRef: 'main'}],
+  ['position', {number: 7, position: 2, baseRef: 'main'}],
+  ['base ref', {number: 7, position: 3, baseRef: 'release'}]
+] as const) {
+  test(
+    'rejects REST and GraphQL stack membership mismatch: ' + description,
+    async () => {
+      const restStack = {
+        number: membership.number,
+        position: membership.position,
+        base: {ref: membership.baseRef}
+      }
+      mockNativeStack({restStack})
+      parsePrStackMembershipMock.mock.mockImplementation(() => membership)
+
+      await assertStackUnavailable()
+      assertCalledWith(parsePrStackMembershipMock, restStack)
+      assertCalledTimes(resolvePrStackMock, 1)
+      assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+      assertCalledTimes(graphQLOK, 0)
+    }
+  )
+}
 
 for (const reason of [
   'stack metadata is unavailable',
@@ -1682,6 +1927,7 @@ test('does not bypass a stale lower stack PR when branch updates are disabled', 
 test('keeps stable-branch rollbacks outside stack resolution', async () => {
   data.inputs.enable_pr_stacks = true
   data.environmentObj.stable_branch_used = true
+  mockOrdinaryPrMembership(false)
   resolvePrStackMock.mock.mockImplementation(() =>
     Promise.reject(new Error('Stack endpoint unavailable'))
   )
@@ -1699,6 +1945,7 @@ test('keeps stable-branch rollbacks outside stack resolution', async () => {
     sha: 'deadbeef',
     isFork: false
   })
+  assertCalledTimes(parsePrStackMembershipMock, 0)
   assertCalledTimes(resolvePrStackMock, 0)
   assertCalledTimes(loadPrStackRequiredChecksMock, 0)
 })
@@ -1711,6 +1958,7 @@ for (const allowed of [false, true]) {
       data.inputs.enable_pr_stacks = true
       data.inputs.allow_sha_deployments = allowed
       data.environmentObj.sha = STACK_SELECTED_SHA
+      mockOrdinaryPrMembership(false)
       resolvePrStackMock.mock.mockImplementation(() =>
         Promise.reject(new Error('Stack endpoint unavailable'))
       )
@@ -1728,21 +1976,32 @@ for (const allowed of [false, true]) {
       } else {
         assert.match(result.message, /sha deployments have not been enabled/u)
       }
+      assertCalledTimes(parsePrStackMembershipMock, 0)
       assertCalledTimes(resolvePrStackMock, 0)
       assertCalledTimes(loadPrStackRequiredChecksMock, 0)
     }
   )
 }
 
-test('preserves ordinary PR policy-query errors when stack support is enabled', async () => {
-  data.inputs.enable_pr_stacks = true
-  const failure = new Error('Ordinary policy query unavailable')
-  graphQLOK.mock.mockImplementation(() => Promise.reject(failure))
+for (const membership of [undefined, null]) {
+  test(
+    'preserves ordinary PR policy-query errors with stack membership ' +
+      String(membership),
+    async () => {
+      data.inputs.enable_pr_stacks = true
+      mockOrdinaryPrMembership(membership)
+      const failure = new Error('Ordinary policy query unavailable')
+      graphQLOK.mock.mockImplementation(() => Promise.reject(failure))
+      resolvePrStackMock.mock.mockImplementation(() =>
+        Promise.reject(new Error('Stack preview unavailable'))
+      )
 
-  await assert.rejects(prechecks(context, octokit, data), failure)
-  assertCalledTimes(resolvePrStackMock, 1)
-  assertCalledTimes(loadPrStackRequiredChecksMock, 0)
-})
+      await assert.rejects(prechecks(context, octokit, data), failure)
+      assertCalledTimes(resolvePrStackMock, 0)
+      assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+    }
+  )
+}
 
 test('treats an unfinished check run without a conclusion as unhealthy', () => {
   assert.deepStrictEqual(

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import {beforeEach, test} from 'node:test'
 import {API_HEADERS} from '../../src/functions/api-headers.ts'
 import {
+  parsePrStackMembership,
   prStackSnapshotMatches,
   resolvePrStack,
   type PrStackPull,
@@ -217,6 +218,51 @@ beforeEach(() => {
   })
 })
 
+for (const value of [undefined, null]) {
+  test('accepts absent REST stack membership: ' + String(value), () => {
+    assert.strictEqual(parsePrStackMembership(value), null)
+  })
+}
+
+test('reads only the REST stack membership fields needed for validation', () => {
+  assert.deepStrictEqual(
+    parsePrStackMembership({number: 7, position: 1, base: {ref: 'main'}}),
+    {number: 7, position: 1, baseRef: 'main'}
+  )
+  assert.deepStrictEqual(
+    parsePrStackMembership({
+      id: 123456,
+      number: 7,
+      position: 3,
+      size: 4,
+      base: {ref: 'main', sha: null}
+    }),
+    {number: 7, position: 3, baseRef: 'main'}
+  )
+})
+
+for (const [description, value] of [
+  ['false', false],
+  ['zero', 0],
+  ['empty string', ''],
+  ['array', []],
+  ['missing number', {}],
+  ['invalid number', {number: '7', position: 1, base: {ref: 'main'}}],
+  ['missing position', {number: 7, base: {ref: 'main'}}],
+  ['invalid position', {number: 7, position: 0, base: {ref: 'main'}}],
+  ['missing base', {number: 7, position: 1}],
+  ['null base', {number: 7, position: 1, base: null}],
+  ['missing base ref', {number: 7, position: 1, base: {}}],
+  ['empty base ref', {number: 7, position: 1, base: {ref: ''}}]
+] as const) {
+  test('rejects malformed REST stack membership: ' + description, () => {
+    assert.throws(
+      () => parsePrStackMembership(value),
+      /Cannot verify pull request stack:/u
+    )
+  })
+}
+
 test('resolves the ordered native stack prefix at exact commit SHAs', async () => {
   assert.deepStrictEqual(
     await resolvePrStack(octokit, request),
@@ -278,6 +324,19 @@ test('ignores unrelated later layers when deploying a middle layer', async () =>
   assertCalledTimes(compareMock, 2)
 })
 
+test('resolves a bottom stack member targeting the stable branch', async () => {
+  const entries = members()
+  graphqlMock.mock.mockImplementation(() =>
+    Promise.resolve(response(entries, 1))
+  )
+
+  assert.deepStrictEqual(
+    await resolvePrStack(octokit, requestFor(1)),
+    expectedSnapshot(entries, 1)
+  )
+  assertCalledTimes(compareMock, 1)
+})
+
 test('preserves draft state for the caller to evaluate', async () => {
   const entries = members()
   entryAt(entries, 0).pullRequest.isDraft = true
@@ -306,6 +365,25 @@ test('skips merged lower layers and validates the current trunk', async () => {
     compareMock.mock.calls.map(call => call.arguments[0]?.base),
     [commitSha(20), commitSha(2)]
   )
+})
+
+test('resolves the last remaining member after lower stack PRs merge', async () => {
+  const entries = members()
+  entryAt(entries, 0).pullRequest.state = 'MERGED'
+  entryAt(entries, 1).pullRequest.state = 'MERGED'
+  const selected = entryAt(entries, 2).pullRequest
+  selected.baseRefName = 'main'
+  selected.baseRefOid = commitSha(20)
+  graphqlMock.mock.mockImplementation(() =>
+    Promise.resolve(response(entries, 3, {stableSha: commitSha(20)}))
+  )
+
+  assert.deepStrictEqual(await resolvePrStack(octokit, request), {
+    ...expectedSnapshot(entries),
+    stableSha: commitSha(20),
+    pullRequests: entries.slice(2).map(snapshotPull)
+  })
+  assertCalledTimes(compareMock, 1)
 })
 
 test('accepts an identical parent commit without weakening ancestry checks', async () => {

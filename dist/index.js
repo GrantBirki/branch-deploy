@@ -39362,6 +39362,16 @@ function integer(value) {
     }
     return value;
 }
+function parsePrStackMembership(value) {
+    if (value === null || value === undefined)
+        return null;
+    const membership = record(value);
+    return {
+        number: integer(membership['number']),
+        position: integer(membership['position']),
+        baseRef: string(record(membership['base'])['ref'])
+    };
+}
 function pr_stacks_boolean(value) {
     if (typeof value !== 'boolean')
         invalid('invalid boolean in response');
@@ -39788,17 +39798,24 @@ async function prechecks(context, octokit, data) {
         isNotStableBranchDeploy &&
         data.environmentObj.sha === null) {
         try {
-            stack = await resolvePrStack(octokit, {
-                ...context.repo,
-                pullNumber: context.issue.number,
-                expectedHeadSha: sha,
-                stableBranch: data.inputs.stable_branch
-            });
-            if (stack !== null &&
-                (stack.stableSha !== stableBaseBranch.data.commit.sha ||
+            // Ordinary PRs must not depend on the preview stack APIs.
+            const membership = parsePrStackMembership(prData.stack);
+            if (membership !== null) {
+                stack = await resolvePrStack(octokit, {
+                    ...context.repo,
+                    pullNumber: context.issue.number,
+                    expectedHeadSha: sha,
+                    stableBranch: data.inputs.stable_branch
+                });
+                if (stack === null ||
+                    stack.stackNumber !== membership.number ||
+                    stack.selectedPosition !== membership.position ||
+                    stack.stableBranch !== membership.baseRef ||
+                    stack.stableSha !== stableBaseBranch.data.commit.sha ||
                     stack.pullRequests.at(-1)?.headRef !== ref ||
-                    stack.pullRequests.at(-1)?.baseRef !== baseRef)) {
-                throw new Error('The stack changed during prechecks');
+                    stack.pullRequests.at(-1)?.baseRef !== baseRef) {
+                    throw new Error('The stack changed during prechecks');
+                }
             }
         }
         catch (error) {
@@ -40678,6 +40695,11 @@ async function selectedRefMatches(octokit, context, request) {
         pull_number: context.issue.number,
         headers: API_HEADERS
     });
+    if (request.expectNoStack === true &&
+        pull.data.stack !== null &&
+        pull.data.stack !== undefined) {
+        return false;
+    }
     return pull.data.head.sha === request.expectedSha;
 }
 
@@ -41059,6 +41081,7 @@ async function changedRefOutcome(request, ready, lease, deploymentType) {
     if (ready.precheck.stack === undefined) {
         unchanged = await selectedRefMatches(octokit, context, {
             exactSha: ready.environmentResult.environmentObj.sha !== null,
+            ...(inputs.enable_pr_stacks ? { expectNoStack: true } : {}),
             expectedSha: ready.precheck.sha,
             isFork: ready.precheck.isFork,
             stableBranch: inputs.stable_branch,

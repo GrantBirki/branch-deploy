@@ -10,7 +10,10 @@ export interface SelectedRefOctokit {
   readonly rest: {
     readonly pulls: {
       readonly get: (parameters?: GetPullParameters) => Promise<{
-        readonly data: {readonly head: {readonly sha: string}}
+        readonly data: {
+          readonly head: {readonly sha: string}
+          readonly stack?: unknown
+        }
       }>
     }
     readonly repos: {
@@ -23,6 +26,7 @@ export interface SelectedRefOctokit {
 
 export interface SelectedRefRequest {
   readonly exactSha: boolean
+  readonly expectNoStack?: boolean
   readonly expectedSha: string
   readonly isFork: boolean
   readonly stableBranch: string
@@ -52,5 +56,12 @@ export async function selectedRefMatches(
     pull_number: context.issue.number,
     headers: API_HEADERS
   })
+  if (
+    request.expectNoStack === true &&
+    pull.data.stack !== null &&
+    pull.data.stack !== undefined
+  ) {
+    return false
+  }
   return pull.data.head.sha === request.expectedSha
 }
