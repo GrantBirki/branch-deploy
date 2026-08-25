@@ -146,7 +146,7 @@ inputs:
     required: false
     default: ""
   job_results:
-    description: 'A non-empty JSON array of the selected jobs results, such as ["success","failure"]. Required only in result mode. Every selected job must succeed; cancellation, failure, and unexpected skips are not success.'
+    description: 'A non-empty JSON array of the selected job results, such as ["success","failure"]. Required only in result mode. Every selected job must succeed; cancellation, failure, and unexpected skips are not success.'
     required: false
     default: ""
   result_inherit_settings:

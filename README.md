@@ -334,6 +334,7 @@ As seen above, we have two steps. One for a noop deploy, and one for a regular d
 | `reason_code` | The preferred stable machine-readable reason code for the main action decision. |
 | `result` | The preferred deterministic JSON string describing the versioned main action result. Parse it with `fromJSON(...)` in workflow expressions. |
 | `context` | JSON completion context for a later result-mode job in the same workflow run and attempt. Forward it unchanged from the trusted start job; its `run_attempt` also guards downstream jobs against stale partial reruns. See [result mode](docs/result-mode.md). |
+| `deployment_result` | The selected job outcome in result mode: `success`, `failure`, `cancelled`, or `skipped`. Reporting or cleanup can fail independently of this outcome. See [result mode](docs/result-mode.md). |
 | `continue` | Compatibility alias. The string "true" if the deployment should continue, otherwise empty - Use this to conditionally control if your deployment should proceed or not |
 | `fork` | The string "true" if the pull request is a fork, otherwise "false" |
 | `triggered` | The string "true" if the trigger was found, otherwise the string "false" |
