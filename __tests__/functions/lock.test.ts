@@ -919,7 +919,7 @@ test('treats a rerun of the same claim as idempotently acquired', async () => {
   })
 })
 
-test('uses normal owner handling when the same owner makes a different claim', async () => {
+test('rejects a different non-sticky claim from the same owner', async () => {
   const lockData = {
     branch: 'cool-new-feature',
     claim_id: `sha256:${'a'.repeat(64)}`,
@@ -945,18 +945,63 @@ test('uses normal owner handling when the same owner makes a different claim', a
 
   assert.deepStrictEqual(await lock(lockRequest({octokit})), {
     lockData,
-    status: 'owner',
+    status: false,
     globalFlag,
     environment,
-    global: false,
-    lockRefSha: 'lock-sha'
+    global: false
   })
-  assertCalledWith(
-    infoMock,
-    `✅ ${COLORS.highlight}monalisa${COLORS.reset} initiated this request and is also the owner of the current lock`
+  assertSetFailedMatches(/currently claimed by __monalisa__/u)
+  assert.ok(
+    !saveStateMock.mock.calls.some(call => call.arguments[0] === 'lock_ref_sha')
   )
-  assertCalledWith(saveStateMock, 'lock_ref_sha', 'lock-sha')
 })
+
+for (const [name, storedSticky, requestedSticky] of [
+  ['the existing lock is sticky', true, false],
+  ['the requested lock is sticky', false, true]
+] as const) {
+  test(`allows a different claim from the same owner when ${name}`, async () => {
+    const lockData = {
+      branch: 'cool-new-feature',
+      claim_id: `sha256:${'a'.repeat(64)}`,
+      created_at: '2026-06-30T12:34:56.789Z',
+      created_by: 'monalisa',
+      environment: 'production',
+      global: false,
+      link: 'https://github.example/corp/test/pull/1#issuecomment-122',
+      reason: 'deployment',
+      sticky: storedSticky,
+      unlock_command: '.unlock production'
+    } satisfies LockData
+    const octokit = createLockOctokit({
+      repos: {
+        getBranch: mockGetBranch({data: {commit: {sha: 'lock-sha'}}}),
+        getContent: mockGetContent(new NotFoundError('file not found'), {
+          data: {
+            content: Buffer.from(JSON.stringify(lockData)).toString('base64')
+          }
+        })
+      }
+    })
+
+    assert.deepStrictEqual(
+      await lock(lockRequest({octokit, sticky: requestedSticky})),
+      {
+        lockData,
+        status: 'owner',
+        globalFlag,
+        environment,
+        global: false,
+        ...(requestedSticky ? {} : {lockRefSha: 'lock-sha'})
+      }
+    )
+    assertNotCalled(setFailedMock)
+    assertCalledWith(
+      infoMock,
+      `✅ ${COLORS.highlight}monalisa${COLORS.reset} initiated this request and is also the owner of the current lock`
+    )
+  })
+}
 
 for (const failurePoint of ['blob', 'tree', 'commit'] as const) {
   test(`does not publish a ref when ${failurePoint} creation fails`, async () => {
