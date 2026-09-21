@@ -1,6 +1,6 @@
 # Branch Deploy Action 🚀
 
-[![test](https://github.com/github/branch-deploy/actions/workflows/test.yml/badge.svg)](https://github.com/github/branch-deploy/actions/workflows/test.yml) [![acceptance](https://github.com/github/branch-deploy/actions/workflows/acceptance.yml/badge.svg)](https://github.com/github/branch-deploy/actions/workflows/acceptance.yml) [![package-check](https://github.com/github/branch-deploy/actions/workflows/package-check.yml/badge.svg)](https://github.com/github/branch-deploy/actions/workflows/package-check.yml) [![lint](https://github.com/github/branch-deploy/actions/workflows/lint.yml/badge.svg)](https://github.com/github/branch-deploy/actions/workflows/lint.yml) [![actions-config-validation](https://github.com/github/branch-deploy/actions/workflows/actions-config-validation.yml/badge.svg)](https://github.com/github/branch-deploy/actions/workflows/actions-config-validation.yml) [![coverage](./badges/coverage.svg)](./badges/coverage.svg)
+[![test](https://github.com/GrantBirki/branch-deploy/actions/workflows/test.yml/badge.svg)](https://github.com/GrantBirki/branch-deploy/actions/workflows/test.yml) [![acceptance](https://github.com/GrantBirki/branch-deploy/actions/workflows/acceptance.yml/badge.svg)](https://github.com/GrantBirki/branch-deploy/actions/workflows/acceptance.yml) [![package-check](https://github.com/GrantBirki/branch-deploy/actions/workflows/package-check.yml/badge.svg)](https://github.com/GrantBirki/branch-deploy/actions/workflows/package-check.yml) [![lint](https://github.com/GrantBirki/branch-deploy/actions/workflows/lint.yml/badge.svg)](https://github.com/GrantBirki/branch-deploy/actions/workflows/lint.yml) [![actions-config-validation](https://github.com/GrantBirki/branch-deploy/actions/workflows/actions-config-validation.yml/badge.svg)](https://github.com/GrantBirki/branch-deploy/actions/workflows/actions-config-validation.yml) [![coverage](./badges/coverage.svg)](./badges/coverage.svg)
 
 A GitHub Action to enable branch deployments using IssueOps!
 
@@ -62,7 +62,7 @@ Basic usage assuming all defaults:
 ```yaml
 - name: branch-deploy
   id: branch-deploy
-  uses: github/branch-deploy@vX.X.X
+  uses: GrantBirki/branch-deploy@vX.X.X
 ```
 
 Advanced usage with custom configuration:
@@ -70,7 +70,7 @@ Advanced usage with custom configuration:
 ```yaml
 - name: branch-deploy
   id: branch-deploy
-  uses: github/branch-deploy@vX.X.X
+  uses: GrantBirki/branch-deploy@vX.X.X
   with:
     trigger: ".deploy"
     noop_trigger: ".noop"
@@ -106,7 +106,7 @@ jobs:
     steps:
       # Execute IssueOps branch deployment logic, hooray!
       # This will be used to "gate" all future steps below and conditionally trigger steps/deployments
-      - uses: github/branch-deploy@vX.X.X
+      - uses: GrantBirki/branch-deploy@vX.X.X
         id: branch-deploy
         with:
           trigger: ".deploy"
@@ -227,7 +227,7 @@ Sets up your `demo` job, uses an ubuntu runner, and checks out your repo - Just 
 
 ```yaml
       # Execute IssueOps branch deployment logic, hooray!
-      - uses: github/branch-deploy@vX.X.X
+      - uses: GrantBirki/branch-deploy@vX.X.X
         id: branch-deploy
         with:
           trigger: ".deploy"
@@ -266,6 +266,8 @@ As seen above, we have two steps. One for a noop deploy, and one for a regular d
 > Example: You comment `.noop` on a pull request. A noop deployment is detected so this action outputs the `noop` variable to `true`. You also have the correct permissions to execute the IssueOps command so the action also outputs the `continue` variable to `true`. This will allow the "fake noop deploy" step seen above to run and the "fake regular deploy" step will be skipped
 
 ## Inputs 📥
+
+> **Unreleased:** `enable_pr_stacks` and `result_mode`, including its context and result inputs and outputs, are available on `main` but are not included in `v12.0.0` or `v12`. To try them before release, pin a reviewed full commit SHA from this repository. See [PR stacks](docs/pr-stacks.md) and [result mode](docs/result-mode.md).
 
 | Input | Required? | Default | Description |
 | ----- | --------- | ------- | ----------- |
@@ -415,7 +417,7 @@ jobs:
     environment: production-secrets # custom environment for storing secrets
     runs-on: ubuntu-latest
     steps:
-      - uses: github/branch-deploy@vX.X.X
+      - uses: GrantBirki/branch-deploy@vX.X.X
         id: branch-deploy
         with:
           trigger: ".deploy"
@@ -438,7 +440,7 @@ This can be achieved with the `environment_targets` input
 
 With this option, you can specify a comma separated list of environments that you can deploy to besides just the default with `.deploy`
 
-The defaults that are used are: [`production,development,staging`](https://github.com/github/branch-deploy/blob/e3cbb8f0137bfd7933492f12616c0cf91c7cf051/action.yml#L23). However, you can configure this to be whatever you like!
+The defaults that are used are: [`production,development,staging`](action.yml). However, you can configure this to be whatever you like!
 
 To use a deployment with a specific environment, you would invoke your commands like so:
 
@@ -455,7 +457,7 @@ This also works with noop commands as well
 YAML input example:
 
 ```yaml
-- uses: github/branch-deploy@vX.X.X
+- uses: GrantBirki/branch-deploy@vX.X.X
   id: branch-deploy
   with:
     trigger: ".deploy"
@@ -469,7 +471,7 @@ You can view additional details about the `environment_targets` input option in 
 
 Environment URLs can be configured and mapped to matching `environment_targets` using the `environment_urls` input.
 
-This input option is a mapping of environment names to URLs and the environment names **must** match the [`environment_targets`](https://github.com/github/branch-deploy#environment-targets) input option. This option is a comma separated list with pipes (`|`) separating the environment from the URL.
+This input option is a mapping of environment names to URLs and the environment names **must** match the [`environment_targets`](#environment-targets) input option. This option is a comma separated list with pipes (`|`) separating the environment from the URL.
 
 Note: `disabled` is a special keyword to disable an environment url if you enable this option but not all environments have a url.
 
@@ -550,7 +552,7 @@ It should be noted that if you do not have pull request approvals enabled in you
 Here is a simple example using only handles below (the monalisa and octocat users will be treated as admins):
 
 ```yaml
-- uses: github/branch-deploy@vX.X.X
+- uses: GrantBirki/branch-deploy@vX.X.X
   id: branch-deploy
   with:
     admins: monalisa,octocat
@@ -559,7 +561,7 @@ Here is a simple example using only handles below (the monalisa and octocat user
 Here is an example using a mix of GitHub handles and a GitHub org team below:
 
 ```yaml
-- uses: github/branch-deploy@vX.X.X
+- uses: GrantBirki/branch-deploy@vX.X.X
   id: branch-deploy
   with:
     admins: monalisa,octocat,octo-awesome-org/octo-awesome-team
@@ -574,13 +576,11 @@ It should be noted if you choose to use GitHub org teams for admin definitions, 
 
 ## Actions Stability 🔧
 
-In order to ensure your usage of this action is stable, it is highly recommended that you use either pin your action to a SHA or use a specific release tag
+Pin this Action to a full commit SHA or an exact release tag for stable usage.
 
 ### Actions Tag Pinning
 
-You can easily select the exact version you want on the GitHub Actions marketplace seen in the screenshot below:
-
-![Screenshot from 2022-05-09 12-12-06](https://user-images.githubusercontent.com/23362539/167471509-71ca2cf9-7b8f-4709-acee-67a679869fa6.png)
+Choose a version from [this repository's releases](https://github.com/GrantBirki/branch-deploy/releases) and use its exact tag, such as `GrantBirki/branch-deploy@v12.0.0`. The `v12` major tag moves to newer verified releases in that major version; it does not pin an exact version.
 
 ### Actions SHA Pinning
 
@@ -599,6 +599,8 @@ For full details about how this Action handles deployment locks and concurrency,
 Checkout the [merge commit workflow strategy](docs/merge-commit-strategy.md) for more information on how to use this Action with a merge commit workflow strategy.
 
 ## Manual Deployment Control
+
+> **Unreleased:** Result mode is available on `main` but is not included in `v12.0.0` or `v12`. Pin both invocations to the same reviewed full commit SHA from this repository to try it before release.
 
 For deployments that span jobs, set `skip_completing: true` on the initial invocation and use [result mode](docs/result-mode.md) in a final job. It handles deployment and noop completion using the original context. See the [multiple-jobs example](docs/examples.md#multiple-jobs).
 
@@ -640,7 +642,7 @@ jobs:
       startsWith(github.event.comment.body, '.unlock')) }}
     runs-on: ubuntu-latest
     steps:
-      - uses: github/branch-deploy@vX.X.X # replace with the latest version
+      - uses: GrantBirki/branch-deploy@vX.X.X # replace with the latest version
         id: branch-deploy
         with:
           trigger: ".deploy"

@@ -65,7 +65,7 @@ To view what environments are available in your workflow, you can run the `.help
 
 `.deploy` will always use the default environment target unless you specify one. If you are ever unsure what environment to use, please contact your team member who setup the workflow.
 
-> Note: You can learn more about environment targets [here](https://github.com/github/branch-deploy#environment-targets)
+> Note: You can learn more about environment targets [here](../README.md#environment-targets)
 
 ## Deployment Permissions 🔑
 

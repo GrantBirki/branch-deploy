@@ -44,7 +44,7 @@ Then you can properly evaluate the risk of enabling this deployment option.
 In order to use this feature, you must set the following input option:
 
 ```yaml
-- uses: github/branch-deploy@vX.X.X
+- uses: GrantBirki/branch-deploy@vX.X.X
   id: branch-deploy
   with:
     allow_sha_deployments: true # <--- this option must be true

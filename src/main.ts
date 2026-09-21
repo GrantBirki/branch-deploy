@@ -65,7 +65,9 @@ function terminal(
 export async function run(): Promise<RunResult> {
   let operation: Operation = 'none'
   try {
-    core.info(`🛸 github/branch-deploy ${COLORS.info}${VERSION}${COLORS.reset}`)
+    core.info(
+      `🛸 GrantBirki/branch-deploy ${COLORS.info}${VERSION}${COLORS.reset}`
+    )
     core.debug(`context: ${JSON.stringify(context)}`)
 
     const token = getActionInput('github_token', {required: true})
@@ -77,7 +79,7 @@ export async function run(): Promise<RunResult> {
       saveActionState('isPost', 'true')
       saveActionState('bypass', 'true')
       const resultOctokit = github.getOctokit(token, {
-        userAgent: `github/branch-deploy@${VERSION}`,
+        userAgent: `GrantBirki/branch-deploy@${VERSION}`,
         additionalPlugins: [retry]
       })
       return finish(
@@ -90,7 +92,7 @@ export async function run(): Promise<RunResult> {
     }
     const inputs = getInputs()
     const octokit = github.getOctokit(token, {
-      userAgent: `github/branch-deploy@${VERSION}`,
+      userAgent: `GrantBirki/branch-deploy@${VERSION}`,
       additionalPlugins: [retry]
     })
     saveActionState('isPost', 'true')

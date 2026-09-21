@@ -23,7 +23,7 @@ export interface NakedCommandOctokit {
 
 const thumbsDown = '-1'
 const docs =
-  'https://github.com/github/branch-deploy/blob/main/docs/naked-commands.md'
+  'https://github.com/GrantBirki/branch-deploy/blob/main/docs/naked-commands.md'
 
 // Helper function to check if a naked command was issued
 // :param body: The body of the issueops command

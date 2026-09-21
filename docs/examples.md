@@ -2,7 +2,7 @@
 
 This section contains real world and common examples of how you could use this Action
 
-> Note: In all examples, we will be using `uses: github/branch-deploy@vX.X.X`. Replace `X.X.X` with the [latest version](https://github.com/marketplace/actions/branch-deploy) of this Action
+> Note: Examples use `uses: GrantBirki/branch-deploy@vX.X.X` as a placeholder. Choose a version from [this repository's releases](https://github.com/GrantBirki/branch-deploy/releases), or pin its full commit SHA. Examples marked unreleased require a reviewed full commit SHA from `main`.
 
 ## Table of Contents
 
@@ -55,7 +55,7 @@ jobs:
       # The branch-deploy Action
       - name: branch-deploy
         id: branch-deploy
-        uses: github/branch-deploy@vX.X.X
+        uses: GrantBirki/branch-deploy@vX.X.X
 
         # If the branch-deploy Action was triggered, checkout our branch
       - uses: actions/checkout@v7.0.0
@@ -118,7 +118,7 @@ jobs:
       # The branch-deploy Action
       - name: branch-deploy
         id: branch-deploy
-        uses: github/branch-deploy@vX.X.X
+        uses: GrantBirki/branch-deploy@vX.X.X
 
         # If the branch-deploy Action was triggered, checkout our branch
       - name: Checkout
@@ -254,7 +254,7 @@ jobs:
     steps:
       - name: branch-deploy
         id: branch-deploy
-        uses: github/branch-deploy@vX.X.X
+        uses: GrantBirki/branch-deploy@vX.X.X
         with:
           trigger: ".deploy"
           sticky_locks: true
@@ -428,7 +428,7 @@ jobs:
     steps:
       - name: deployment check
         id: deployment-check
-        uses: github/branch-deploy@vX.X.X
+        uses: GrantBirki/branch-deploy@vX.X.X
         with:
           merge_deploy_mode: true
           environment: production
@@ -497,7 +497,7 @@ jobs:
     steps:
       - name: unlock on merge
         id: unlock-on-merge
-        uses: github/branch-deploy@vX.X.X
+        uses: GrantBirki/branch-deploy@vX.X.X
         with:
           unlock_on_merge_mode: true
           environment_targets: production
@@ -553,7 +553,7 @@ jobs:
       # The branch-deploy Action
       - name: branch-deploy
         id: branch-deploy
-        uses: github/branch-deploy@vX.X.X
+        uses: GrantBirki/branch-deploy@vX.X.X
 
         # If the branch-deploy Action was triggered, checkout our branch
       - name: Checkout
@@ -607,7 +607,7 @@ jobs:
       # The branch-deploy Action
       - name: branch-deploy
         id: branch-deploy
-        uses: github/branch-deploy@vX.X.X
+        uses: GrantBirki/branch-deploy@vX.X.X
 
         # If the branch-deploy Action was triggered, checkout our branch
       - name: Checkout
@@ -663,7 +663,7 @@ jobs:
 
     steps:
       # The branch-deploy Action
-      - uses: github/branch-deploy@vX.X.X
+      - uses: GrantBirki/branch-deploy@vX.X.X
         id: branch-deploy
 
         # If the branch-deploy Action was triggered, checkout our branch
@@ -719,7 +719,7 @@ jobs:
 
     steps:
       # The branch-deploy Action
-      - uses: github/branch-deploy@vX.X.X
+      - uses: GrantBirki/branch-deploy@vX.X.X
         id: branch-deploy
 
         # If the branch-deploy Action was triggered, checkout our branch
@@ -802,7 +802,7 @@ jobs:
 
     steps:
       # The branch-deploy Action
-      - uses: github/branch-deploy@vX.X.X
+      - uses: GrantBirki/branch-deploy@vX.X.X
         id: branch-deploy
 
         # If the branch-deploy Action was triggered, checkout our branch
@@ -842,6 +842,8 @@ jobs:
 ```
 
 ## Multiple Jobs
+
+> **Unreleased:** Result mode is available on `main` but is not included in `v12.0.0` or `v12`. Replace `vX.X.X` in both steps below with the same reviewed full commit SHA from this repository.
 
 Use [result mode](result-mode.md) to complete a deployment or noop after work in other jobs. The initial job passes its context directly to the result job; the deployment job checks `run_attempt` before doing any work. Pin both Branch Deploy invocations to the same full immutable commit SHA in real workflows.
 
@@ -967,7 +969,7 @@ jobs:
 
     steps:
       # execute the branch-deploy action
-      - uses: github/branch-deploy@vX.X.X
+      - uses: GrantBirki/branch-deploy@vX.X.X
         id: branch-deploy
         with:
           trigger: '.deploy'
@@ -1243,7 +1245,7 @@ jobs:
 
     steps:
       # execute the branch-deploy action
-      - uses: github/branch-deploy@vX.X.X
+      - uses: GrantBirki/branch-deploy@vX.X.X
         id: branch-deploy
         with:
           trigger: '.deploy'
@@ -1433,7 +1435,7 @@ jobs:
 
 ## Multiple Jobs with GitHub Environments
 
-A detailed example using multiple jobs, [repository environments](https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment), and Terraform. As mentioned in the [README](https://github.com/github/branch-deploy#about-environments-), a deployment completes when the workflow targeting that environment completes. In this example, the branch deployment action targets a separate environment than the "actual" deployment logic, which lets us control the completion of the branch deployment while being able to manage environments separately.
+A detailed example using multiple jobs, [repository environments](https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment), and Terraform. As mentioned in the [README](../README.md#about-environments-), a deployment completes when the workflow targeting that environment completes. In this example, the branch deployment action targets a separate environment than the "actual" deployment logic, which lets us control the completion of the branch deployment while being able to manage environments separately.
 
 ```yaml
 name: Branch Deploy
@@ -1481,7 +1483,7 @@ jobs:
     steps:
       - name: Start Branch Deployment
         id: branch-deploy
-        uses: github/branch-deploy@vX.X.X
+        uses: GrantBirki/branch-deploy@vX.X.X
         with:
           environment: development
           environment_targets: development,staging,production
