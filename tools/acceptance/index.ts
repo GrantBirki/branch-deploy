@@ -661,6 +661,59 @@ const scenarios = [
       })
   },
   {
+    name: 'active nonsticky noop rejects later sticky claims',
+    run: async () => {
+      for (const command of ['.deploy', '.lock production']) {
+        await withMockGitHub(
+          `active nonsticky noop rejects ${command}`,
+          async context => {
+            setTriggerComment(context.state, '.noop')
+            context.state.comments.push({body: command, id: 1001})
+            const inputs = {
+              sticky_locks: 'true',
+              sticky_locks_for_noop: 'false'
+            }
+            const branch = lockBranch('production')
+            const first = await runMain(context, inputs)
+            assertExit(context, first, 0)
+            assertReason(context, first, 'noop_ready')
+            const originalLock = mockLockContents(context.state, branch)
+            const originalSha = context.state.branches.get(branch)?.sha
+            assert.equal(requireMockLock(context, branch)['sticky'], false)
+            assert.equal(first.state['lock_ref_sha'], originalSha)
+
+            const second = await runMain(context, inputs, 'octocat', 1001)
+            assertExit(context, second, 1)
+            assertReason(context, second, 'lock_conflict')
+            assert.equal(second.state['lock_ref_sha'], undefined)
+            assertNoDeployment(context, second)
+            assert.equal(mockLockContents(context.state, branch), originalLock)
+            assert.equal(context.state.branches.get(branch)?.sha, originalSha)
+
+            const secondPost = await runAction({
+              actor: 'octocat',
+              commentId: 1001,
+              inputs,
+              mode: 'post',
+              port: context.port,
+              previousState: second.state,
+              state: context.state,
+              status: 'success'
+            })
+            assertExit(context, secondPost, 0)
+            assert.equal(mockLockContents(context.state, branch), originalLock)
+            assert.equal(context.state.branches.get(branch)?.sha, originalSha)
+
+            const firstPost = await runPost(context, first, inputs)
+            assertExit(context, firstPost, 0)
+            assert.equal(context.state.branches.has(branch), false)
+            assert.equal(mockLockContents(context.state, branch), undefined)
+          }
+        )
+      }
+    }
+  },
+  {
     name: 'disabled decorative reactions',
     run: async () => {
       for (const [command, reason] of [
