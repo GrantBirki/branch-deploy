@@ -525,15 +525,11 @@ async function checkLockOwner(
   leaveComment: boolean
 ): Promise<boolean> {
   core.debug('checking the owner of the lock...')
-  // A distinct non-sticky deployment must not share cleanup ownership with an
-  // active deployment, even when both requests come from the same actor.
+  // A distinct claim must not reuse an active non-sticky deployment's lock,
+  // even when the new request is sticky and comes from the same actor.
   if (
     lockData.created_by === context.actor &&
-    !(
-      lockData.claim_id !== undefined &&
-      lockData.sticky === false &&
-      sticky === false
-    )
+    !(lockData.claim_id !== undefined && lockData.sticky === false)
   ) {
     core.info(
       `✅ ${COLORS.highlight}${context.actor}${COLORS.reset} initiated this request and is also the owner of the current lock`
