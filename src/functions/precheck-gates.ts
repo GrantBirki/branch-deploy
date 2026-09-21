@@ -105,7 +105,7 @@ export function evaluatePrecheckGates({
         {level: 'info', message},
         {
           level: 'warning',
-          message: `⚠️ sha deployments are ${COLORS.warning}unsafe${COLORS.reset} as they bypass all checks - read more here: https://github.com/github/branch-deploy/blob/main/docs/sha-deployments.md`
+          message: `⚠️ sha deployments are ${COLORS.warning}unsafe${COLORS.reset} as they bypass all checks - read more here: https://github.com/GrantBirki/branch-deploy/blob/main/docs/sha-deployments.md`
         },
         {
           level: 'debug',

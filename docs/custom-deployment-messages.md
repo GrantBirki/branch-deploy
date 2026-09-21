@@ -8,7 +8,7 @@ Custom deployment messages use two building blocks that can be used separately o
 
 > This option is recommended when you need trusted structure or additional deployment metadata. Dynamic results still pass through `DEPLOY_MESSAGE`, so large Terraform plan or apply output may need to be truncated, uploaded as an artifact, or replaced with a link to avoid environment-size limits.
 
-Set [`deploy_message_path`](https://github.com/github/branch-deploy/blob/main/action.yml) to a repository-relative path such as `.github/deployment_message.md`. That path is also the default, so no input is needed when the template is stored there.
+Set [`deploy_message_path`](../action.yml) to a repository-relative path such as `.github/deployment_message.md`. That path is also the default, so no input is needed when the template is stored there.
 
 Branch Deploy does not read this path from the runner filesystem. In post mode it fetches the file through GitHub's Contents API from the current repository at the exact trusted workflow SHA saved during the main action. The path must be repository-relative and cannot contain absolute paths, backslashes, empty segments, `.` segments, or `..` traversal segments. If the file does not exist at that trusted SHA, Branch Deploy falls back to the default deployment message. Other fetch or validation failures stop the post action.
 

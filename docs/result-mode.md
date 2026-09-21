@@ -2,6 +2,8 @@
 
 > Report deployment results after work in multiple jobs
 
+> **Unreleased:** Result mode is available on `main` but is not included in `v12.0.0` or `v12`. Pin the start and result steps to the same reviewed full commit SHA from this repository to try it before release.
+
 If your deployment runs across multiple jobs, you can use result mode to let the `branch-deploy` Action report the final outcome for you. This replaces the extra workflow YAML for updating deployment statuses, posting comments, managing labels, and cleaning up locks. It works for both regular deployments and noops!
 
 > **Note:** Result mode is entirely optional. The `result_mode` input defaults to `false`, so existing single-job workflows do not need to change.

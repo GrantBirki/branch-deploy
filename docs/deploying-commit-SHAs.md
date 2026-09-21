@@ -7,7 +7,7 @@ Instead of this:
 ```yaml
 - name: branch-deploy
   id: branch-deploy
-  uses: github/branch-deploy@vX.X.X
+  uses: GrantBirki/branch-deploy@vX.X.X
 
 - name: checkout
   if: steps.branch-deploy.outputs.continue == 'true'
@@ -22,7 +22,7 @@ Do this:
 ```yaml
 - name: branch-deploy
   id: branch-deploy
-  uses: github/branch-deploy@vX.X.X
+  uses: GrantBirki/branch-deploy@vX.X.X
 
 - name: checkout
   if: steps.branch-deploy.outputs.continue == 'true'

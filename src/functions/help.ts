@@ -10,7 +10,7 @@ import type {
 
 const defaultSpecificMessage = '<something went wrong - please report this>'
 const usageGuideLink =
-  'https://github.com/github/branch-deploy/blob/main/docs/usage.md'
+  'https://github.com/GrantBirki/branch-deploy/blob/main/docs/usage.md'
 
 function isChecksArray(value: ChecksInput): value is readonly string[] {
   return typeof value !== 'string'

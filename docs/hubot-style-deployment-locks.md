@@ -21,7 +21,7 @@ Enabling sticky deployment locks for `.deploy` commands:
 ```yaml
 - name: branch-deploy
   id: branch-deploy
-  uses: github/branch-deploy@vX.X.X
+  uses: GrantBirki/branch-deploy@vX.X.X
   with:
     sticky_locks: true # <--- enables sticky deployment lock / hubot style deployment locks
     # ... other configuration
@@ -32,7 +32,7 @@ Enabling sticky deployment locks for `.deploy` and `.noop` commands:
 ```yaml
 - name: branch-deploy
   id: branch-deploy
-  uses: github/branch-deploy@vX.X.X
+  uses: GrantBirki/branch-deploy@vX.X.X
   with:
     sticky_locks: true # <--- enables sticky deployment lock / hubot style deployment locks
     sticky_locks_for_noop: true # <--- enables sticky deployment lock / hubot style deployment locks for noop deployments

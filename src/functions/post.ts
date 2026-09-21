@@ -91,7 +91,7 @@ export async function post(): Promise<void> {
 
     // Create an octokit client with the retry plugin
     const octokit = github.getOctokit(token, {
-      userAgent: `github/branch-deploy@${VERSION}`,
+      userAgent: `GrantBirki/branch-deploy@${VERSION}`,
       additionalPlugins: [retry]
     })
 

@@ -45,7 +45,7 @@ into checked-out files.
 A hardened workflow usually follows this sequence:
 
 1. Derive a trusted checkout path from the repository default branch.
-2. Run `github/branch-deploy` from the default-branch workflow.
+2. Run `GrantBirki/branch-deploy` from the default-branch workflow.
 3. Validate `steps.branch-deploy.outputs.sha` as an exact commit SHA.
 4. Derive a working checkout path from that SHA.
 5. Check out trusted helper code at `github.sha`.
