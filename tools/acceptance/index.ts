@@ -1235,6 +1235,114 @@ const scenarios = [
       })
   },
   {
+    name: 'result mode completes the exact checked stack deployment',
+    run: async () => {
+      for (const evidence of ['matching', 'unrelated ref', 'different SHA']) {
+        await withMockGitHub(`stack result ${evidence}`, async context => {
+          seedPrStack(context.state)
+          setTriggerComment(context.state, '.deploy')
+          const inputs = {
+            enable_pr_stacks: 'true',
+            skip_completing: 'true',
+            successful_deploy_labels: 'deploy-success'
+          }
+          const mainResult = await runMain(context, inputs)
+          assertExit(context, mainResult, 0)
+          assertReason(context, mainResult, 'deployment_ready')
+          const completionContext = requireOutput(
+            context,
+            mainResult,
+            'context'
+          )
+          const completion = requireRecordValue(
+            JSON.parse(completionContext),
+            diagnostics(context, mainResult)
+          )
+          assert.equal(completion['ref'], 'stack-top')
+          assert.equal(completion['sha'], ACCEPTANCE_SHAS.stackTop)
+          const deployment = requireDeployment(context)
+          assert.equal(deployment.ref, ACCEPTANCE_SHAS.stackTop)
+          assert.equal(deployment.sha, ACCEPTANCE_SHAS.stackTop)
+          const originalLock = mockLockContents(
+            context.state,
+            lockBranch('production')
+          )
+          assert.ok(originalLock !== undefined)
+          const routeCount = context.routeLog.length
+          const postResult = await runPost(context, mainResult, inputs)
+          assertExit(context, postResult, 0)
+          assert.equal(context.routeLog.length, routeCount)
+          assert.equal(deployment.statuses.length, 1)
+          assert.equal(
+            requireDeploymentStatus(context, deployment, 0).state,
+            'in_progress'
+          )
+
+          if (evidence === 'unrelated ref') {
+            context.state.deployments[0] = {...deployment, ref: 'other-branch'}
+          } else if (evidence === 'different SHA') {
+            context.state.deployments[0] = {
+              ...deployment,
+              sha: ACCEPTANCE_SHAS.feature
+            }
+          }
+          const resultInputs = {
+            result_mode: 'true',
+            context: completionContext,
+            job_results: JSON.stringify(['success', 'success'])
+          }
+          const result = await runMain(context, resultInputs)
+          const resultRoutes = context.routeLog.slice(routeCount)
+          assert.equal(
+            resultRoutes
+              .filter(route => route.method === 'GET')
+              .some(
+                route =>
+                  route.path ===
+                  apiPath(`/deployments/${String(deployment.id)}`)
+              ),
+            true
+          )
+          if (evidence === 'matching') {
+            assertExit(context, result, 0)
+            assertReason(context, result, 'result_completed')
+            assertResultField(context, result, 'ref', 'stack-top')
+            assertResultField(context, result, 'sha', ACCEPTANCE_SHAS.stackTop)
+            assertOutput(context, result, 'deployment_result', 'success')
+            assert.equal(deployment.statuses.length, 2)
+            assert.equal(
+              requireDeploymentStatus(context, deployment, 1).state,
+              'success'
+            )
+            assert.equal(context.state.labels.has('deploy-success'), true)
+            assert.equal(
+              context.state.branches.has(lockBranch('production')),
+              false
+            )
+          } else {
+            assertExit(context, result, 1)
+            assertReason(context, result, 'invalid_result_context')
+            assert.equal(deployment.statuses.length, 1)
+            assert.equal(context.state.labels.has('deploy-success'), false)
+            assert.equal(
+              mockLockContents(context.state, lockBranch('production')),
+              originalLock
+            )
+            assert.equal(
+              resultRoutes.every(route => route.method === 'GET'),
+              true,
+              diagnostics(context, result)
+            )
+          }
+          const completedRouteCount = context.routeLog.length
+          const resultPost = await runPost(context, result, resultInputs)
+          assertExit(context, resultPost, 0)
+          assert.equal(context.routeLog.length, completedRouteCount)
+        })
+      }
+    }
+  },
+  {
     name: 'deployment label cleanup paginates stale labels',
     run: () =>
       withMockGitHub(
@@ -6240,6 +6348,14 @@ const scenarios = [
           diagnostics(context)
         )
 
+        for (const path of ['/issues/comments/999', '/deployments/999']) {
+          const missingResultEvidence = await getMockRoute(
+            context.port,
+            route(path)
+          )
+          assert.equal(missingResultEvidence.status, 404, diagnostics(context))
+        }
+
         const unpagedReactions = await getMockRoute(
           context.port,
           route('/issues/comments/1000/reactions')
@@ -6432,7 +6548,7 @@ const scenarios = [
 
         const unknownDeploymentRoute = await getMockRoute(
           context.port,
-          route('/deployments/999')
+          route('/deployments/999/unhandled')
         )
         assert.equal(unknownDeploymentRoute.status, 500, diagnostics(context))
       })

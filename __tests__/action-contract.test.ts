@@ -63,6 +63,11 @@ const expectedInputContract = {
   merge_deploy_mode: {default: 'false', required: false},
   unlock_on_merge_mode: {default: 'false', required: false},
   skip_completing: {default: 'false', required: false},
+  result_mode: {default: 'false', required: false},
+  context: {default: '', required: false},
+  job_results: {default: '', required: false},
+  result_inherit_settings: {default: 'true', required: false},
+  result_url: {default: '', required: false},
   deploy_message_path: {
     default: '.github/deployment_message.md',
     required: false
@@ -103,6 +108,8 @@ const expectedBooleanInputKeys = [
   'merge_deploy_mode',
   'unlock_on_merge_mode',
   'skip_completing',
+  'result_mode',
+  'result_inherit_settings',
   'sticky_locks',
   'sticky_locks_for_noop',
   'disable_lock',
@@ -175,8 +182,8 @@ test('action input and output registries exactly match action.yml', () => {
     [...ACTION_OUTPUT_KEYS].sort(),
     Object.keys(outputs).sort()
   )
-  assert.strictEqual(ACTION_INPUT_KEYS.length, 52)
-  assert.strictEqual(ACTION_OUTPUT_KEYS.length, 41)
+  assert.strictEqual(ACTION_INPUT_KEYS.length, 57)
+  assert.strictEqual(ACTION_OUTPUT_KEYS.length, 43)
 })
 
 test('action input defaults, required flags, and accepted literals stay fixed', () => {
@@ -207,7 +214,7 @@ test('action input defaults, required flags, and accepted literals stay fixed', 
 
 test('typed input registries stay complete and exact', () => {
   assert.deepStrictEqual(BOOLEAN_ACTION_INPUT_KEYS, expectedBooleanInputKeys)
-  assert.strictEqual(BOOLEAN_ACTION_INPUT_KEYS.length, 17)
+  assert.strictEqual(BOOLEAN_ACTION_INPUT_KEYS.length, 19)
   assert.deepStrictEqual(INTEGER_ACTION_INPUT_KEYS, expectedIntegerInputKeys)
   assert.deepStrictEqual(LITERAL_ACTION_INPUT_KEYS, expectedLiteralInputKeys)
   assert.deepStrictEqual(LITERAL_ACTION_INPUT_VALUES, {

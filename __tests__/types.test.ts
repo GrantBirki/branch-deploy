@@ -68,6 +68,8 @@ test('typed input registries expose exact ActionInputKey subsets', () => {
     | 'enable_pr_stacks'
     | 'environment_url_in_comment'
     | 'merge_deploy_mode'
+    | 'result_mode'
+    | 'result_inherit_settings'
     | 'skip_completing'
     | 'skip_successful_deploy_labels_if_approved'
     | 'skip_successful_noop_labels_if_approved'
