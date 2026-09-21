@@ -842,6 +842,9 @@ function deploymentResponse(
     created_at: deployment.createdAt,
     updated_at: deployment.updatedAt,
     statuses_url: `http://127.0.0.1/repos/${state.owner}/${state.repo}/deployments/${deployment.id}/statuses`,
+    environment: deployment.environment,
+    payload: deployment.payload,
+    ref: deployment.ref,
     sha: state.deploymentResponseSha ?? deployment.sha
   }
 }
@@ -914,7 +917,8 @@ function routeRest(
   method: string,
   pathname: string,
   searchParams: URLSearchParams,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  apiUrl: string
 ): JsonResponse {
   const parts = pathname.split('/').filter(value => value !== '')
   if (part(parts, 0) !== 'repos') {
@@ -1068,7 +1072,7 @@ function routeRest(
   }
 
   if (area === 'issues') {
-    return routeIssues(state, method, parts, body, searchParams)
+    return routeIssues(state, method, parts, body, searchParams, apiUrl)
   }
 
   if (area === 'git') {
@@ -1087,7 +1091,8 @@ function routeIssues(
   method: string,
   parts: readonly string[],
   body: Record<string, unknown>,
-  searchParams: URLSearchParams
+  searchParams: URLSearchParams,
+  apiUrl: string
 ): JsonResponse {
   if (
     method === 'POST' &&
@@ -1106,6 +1111,18 @@ function routeIssues(
 
   if (part(parts, 4) === 'comments' && parts.length >= 6) {
     const commentId = Number(part(parts, 5))
+    if (method === 'GET' && parts.length === 6) {
+      const comment = state.comments.find(item => item.id === commentId)
+      return comment === undefined
+        ? notFound('Comment not found')
+        : {
+            status: 200,
+            value: {
+              ...comment,
+              issue_url: `${apiUrl}/repos/${state.owner}/${state.repo}/issues/${state.pullRequest.number}`
+            }
+          }
+    }
     if (method === 'PATCH' && parts.length === 6) {
       const comment = state.comments.find(item => item.id === commentId)
       if (comment === undefined) {
@@ -1286,6 +1303,14 @@ function routeDeployments(
   body: Record<string, unknown>,
   searchParams: URLSearchParams
 ): JsonResponse {
+  if (method === 'GET' && parts.length === 5) {
+    const deployment = state.deployments.find(
+      item => item.id === Number(part(parts, 4))
+    )
+    return deployment === undefined
+      ? notFound('Deployment not found')
+      : {status: 200, value: deploymentResponse(state, deployment)}
+  }
   if (method === 'GET' && parts.length === 4) {
     const environment = searchParams.get('environment')
     const deployments = state.deployments.filter(
@@ -1447,7 +1472,14 @@ async function handleRequest(
       fault ??
       (url.pathname === '/graphql'
         ? routeGraphql(state, body)
-        : routeRest(state, method, url.pathname, url.searchParams, body))
+        : routeRest(
+            state,
+            method,
+            url.pathname,
+            url.searchParams,
+            body,
+            `http://127.0.0.1:${String(request.socket.localPort)}`
+          ))
     writeResponse(response, result)
   } catch (error) {
     writeResponse(response, {
