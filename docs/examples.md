@@ -2,7 +2,7 @@
 
 This section contains real world and common examples of how you could use this Action
 
-> Note: Examples use `uses: grantbirki/branch-deploy@vX.X.X` as a placeholder. Choose a version from [this repository's releases](https://github.com/grantbirki/branch-deploy/releases), or pin its full commit SHA. Examples marked unreleased require a reviewed full commit SHA from `main`.
+> Note: Examples use `uses: grantbirki/branch-deploy@vX.X.X` as a placeholder. Choose a version from [this repository's releases](https://github.com/grantbirki/branch-deploy/releases) that supports the features you use, or pin its full commit SHA.
 
 ## Table of Contents
 
@@ -843,7 +843,7 @@ jobs:
 
 ## Multiple Jobs
 
-> **Unreleased:** Result mode is available on `main` but is not included in `v12.0.0` or `v12`. Replace `vX.X.X` in both steps below with the same reviewed full commit SHA from this repository.
+> **Version:** Result mode requires `v12.1.0` or later. Replace `vX.X.X` in both steps below with the same full immutable commit SHA from this repository.
 
 Use [result mode](result-mode.md) to complete a deployment or noop after work in other jobs. The initial job passes its context directly to the result job; the deployment job checks `run_attempt` before doing any work. Pin both Branch Deploy invocations to the same full immutable commit SHA in real workflows.
 

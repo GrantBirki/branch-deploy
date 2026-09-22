@@ -1,6 +1,6 @@
 # Pull request stacks
 
-> **Unreleased:** `enable_pr_stacks` is available on `main` but is not included in `v12.0.0` or `v12`. Replace `vX.X.X` below with a reviewed full commit SHA from this repository to try it before release.
+> **Version:** `enable_pr_stacks` requires `v12.1.0` or later. Replace `vX.X.X` below with an exact release tag or its full commit SHA from this repository.
 
 GitHub's [native pull request stacks](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs) are in public preview. Branch Deploy supports them through the optional `enable_pr_stacks` input, which defaults to `false`.
 

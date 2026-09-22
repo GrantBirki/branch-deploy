@@ -35440,7 +35440,7 @@ retry.VERSION = plugin_retry_dist_bundle_VERSION;
 // - v4.5.1
 // - v10.123.44
 // - etc
-const src_version_VERSION = 'v12.0.0';
+const src_version_VERSION = 'v12.1.0';
 
 ;// CONCATENATED MODULE: ./src/functions/colors.ts
 const COLORS = {
