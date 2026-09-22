@@ -60,6 +60,7 @@ The package boundary is ESM. Preserve `"type": "module"`, ESM exports, import-ti
 - `script/test` is the canonical native Node test entrypoint.
 - `dist/` contains the committed ncc output executed by the GitHub Actions runner.
 - `docs/maintainer-guide.md` documents the automatic immutable release process.
+- `docs/security_hardening_guides/` contains public-safe consumer hardening notes and contribution guidance for maintainers and coding agents.
 - `.github/workflows/` contains the required CI, package reproduction, schema validation, and release workflows.
 
 ## Action contract
