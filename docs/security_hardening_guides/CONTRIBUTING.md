@@ -1,5 +1,13 @@
 # Contributing security hardening notes
 
+## TLDR
+
+- Explain the risk, the smallest useful fix, and how someone can test it without prior context.
+- Use public sources and made-up examples. Leave private code, names, logs, and operational details out.
+- Check examples and review the full diff before publishing. Keep contributions in this fork unless explicitly asked otherwise.
+
+## Writing a useful note
+
 Add notes here when they help someone make a concrete deployment decision, reproduce a boundary safely, or avoid a documented failure. Write for maintainers and coding agents who have no access to the discussion that prompted the change.
 
 This collection belongs to `GrantBirki/branch-deploy`. Work against the maintainer's chosen branch in this fork. Do not open an upstream contribution or move the work to another repository without explicit authorization.
@@ -28,8 +36,18 @@ A useful note states a falsifiable rule, such as: "A candidate override file can
 
 Use this as a writing aid, not mandatory boilerplate. A short finding may need only a few paragraphs; a reusable guide may need several sections.
 
+Start each guide with a concise `TLDR` section. Use a few plain-language bullets to explain the problem, the approach, and what the reader should check.
+
 ```markdown
 # A specific behavior or decision
+
+## TLDR
+
+- State the problem in everyday terms.
+- Explain the recommended approach.
+- Say what the reader should verify.
+
+## The problem
 
 Explain the problem and the workflow shape where it matters.
 

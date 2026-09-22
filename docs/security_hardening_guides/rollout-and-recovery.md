@@ -1,5 +1,13 @@
 # Rollout, results, and recovery
 
+## TLDR
+
+- During deployment, create a fresh plan from the approved commit and apply that exact saved plan.
+- Keep Terraform failures visible even when reporting succeeds. A green workflow alone does not prove the deployment worked.
+- Check the actual result before merging or retrying. Recovery steps must preserve the same review and credential protections.
+
+## What counts as success
+
 A workflow-hardening change should preserve infrastructure behavior unless a separate, reviewed change intentionally alters it. Keep the proof tied to the selected commit, workflow revision, deployment environment, backend, and workspace.
 
 ## Plan, approve, apply the saved plan
@@ -11,6 +19,75 @@ At `.deploy`, create a fresh plan from the approved immutable configuration and 
 Store the binary plan, JSON view, and text view in a restrictive runner-owned temporary directory. Bind them to the same configuration, variables, backend, workspace, and tool/provider versions. If jobs exchange plans, protect both artifact provenance and confidentiality; never accept a plan uploaded by an untrusted PR job as an authorized apply input.
 
 Saved plans and their JSON views can contain sensitive values even when normal terminal output hides them. Treat them as sensitive artifacts with bounded retention. See [Terraform's saved-plan guidance](https://developer.hashicorp.com/terraform/cli/commands/plan#out-filename).
+
+## Recipe: keep reporting from hiding failure
+
+A workflow may need Terraform's error output to explain a failed preview or deployment. Temporarily allowing a failed step to continue is reasonable only when a later step restores the failure before Branch Deploy completes the operation.
+
+GitHub distinguishes a step's original `outcome` from its `conclusion` after `continue-on-error` is applied. The latter can be `success` for a failed command. Check the original outcome when deciding whether apply may run and whether the operation succeeded. See [the steps context](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#steps-context).
+
+This **single-job fragment** assumes an earlier Branch Deploy step with ID `branch-deploy`. `TRUSTED_HELPERS` must be a verified absolute path set by protected workflow code. The named helper scripts are illustrative contracts to implement in the consumer: `plan` creates one saved plan and returns the real Terraform exit status; `apply-saved-plan` uses that artifact; `report` renders bounded diagnostics without declaring success from log text; `cleanup` removes only validated temporary files. If planning uses detailed exit codes, its helper must deliberately distinguish ordinary proposed changes from errors and enforce the intended plan policy.
+
+```yaml
+- name: plan
+  id: plan
+  if: steps.branch-deploy.outputs.continue == 'true'
+  continue-on-error: true
+  run: '"${TRUSTED_HELPERS}/plan"'
+
+- name: apply saved plan
+  id: apply
+  if: steps.branch-deploy.outputs.continue == 'true' && steps.branch-deploy.outputs.noop == 'false' && steps.plan.outcome == 'success'
+  continue-on-error: true
+  run: '"${TRUSTED_HELPERS}/apply-saved-plan"'
+
+- name: render operation result
+  if: always() && steps.branch-deploy.outputs.continue == 'true'
+  env:
+    NOOP: ${{ steps.branch-deploy.outputs.noop }}
+    PLAN_OUTCOME: ${{ steps.plan.outcome }}
+    APPLY_OUTCOME: ${{ steps.apply.outcome }}
+  run: '"${TRUSTED_HELPERS}/report"'
+
+- name: preserve operation failure
+  if: always() && steps.branch-deploy.outputs.continue == 'true'
+  env:
+    NOOP: ${{ steps.branch-deploy.outputs.noop }}
+    PLAN_OUTCOME: ${{ steps.plan.outcome }}
+    APPLY_OUTCOME: ${{ steps.apply.outcome }}
+  shell: bash
+  run: |
+    set -euo pipefail
+    [[ "$PLAN_OUTCOME" == "success" ]] || exit 1
+    case "$NOOP" in
+      true) [[ "$APPLY_OUTCOME" == "skipped" ]] ;;
+      false) [[ "$APPLY_OUTCOME" == "success" ]] ;;
+      *) exit 1 ;;
+    esac
+
+- name: cleanup
+  if: always() && steps.branch-deploy.outputs.continue == 'true'
+  run: '"${TRUSTED_HELPERS}/cleanup"'
+```
+
+The fragment deliberately fails a deploy whose apply was unexpectedly skipped. It also rejects a noop that actually applied. It cannot undo an apply; the earlier apply condition and normal authorization are the prevention controls. Check the pinned Action's boolean output contract before adapting the conditions.
+
+Reporting gets the actual step outcomes as well as redacted output. A provider can print success-looking text before failing, so a line containing “Apply complete” is not the authority for status. Keep rendering failure visible too: successful Terraform followed by failed reporting is a reporting failure with potentially completed infrastructure work. Investigate before any retry.
+
+Cleanup and reporting may run after an operation fails, but neither should reset the saved failure to success. For pipelines, preserve Terraform's exit status; a successful `tee` or formatter is insufficient. For multiple jobs, use [the completion recipe](#multi-job-completion-must-describe-the-work) and the pinned Action's result mode instead of assuming this single-job fragment carries state across jobs.
+
+### Failure matrix
+
+| Plan | Apply | Expected operation evidence |
+| --- | --- | --- |
+| Success | Skipped for noop | Preview succeeds; no apply or deployment completion is invented. |
+| Failure | Skipped | Job fails even if diagnostics render successfully. |
+| Success | Failure | Job fails; report identifies apply failure and possible partial mutation. |
+| Success | Skipped for deploy | Job fails because required work did not run. |
+| Success | Success | Deployment can succeed only if the other required steps also succeed. |
+| Cancelled or missing | Any | No success; retain cancellation/unknown status and inspect before recovery. |
+
+Test those paths with fake helpers. Also test renderer failure after a successful apply, cleanup failure, a nonzero command that prints success-shaped text, and a rejected operation that should never reach any helper. Inspect both the workflow result and Branch Deploy's comment/deployment result. Force-cancellation may prevent any final step from running; preserve that limitation in the recovery instructions.
 
 ## Require zero changes for hardening-only rollouts
 
@@ -50,6 +127,44 @@ Sometimes the old protected policy deliberately rejects a change to the policy i
 6. Exercise the newly trusted path, restore only the recorded settings after the intended plan is accepted, and finish any separately authorized reconciliation.
 
 This is an exceptional recovery procedure, not the expected process for every provider bump. A protected verifier that safely admits a reviewed provider upgrade can remove that recurring friction; see [provider installation choices](terraform-plans.md#providers-are-executable-dependencies).
+
+## Optional recipe: diagnose a runner without deploying
+
+Use a dedicated maintenance diagnostic when runner, network, or credential-access changes need live verification and a normal deployment would obscure the question being tested. This pattern runs an authorized plan against protected configuration. It never applies and must not create evidence that satisfies a deployment-required merge gate.
+
+Successful authentication proves only that the issuer accepted the request. It does not prove the runner can reach the state backend or read the actual resource API. A useful diagnostic exercises those boundaries separately and identifies which one failed.
+
+### Design the diagnostic path
+
+1. Restrict dispatch to the protected default branch and record the exact event SHA. Check out that SHA, verify `HEAD`, and use only its tooling and configuration. A manual dispatch can select a branch, so merely declaring `workflow_dispatch` is insufficient; see [GitHub's manual-run behavior](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow).
+2. Enforce the same protected-ref restriction in the credential issuer or environment policy where supported. A workflow condition cannot defend itself against an untrusted branch rewriting that condition. Verify the live protections separately from the proposed YAML.
+3. Use the same state-operation concurrency key as normal planning and deployment. Require the established maintenance settings before acquiring additional credentials. Confirm active/queued operations are drained as needed; a switch does not revoke an already running apply.
+4. Give the diagnostic no deployment-write permission, no deployment-completion Action, and no apply helper. When using a GitHub environment, use the hosting platform's supported setting to suppress automatic deployment creation, or choose another design that preserves its protection without publishing a deployment record. Verify the absence of a new record after the test.
+5. If the consumer relies on a fixed egress policy, check the observed source address against a protected expected range using a bounded, approved discovery method. Fail on discovery errors as well as mismatches. A public address check does not prove every later connection uses the same route, so also test the intended service path.
+6. Initialize the intended backend with the normal trusted provider and lockfile policy. Perform an authorized refresh/plan using the consumer's existing credentials. Require no changes; report drift without applying, importing, migrating, or editing state to quiet it.
+7. Preserve bounded diagnostics, remove temporary credentials/plans, and report which access checks succeeded. Keep this result separate from the normal PR review and deployment gates.
+
+For a consumer that defines the two illustrative environment inputs below, this fragment checks maintenance mode before credential issuance:
+
+```bash
+set -euo pipefail
+[[ "$PLAN_ENABLED" == "true" && "$APPLY_ENABLED" == "false" ]] || exit 1
+```
+
+These names are consumer-defined inputs, not Branch Deploy settings. Missing or malformed values must stop the job. After the preceding identity, provider, and credential checks, the diagnostic can use:
+
+```bash
+set -euo pipefail
+terraform -chdir="$TF_ROOT" plan -input=false -no-color -lock-timeout=60s -detailed-exitcode
+```
+
+For this diagnostic, exit code `2` deliberately fails because any proposed change needs separate review. Use a bounded backend-lock wait appropriate to the consumer. A backend may acquire a lock during planning; “never applies” does not mean the process has no credentials, performs no API calls, or can never affect an external service through provider behavior. Review that behavior first.
+
+### Diagnostic regression cases
+
+Reject non-default-branch dispatch, a checkout mismatch, absent/wrong switches, unexpected network origin, origin-discovery failure, backend initialization failure, provider read failure, and drift. A successful authentication response followed by denied resource access must fail. A clean plan should succeed without calling an apply stub or producing a deployment record.
+
+Test the workflow's structure as well as its helpers: no apply command, no deployment-write permission, expected concurrency, pinned protected checkout, and protected tooling. Use fake endpoints for failure tests. Running the real maintenance diagnostic, changing switches, or changing issuer policy requires separate operational authorization. A diagnostic-only success is not permission to merge or deploy a PR.
 
 ## Switches are not revocation
 

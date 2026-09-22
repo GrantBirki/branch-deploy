@@ -1,5 +1,13 @@
 # Working on security hardening guides
 
+## TLDR
+
+- Write public guidance that makes sense without access to private conversations or repositories.
+- Support claims with public evidence, and show both an allowed case and a case that should be blocked.
+- Stay within the requested task. Writing a guide does not authorize deployment, credential access, or publication.
+
+## Scope
+
 These files are public guidance for consumers of `GrantBirki/branch-deploy`. Read [CONTRIBUTING.md](CONTRIBUTING.md) before adding or changing a guide.
 
 - Use public documentation and this fork's source as evidence. Do not copy private workflows, logs, incident details, repository names, provider code, or machine paths into examples.

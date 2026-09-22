@@ -1,5 +1,13 @@
 # Terraform plans and provider integrity
 
+## TLDR
+
+- A `.noop` runs provider code. That code can use the credentials and network access available to the process.
+- Let routine settings changes plan before review only when trusted checks limit what they can do. Require approval for provider changes.
+- Verify provider packages before running them, and check an existing object's identity and ownership before importing it.
+
+## Why plans need checks
+
 Terraform configuration is an input to executable providers, data sources, backend clients, and expression evaluation. A `.noop` should skip apply, but a plan may still read credentials, state, local files, and remote services. Provider code can perform arbitrary operations under its process identity.
 
 Start by deciding which configuration may be evaluated before review. Branch Deploy does not ship a general Terraform configuration sandbox. The policy described here belongs to the consumer workflow and must run from protected code before initialization or credential access.
@@ -51,6 +59,56 @@ Inspect everything Terraform can load, not just the filenames that were convenie
 Prefer a maintained HCL parser for a broad language policy. A small dependency-free checker must define a deliberately restricted language, consume the entire input, and reject unsupported syntax. A regular expression that extracts recognized blocks and ignores everything else is not a safe admission check. Test comments, escapes, nesting, Unicode offsets, duplicate declarations, alternate filenames, and content after a valid block.
 
 Never silently fall back to permissive evaluation after a parse error. Avoid turning an incomplete parser into a general HCL interpreter one exception at a time.
+
+## Recipe: constrain expressions even when they match the baseline
+
+A protected baseline tells you what reviewers accepted previously. It does not establish that every expression in that baseline is safe for a lower-review planning path. Some expressions may intentionally read sensitive files, use credentials, or invoke features that always require review. Copying the same text into a new location can also change its effect.
+
+For a consumer that supports ordinary data-file edits, define a small set of reviewed expression shapes and bind each exception to its original location. Admission requires both an allowed shape and equality to the trusted expression at that location. This is a consumer policy; Terraform itself does not make that distinction.
+
+For example, suppose a reviewed root reads a local YAML file through this expression:
+
+```hcl
+locals {
+  policy = yamldecode(file("${path.module}/policy.yaml"))
+}
+```
+
+The example demonstrates a language form, not a blanket permission for locals or file reads. A consumer must review the YAML schema, allowed values, exact downstream attributes, and provider behavior before admitting edits. A field containing a command or destination is not harmless just because YAML represents it as a string. The [file function](https://developer.hashicorp.com/terraform/language/functions/file) reads the selected local file; the consumer supplies containment and access restrictions.
+
+Implement the comparison as follows:
+
+1. Parse both roots completely under the supported grammar. Preserve block labels, attribute identities, nesting, and expression meaning. Do not extract recognized fragments while ignoring surrounding syntax.
+2. Identify an expression by its semantic location: root, block kind and labels, nested block path, and attribute. For a local value, include the local's name. A set of approved expression strings loses that context.
+3. Permit the expression only if its structural form belongs to the consumer's reviewed subset and the corresponding baseline location contains an equivalent expression. Normalize comments/whitespace through parsing without erasing operators, escaping, or other meaningful differences.
+4. Resolve referenced file paths under the admitted root. Reject traversal, unexpected symlinks, unsupported extensions, missing files, and dynamic paths. Validate data against the consumer's schema; keep path and expression changes on the review-required route.
+5. Trace references through allowed locals to their consumers. Reusing an existing local in a new destination still needs its own admission decision. Do not allow arbitrary reference chains just because the first read was approved.
+6. Compare removals as well as additions. A lifecycle rule or other protection that disappears needs explicit handling even though there is no replacement expression to inspect.
+
+This pseudocode states the decision without prescribing a parser or a new production library:
+
+```text
+admit_expression(location, candidate, baseline):
+    require candidate is in the supported expression class
+    require baseline contains this same semantic location
+    require candidate and baseline[location] are structurally equivalent
+    require referenced files and downstream use satisfy protected policy
+    otherwise require review or reject, as the consumer policy specifies
+```
+
+### Paired regression cases
+
+| Change | Expected result for this example policy |
+| --- | --- |
+| Edit supported values in the existing YAML file | Unapproved preview remains available. |
+| Change `policy.yaml` to a different file, traverse outside the root, or replace it with a symlink | Stop before Terraform reads the file. |
+| Move the expression to a different resource attribute or reuse the local in an unreviewed destination | Require review; expression text alone does not grant permission. |
+| Put an unsupported expression in both trusted and candidate fixtures | Still reject the unreviewed route. Equality is not enough. |
+| Alter only harmless formatting | Accept if the supported parser proves the meaning and location unchanged. |
+| Hide an operator after a block comment or append another declaration | Parse the whole input and reject the unsupported operation. |
+| Remove a previously protected nested block | Detect the removal and apply the review policy. |
+
+Keep these fixtures synthetic and independent of today's resource inventory. A broader language policy may justify a maintained parser; this recipe does not justify building a general interpreter from regular-expression exceptions.
 
 ## A built-in data source can bypass a provider-only check
 
@@ -131,6 +189,89 @@ Prefer the existing runner platform and local installation format over an extra 
 Changing a provider version and changing its source address are different operations. A local mirror can preserve the existing source address; vendoring alone does not require renaming it. If the source address does change, inspect the provider identities recorded in state and plan a separately authorized migration using Terraform's supported tooling. See [provider replacement in state](https://developer.hashicorp.com/terraform/cli/commands/state/replace-provider).
 
 Confirm backend/workspace identity, protect a recovery snapshot, coordinate concurrent runs, and verify that old and new workflow revisions cannot operate against incompatible assumptions during the transition. Do not infer that a schema-compatible provider binary makes the state migration unnecessary, or that opening an upgrade PR authorizes rewriting remote state.
+
+## Recipe: adopt an existing object without taking over unrelated fields
+
+Use this pattern when Terraform should start managing an existing object while preserving its current behavior. The threat includes adopting the wrong object, creating a duplicate, overwriting another owner's fields, or combining adoption with an unnoticed policy change. Import is a state mutation and belongs behind the normal reviewed deployment path.
+
+Start with an ownership decision. For an invented service, the Terraform root might own its display name and timeout while another controller owns tags. Write that boundary beside the resource. Review the actual pinned provider's import and refresh implementation: required identifiers, defaults, normalization, pagination, dependent reads, and permissions all matter. A resource that sounds narrow may enumerate a much broader account during refresh.
+
+The following HCL is a **synthetic schema illustration**. `example_service` is a fictional provider resource; do not install a provider or use a live identifier to execute it. Replace it with a reviewed resource whose schema supports the intended controls in a real consumer:
+
+```hcl
+resource "example_service" "reports" {
+  name            = "reports"
+  timeout_seconds = 30
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [tags]
+
+    postcondition {
+      condition     = self.name == "reports"
+      error_message = "The imported service has an unexpected identity."
+    }
+  }
+}
+
+import {
+  to = example_service.reports
+  id = "service-example-001"
+}
+```
+
+Here, `tags` belongs to the other controller; ignoring it is an ownership choice. The name check is only useful if that attribute meaningfully identifies the intended object in the actual provider. Prefer an immutable identity where available. A postcondition can detect a mismatch after a read or operation; it is not prior authorization and cannot undo a provider write.
+
+### Adoption sequence
+
+1. Verify the exact object and its import identifier with bounded, authorized reads. Confirm it is not already managed at another address or by another state. Reject duplicate imports or two addresses claiming the same object.
+2. Capture the current values of fields this root will own, including intentional defaults and empty values. Review credentials, destructive effects, and partial ownership before asking for a credentialed preview.
+3. Add the explicit resource and native import together. A consumer may retain the import block as durable provenance. Keep imports literal when required by the admission policy, and preserve the object identity through review.
+4. Run an authorized preview. Require imports only for an adoption-only change: no creates, deletes, replacements, policy updates, or unexplained output changes. Treat discovered drift as a separate decision. Do not broaden `ignore_changes` until the plan becomes quiet.
+5. After review, deploy the exact saved import plan through the protected workflow. Imports change state even when no provider write permission is needed. Preserve the normal state lock and concurrency controls.
+6. Require a fresh zero-change plan before calling adoption complete. Keep the resource/import relationship reviewable, and confirm later default-branch execution sees the same configuration and state.
+
+[Terraform's import overview](https://developer.hashicorp.com/terraform/language/import) describes the configuration-based mechanism. Ownership, bounded reads, import-only acceptance, and retained provenance are consumer policy choices.
+
+### Deletion and ownership tests
+
+Test wrong identity, duplicate targets, duplicate real-object IDs, normalized defaults, unexpected replacement, and an external change to a field deliberately owned elsewhere. Verify the ignored field is precisely the one intended; `ignore_changes = all` can hide ownership mistakes. A mocked provider can test the control flow, while real import behavior still needs an authorized preview against the intended object.
+
+`prevent_destroy` only protects a resource while the relevant configuration remains present. Deleting the entire block also removes that protection. Enforce any staged deletion protocol through baseline comparison and saved-plan policy, including vanished resources and state-removal operations. A rule written in contributor documentation is not automatic enforcement. See the [lifecycle reference](https://developer.hashicorp.com/terraform/language/meta-arguments/lifecycle#prevent_destroy).
+
+## Optional recipe: derive write authority from the saved plan
+
+This pattern is useful when the provider and credential issuer support meaningfully narrower runtime permissions. It is not required for consumers that retain shared plan/apply credentials. It reduces the authority handed to the provider; it does not sandbox a job that can still obtain a broader identity.
+
+Keep three policies separate: which configuration may be evaluated, which mutations reviewers allow, and which credentials can perform those mutations. Accepting a resource into the first policy must not automatically add it to a write profile.
+
+1. Create the deployment's saved plan using the established planning identity. Export its JSON with the same pinned Terraform binary and protect both files as sensitive data.
+2. Validate the JSON format and all fields used for decisions. Reject unsupported format versions, incomplete plans, malformed changes, and unknown action combinations. Do not translate a parsing failure or missing required evidence into “no changes.” Use Terraform's [documented JSON representation](https://developer.hashicorp.com/terraform/internals/json-format), not printed summary text.
+3. Enforce the mutation policy before selecting a token. Inspect deletions, replacements, imports, state/output effects, and supported resource families. A permission profile is not approval for every action that profile can perform.
+4. Map accepted provider mutations to explicitly supported permission profiles. Require a reviewed profile for mixed change families; never take an unknown change as a reason to issue the broadest token.
+5. If elevation is needed, request a short-lived credential and verify granted scope against the requested profile when the issuer exposes that information. Unexpected permissions should stop the operation.
+6. Apply the same saved plan in a fresh controlled child process with the selected runtime credentials. Do not run a second plan under broader credentials or accept a candidate-selected plan path. Keep tool versions, configuration, and backend identity fixed.
+
+An illustrative decision table uses invented change families, not provider-specific permissions:
+
+| Accepted saved-plan content | Provider credential decision |
+| --- | --- |
+| No provider mutations | Keep the planning identity; do not elevate merely because the command is `.deploy`. |
+| Import-only work with reviewed read behavior | No provider-write elevation when the provider supports it; state-write authority and deployment approval still apply. |
+| Updates limited to service metadata | Request the explicitly defined metadata profile. |
+| Updates limited to routing rules | Request the explicitly defined routing profile. |
+| Mixed families | Use a separately reviewed combined profile or require separate deployments. |
+| Unsupported type, action, or incomplete classification | Stop; there is no broad fallback. |
+
+This assumes the provider obtains runtime credentials through a supported mechanism that can change between plan and apply without changing the saved configuration. Some providers capture credentials or settings from HCL/variables in the saved plan. Verify actual behavior; changing an environment variable does not necessarily override a credential embedded in that plan. Do not rewrite the saved plan to force a credential swap.
+
+### Verify classification and its limits
+
+Use synthetic plan JSON to cover each table row, malformed structures, unknown actions, replacements in both action orders, import metadata, and mixed-family changes. Assert rejected cases never call the issuer. Assert a no-change/import-only case never requests provider-write elevation, and an issuer returning a broader profile is rejected.
+
+At the wrapper boundary, record the saved-plan path and digest at classification and apply, prevent untrusted mutation between them, and prove that the same artifact is used. These identity checks do not make arbitrary co-resident code safe. Test the provider's supported credential transition in an isolated fixture before relying on it during a real deployment.
+
+Backend authorization remains separate: a provider-read identity does not make an import or state update read-only. Keep any issuer/root credential isolated from candidate code, and do not claim this profile selection is a security boundary against a compromised trusted runner.
 
 ## Credentials: describe the authority actually available
 

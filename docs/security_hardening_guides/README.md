@@ -1,5 +1,13 @@
 # Security hardening guides
 
+## TLDR
+
+- Terraform plans run code and can access credentials. Skipping apply does not make a PR safe to run.
+- These guides explain how to check PR changes, protect deployment credentials, and verify what actually happened.
+- Use the examples and failure tests to add these checks to your own Branch Deploy workflows.
+
+## How to use these guides
+
 These notes help maintainers and coding agents review Terraform workflows built around `GrantBirki/branch-deploy`. They explain where trust changes, which controls belong to the consumer workflow, and what evidence demonstrates that a deployment worked. The examples are generic and use no production infrastructure or credentials.
 
 Start with the workflow you actually run. A command named `.noop`, an approved PR, or a successful Actions run each proves something different. None proves that arbitrary code can safely run with deployment credentials.
@@ -14,6 +22,20 @@ Start with the workflow you actually run. A command named `.noop`, an approved P
 | [Contributing notes](CONTRIBUTING.md) | How do you add a public-safe finding, example, source, or regression recipe? |
 
 For the Action's exact inputs and current behavior, use [action.yml](../../action.yml), [usage](../usage.md), [trusted checkouts](../trusted-checkouts.md), and [result mode](../result-mode.md). These guides supplement those references; they do not define new Action inputs or automatically enable a Terraform policy.
+
+## Implementation recipes
+
+These recipes explain their assumptions, step order, synthetic examples, failure cases, and limitations. Adapt them to the consumer's pinned tools and authority model; they are not claims that a particular deployment has been tested.
+
+| Recipe | Implementation decision |
+| --- | --- |
+| [Order checks before Terraform](workflow-boundaries.md#recipe-order-the-checks-before-terraform) | Which inputs must be admitted before dependencies, backend access, or credentials are used? |
+| [Preserve failures during reporting](rollout-and-recovery.md#recipe-keep-reporting-from-hiding-failure) | How can diagnostics run without turning failed Terraform work into success? |
+| [Constrain baseline expressions](terraform-plans.md#recipe-constrain-expressions-even-when-they-match-the-baseline) | How can existing data-file edits remain previewable without approving every unchanged expression? |
+| [Limit credential exposure](workflow-boundaries.md#recipe-give-credentials-only-to-their-intended-process) | How are secrets parsed, stored, passed to Terraform, and removed? |
+| [Adopt existing objects](terraform-plans.md#recipe-adopt-an-existing-object-without-taking-over-unrelated-fields) | How are identity, partial ownership, imports, and deletion protections reviewed? |
+| [Diagnose a runner without deploying](rollout-and-recovery.md#optional-recipe-diagnose-a-runner-without-deploying) | How can protected configuration verify real access without applying or satisfying a deployment gate? |
+| [Select write authority from a saved plan](terraform-plans.md#optional-recipe-derive-write-authority-from-the-saved-plan) | When supported, how can credential scope follow the approved mutations without a broad fallback? |
 
 ## The trust model
 
