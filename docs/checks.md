@@ -30,7 +30,7 @@ This example shows how you can use the `checks` option to require all CI checks 
 
 ```yaml
 - name: branch-deploy
-  uses: GrantBirki/branch-deploy@vX.X.X # replace with the latest version of this Action
+  uses: grantbirki/branch-deploy@vX.X.X # replace with the latest version of this Action
   id: branch-deploy
   with:
     checks: "all" # all CI checks (required or not) must pass before a deployment can start to any environment
@@ -42,7 +42,7 @@ This example shows how you can use the `checks` option to require only the **req
 
 ```yaml
 - name: branch-deploy
-  uses: GrantBirki/branch-deploy@vX.X.X # replace with the latest version of this Action
+  uses: grantbirki/branch-deploy@vX.X.X # replace with the latest version of this Action
   id: branch-deploy
   with:
     checks: "required" # only required CI checks must pass before a deployment can start to any environment
@@ -57,7 +57,7 @@ The screenshot below demonstrates how this option works in a real-world scenario
 If you only care about a specific CI check, you can use the `checks` option with a comma-separated list of checks that must pass. For example, if you only care about the `test1` check, you can do the following:
 
 ```yaml
-- uses: GrantBirki/branch-deploy@vX.X.X # replace with the latest version of this Action
+- uses: grantbirki/branch-deploy@vX.X.X # replace with the latest version of this Action
   id: branch-deploy
   with:
     checks: 'test1' # we only care about the check named `test1`
@@ -74,7 +74,7 @@ Please note that just because you can _deploy_, doesn't always mean you can merg
 ### Example 4: Only certain CI checks are ignored
 
 ```yaml
-- uses: GrantBirki/branch-deploy@vX.X.X # replace with the latest version of this Action
+- uses: grantbirki/branch-deploy@vX.X.X # replace with the latest version of this Action
   id: branch-deploy
   with:
     ignored_checks: 'test2,test3' # these two checks are ignored and deployment will be allowed even if they are failing (and required)

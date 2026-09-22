@@ -30,7 +30,7 @@ const {nakedCommandCheck} =
   await import('../../src/functions/naked-command-check.ts')
 
 const docs =
-  'https://github.com/GrantBirki/branch-deploy/blob/main/docs/naked-commands.md'
+  'https://github.com/grantbirki/branch-deploy/blob/main/docs/naked-commands.md'
 
 let context: Parameters<NakedCommandModule['nakedCommandCheck']>[4]
 let octokit: Parameters<NakedCommandModule['nakedCommandCheck']>[3]

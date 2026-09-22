@@ -41,7 +41,7 @@ Using enforced deployment order can help maintain the integrity and stability of
 To enable enforced deployment order, set the `enforced_deployment_order` input in your workflow file. The value for `enforced_deployment_order` is a comma-separated string that specifies the order of environments from left to right. Here is an example configuration:
 
 ```yaml
-- uses: GrantBirki/branch-deploy@vX.X.X
+- uses: grantbirki/branch-deploy@vX.X.X
   id: branch-deploy
   with:
     environment_targets: development,staging,production # <-- these are the defined environments that are available for deployment
@@ -51,7 +51,7 @@ To enable enforced deployment order, set the `enforced_deployment_order` input i
 To ignore unrelated deployment records during order checks, opt in to the Branch Deploy scope:
 
 ```yaml
-- uses: GrantBirki/branch-deploy@vX.X.X
+- uses: grantbirki/branch-deploy@vX.X.X
   id: branch-deploy
   with:
     environment_targets: development,staging,production

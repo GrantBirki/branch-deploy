@@ -279,7 +279,7 @@ Branch Deploy v12 continues to use the GitHub Actions Node 24 runtime already de
 
 ### Who is affected
 
-Most users on GitHub-hosted runners and current v11 releases do not need to change anything. Users moving from older releases, self-hosted runner users, and GitHub Enterprise Server users should confirm that their runner fleet and server version support Node 24 JavaScript actions before moving production workflows to `GrantBirki/branch-deploy@v12`.
+Most users on GitHub-hosted runners and current v11 releases do not need to change anything. Users moving from older releases, self-hosted runner users, and GitHub Enterprise Server users should confirm that their runner fleet and server version support Node 24 JavaScript actions before moving production workflows to `grantbirki/branch-deploy@v12`.
 
 ### What should I do?
 
@@ -464,7 +464,7 @@ Give the Branch Deploy step an `id`, then consume either the scalar aliases or t
 ```yaml
 - name: Prepare branch deployment
   id: branch-deploy
-  uses: GrantBirki/branch-deploy@v12
+  uses: grantbirki/branch-deploy@v12
 
 - name: Run deployment
   if: steps.branch-deploy.outputs.decision == 'continue'

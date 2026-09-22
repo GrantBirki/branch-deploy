@@ -2,7 +2,7 @@
 
 This section contains real world and common examples of how you could use this Action
 
-> Note: Examples use `uses: GrantBirki/branch-deploy@vX.X.X` as a placeholder. Choose a version from [this repository's releases](https://github.com/GrantBirki/branch-deploy/releases), or pin its full commit SHA. Examples marked unreleased require a reviewed full commit SHA from `main`.
+> Note: Examples use `uses: grantbirki/branch-deploy@vX.X.X` as a placeholder. Choose a version from [this repository's releases](https://github.com/grantbirki/branch-deploy/releases), or pin its full commit SHA. Examples marked unreleased require a reviewed full commit SHA from `main`.
 
 ## Table of Contents
 
@@ -55,7 +55,7 @@ jobs:
       # The branch-deploy Action
       - name: branch-deploy
         id: branch-deploy
-        uses: GrantBirki/branch-deploy@vX.X.X
+        uses: grantbirki/branch-deploy@vX.X.X
 
         # If the branch-deploy Action was triggered, checkout our branch
       - uses: actions/checkout@v7.0.0
@@ -118,7 +118,7 @@ jobs:
       # The branch-deploy Action
       - name: branch-deploy
         id: branch-deploy
-        uses: GrantBirki/branch-deploy@vX.X.X
+        uses: grantbirki/branch-deploy@vX.X.X
 
         # If the branch-deploy Action was triggered, checkout our branch
       - name: Checkout
@@ -254,7 +254,7 @@ jobs:
     steps:
       - name: branch-deploy
         id: branch-deploy
-        uses: GrantBirki/branch-deploy@vX.X.X
+        uses: grantbirki/branch-deploy@vX.X.X
         with:
           trigger: ".deploy"
           sticky_locks: true
@@ -428,7 +428,7 @@ jobs:
     steps:
       - name: deployment check
         id: deployment-check
-        uses: GrantBirki/branch-deploy@vX.X.X
+        uses: grantbirki/branch-deploy@vX.X.X
         with:
           merge_deploy_mode: true
           environment: production
@@ -497,7 +497,7 @@ jobs:
     steps:
       - name: unlock on merge
         id: unlock-on-merge
-        uses: GrantBirki/branch-deploy@vX.X.X
+        uses: grantbirki/branch-deploy@vX.X.X
         with:
           unlock_on_merge_mode: true
           environment_targets: production
@@ -553,7 +553,7 @@ jobs:
       # The branch-deploy Action
       - name: branch-deploy
         id: branch-deploy
-        uses: GrantBirki/branch-deploy@vX.X.X
+        uses: grantbirki/branch-deploy@vX.X.X
 
         # If the branch-deploy Action was triggered, checkout our branch
       - name: Checkout
@@ -607,7 +607,7 @@ jobs:
       # The branch-deploy Action
       - name: branch-deploy
         id: branch-deploy
-        uses: GrantBirki/branch-deploy@vX.X.X
+        uses: grantbirki/branch-deploy@vX.X.X
 
         # If the branch-deploy Action was triggered, checkout our branch
       - name: Checkout
@@ -663,7 +663,7 @@ jobs:
 
     steps:
       # The branch-deploy Action
-      - uses: GrantBirki/branch-deploy@vX.X.X
+      - uses: grantbirki/branch-deploy@vX.X.X
         id: branch-deploy
 
         # If the branch-deploy Action was triggered, checkout our branch
@@ -719,7 +719,7 @@ jobs:
 
     steps:
       # The branch-deploy Action
-      - uses: GrantBirki/branch-deploy@vX.X.X
+      - uses: grantbirki/branch-deploy@vX.X.X
         id: branch-deploy
 
         # If the branch-deploy Action was triggered, checkout our branch
@@ -802,7 +802,7 @@ jobs:
 
     steps:
       # The branch-deploy Action
-      - uses: GrantBirki/branch-deploy@vX.X.X
+      - uses: grantbirki/branch-deploy@vX.X.X
         id: branch-deploy
 
         # If the branch-deploy Action was triggered, checkout our branch
@@ -874,7 +874,7 @@ jobs:
       sha: ${{ steps.branch-deploy.outputs.sha }}
       context: ${{ steps.branch-deploy.outputs.context }}
     steps:
-      - uses: GrantBirki/branch-deploy@vX.X.X
+      - uses: grantbirki/branch-deploy@vX.X.X
         id: branch-deploy
         with:
           skip_completing: true
@@ -910,7 +910,7 @@ jobs:
       deployments: write
       pull-requests: write
     steps:
-      - uses: GrantBirki/branch-deploy@vX.X.X
+      - uses: grantbirki/branch-deploy@vX.X.X
         with:
           result_mode: true
           context: ${{ needs.trigger.outputs.context }}
@@ -922,7 +922,7 @@ jobs:
 
 A detailed example using multiple jobs, custom deployment status creation, non-sticky lock removal, and comments. This example showcases building a static site with [hugo](https://gohugo.io/) and deploying it to [GitHub Pages](https://pages.github.com/).
 
-> This live example can be found [here](https://github.com/GrantBirki/blog/blob/559b9be5cc3eac923be5d7923ec9a0b50429ced2/.github/workflows/branch-deploy.yml)
+> This live example can be found [here](https://github.com/grantbirki/blog/blob/559b9be5cc3eac923be5d7923ec9a0b50429ced2/.github/workflows/branch-deploy.yml)
 
 ```yaml
 name: branch deploy
@@ -969,7 +969,7 @@ jobs:
 
     steps:
       # execute the branch-deploy action
-      - uses: GrantBirki/branch-deploy@vX.X.X
+      - uses: grantbirki/branch-deploy@vX.X.X
         id: branch-deploy
         with:
           trigger: '.deploy'
@@ -1154,7 +1154,7 @@ jobs:
       # if the deployment was successful, add a 'rocket' reaction to the comment that triggered the deployment
       - name: rocket reaction
         if: ${{ steps.deploy-status.outputs.DEPLOY_STATUS != 'failure' }}
-        uses: GrantBirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
+        uses: grantbirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
         with:
           comment-id: ${{ needs.trigger.outputs.comment_id }}
           reactions: rocket
@@ -1162,7 +1162,7 @@ jobs:
       # if the deployment failed, add a '-1' (thumbs down) reaction to the comment that triggered the deployment
       - name: failure reaction
         if: ${{ steps.deploy-status.outputs.DEPLOY_STATUS == 'failure' }}
-        uses: GrantBirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
+        uses: grantbirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
         with:
           comment-id: ${{ needs.trigger.outputs.comment_id }}
           reactions: '-1'
@@ -1196,7 +1196,7 @@ jobs:
 
 A detailed example using multiple jobs, custom deployment status creation, non-sticky lock removal, and comments - Using [Astro](https://astro.build) to create a static site and deploying to [GitHub Pages](https://pages.github.com/)
 
-> A live example can be found [here](https://github.com/GrantBirki/astrowind-hard-fork/blob/be29d05cc0f3fe04e37ade9d38c653ed55c6cf53/.github/workflows/branch-deploy.yml)
+> A live example can be found [here](https://github.com/grantbirki/astrowind-hard-fork/blob/be29d05cc0f3fe04e37ade9d38c653ed55c6cf53/.github/workflows/branch-deploy.yml)
 
 ```yaml
 name: branch deploy
@@ -1245,7 +1245,7 @@ jobs:
 
     steps:
       # execute the branch-deploy action
-      - uses: GrantBirki/branch-deploy@vX.X.X
+      - uses: grantbirki/branch-deploy@vX.X.X
         id: branch-deploy
         with:
           trigger: '.deploy'
@@ -1395,7 +1395,7 @@ jobs:
       # if the deployment was successful, add a 'rocket' reaction to the comment that triggered the deployment
       - name: rocket reaction
         if: ${{ steps.deploy-status.outputs.DEPLOY_STATUS != 'failure' }}
-        uses: GrantBirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
+        uses: grantbirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
         with:
           comment-id: ${{ needs.trigger.outputs.comment_id }}
           reactions: rocket
@@ -1403,7 +1403,7 @@ jobs:
       # if the deployment failed, add a '-1' (thumbs down) reaction to the comment that triggered the deployment
       - name: failure reaction
         if: ${{ steps.deploy-status.outputs.DEPLOY_STATUS == 'failure' }}
-        uses: GrantBirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
+        uses: grantbirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
         with:
           comment-id: ${{ needs.trigger.outputs.comment_id }}
           reactions: '-1'
@@ -1483,7 +1483,7 @@ jobs:
     steps:
       - name: Start Branch Deployment
         id: branch-deploy
-        uses: GrantBirki/branch-deploy@vX.X.X
+        uses: grantbirki/branch-deploy@vX.X.X
         with:
           environment: development
           environment_targets: development,staging,production
@@ -1696,7 +1696,7 @@ jobs:
       # Add a new reaction based on if the deployment succeeded or failed.
       - name: Add Reaction
         id: add-reaction
-        uses: GrantBirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
+        uses: grantbirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
         env:
           REACTION: ${{ env.DEPLOYMENT_STATUS == 'success' && 'rocket' || '-1' }}
         with:

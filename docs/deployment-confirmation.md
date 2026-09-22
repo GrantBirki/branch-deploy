@@ -23,7 +23,7 @@ The only reaction (👍 or 👎) that will be considered is the first reaction f
 ### Usage
 
 ```yaml
-      - uses: GrantBirki/branch-deploy@vX.X.X
+      - uses: grantbirki/branch-deploy@vX.X.X
         id: branch-deploy
         with:
           trigger: ".deploy"

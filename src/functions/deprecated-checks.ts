@@ -20,7 +20,7 @@ export interface DeprecatedChecksOctokit {
 // The old and common trigger for noop style deployments
 const oldNoopInput = '.deploy noop'
 const docsLink =
-  'https://github.com/GrantBirki/branch-deploy/blob/main/docs/deprecated.md'
+  'https://github.com/grantbirki/branch-deploy/blob/main/docs/deprecated.md'
 const thumbsDown = '-1'
 
 // A helper function to check against common inputs to see if they are deprecated

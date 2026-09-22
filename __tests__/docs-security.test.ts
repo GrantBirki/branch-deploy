@@ -219,7 +219,7 @@ test('the result-mode example uses trusted context and guards deployment reruns'
     /actions\/checkout|download-artifact|toJSON\(needs\)/u
   )
   const pins = Array.from(
-    example.matchAll(/uses: GrantBirki\/branch-deploy@(\S+)/gu),
+    example.matchAll(/uses: grantbirki\/branch-deploy@(\S+)/gu),
     match => match[1]
   )
   assert.strictEqual(pins.length, 2)

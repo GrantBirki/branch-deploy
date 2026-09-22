@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: unlock on merge
-        uses: GrantBirki/branch-deploy@vX.X.X
+        uses: grantbirki/branch-deploy@vX.X.X
         id: unlock-on-merge
         with:
           unlock_on_merge_mode: true # <-- indicates that this is the "Unlock on Merge Mode" workflow
@@ -41,7 +41,7 @@ jobs:
 
 ```yaml
 # .github/workflows/branch-deploy.yml
-- uses: GrantBirki/branch-deploy@vX.X.X
+- uses: grantbirki/branch-deploy@vX.X.X
   id: branch-deploy
   with:
     trigger: ".deploy"
@@ -51,7 +51,7 @@ jobs:
 
 # .github/workflows/unlock-on-merge.yml
 - name: unlock on merge
-  uses: GrantBirki/branch-deploy@vX.X.X
+  uses: grantbirki/branch-deploy@vX.X.X
   id: unlock-on-merge
   with:
     unlock_on_merge_mode: true # <-- indicates that this is the "Unlock on Merge Mode" workflow

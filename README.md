@@ -1,6 +1,6 @@
 # Branch Deploy Action 🚀
 
-[![test](https://github.com/GrantBirki/branch-deploy/actions/workflows/test.yml/badge.svg)](https://github.com/GrantBirki/branch-deploy/actions/workflows/test.yml) [![acceptance](https://github.com/GrantBirki/branch-deploy/actions/workflows/acceptance.yml/badge.svg)](https://github.com/GrantBirki/branch-deploy/actions/workflows/acceptance.yml) [![package-check](https://github.com/GrantBirki/branch-deploy/actions/workflows/package-check.yml/badge.svg)](https://github.com/GrantBirki/branch-deploy/actions/workflows/package-check.yml) [![lint](https://github.com/GrantBirki/branch-deploy/actions/workflows/lint.yml/badge.svg)](https://github.com/GrantBirki/branch-deploy/actions/workflows/lint.yml) [![actions-config-validation](https://github.com/GrantBirki/branch-deploy/actions/workflows/actions-config-validation.yml/badge.svg)](https://github.com/GrantBirki/branch-deploy/actions/workflows/actions-config-validation.yml) [![coverage](./badges/coverage.svg)](./badges/coverage.svg)
+[![test](https://github.com/grantbirki/branch-deploy/actions/workflows/test.yml/badge.svg)](https://github.com/grantbirki/branch-deploy/actions/workflows/test.yml) [![acceptance](https://github.com/grantbirki/branch-deploy/actions/workflows/acceptance.yml/badge.svg)](https://github.com/grantbirki/branch-deploy/actions/workflows/acceptance.yml) [![package-check](https://github.com/grantbirki/branch-deploy/actions/workflows/package-check.yml/badge.svg)](https://github.com/grantbirki/branch-deploy/actions/workflows/package-check.yml) [![lint](https://github.com/grantbirki/branch-deploy/actions/workflows/lint.yml/badge.svg)](https://github.com/grantbirki/branch-deploy/actions/workflows/lint.yml) [![actions-config-validation](https://github.com/grantbirki/branch-deploy/actions/workflows/actions-config-validation.yml/badge.svg)](https://github.com/grantbirki/branch-deploy/actions/workflows/actions-config-validation.yml) [![coverage](./badges/coverage.svg)](./badges/coverage.svg)
 
 A GitHub Action to enable branch deployments using IssueOps!
 
@@ -62,7 +62,7 @@ Basic usage assuming all defaults:
 ```yaml
 - name: branch-deploy
   id: branch-deploy
-  uses: GrantBirki/branch-deploy@vX.X.X
+  uses: grantbirki/branch-deploy@vX.X.X
 ```
 
 Advanced usage with custom configuration:
@@ -70,7 +70,7 @@ Advanced usage with custom configuration:
 ```yaml
 - name: branch-deploy
   id: branch-deploy
-  uses: GrantBirki/branch-deploy@vX.X.X
+  uses: grantbirki/branch-deploy@vX.X.X
   with:
     trigger: ".deploy"
     noop_trigger: ".noop"
@@ -106,7 +106,7 @@ jobs:
     steps:
       # Execute IssueOps branch deployment logic, hooray!
       # This will be used to "gate" all future steps below and conditionally trigger steps/deployments
-      - uses: GrantBirki/branch-deploy@vX.X.X
+      - uses: grantbirki/branch-deploy@vX.X.X
         id: branch-deploy
         with:
           trigger: ".deploy"
@@ -227,7 +227,7 @@ Sets up your `demo` job, uses an ubuntu runner, and checks out your repo - Just 
 
 ```yaml
       # Execute IssueOps branch deployment logic, hooray!
-      - uses: GrantBirki/branch-deploy@vX.X.X
+      - uses: grantbirki/branch-deploy@vX.X.X
         id: branch-deploy
         with:
           trigger: ".deploy"
@@ -417,7 +417,7 @@ jobs:
     environment: production-secrets # custom environment for storing secrets
     runs-on: ubuntu-latest
     steps:
-      - uses: GrantBirki/branch-deploy@vX.X.X
+      - uses: grantbirki/branch-deploy@vX.X.X
         id: branch-deploy
         with:
           trigger: ".deploy"
@@ -457,7 +457,7 @@ This also works with noop commands as well
 YAML input example:
 
 ```yaml
-- uses: GrantBirki/branch-deploy@vX.X.X
+- uses: grantbirki/branch-deploy@vX.X.X
   id: branch-deploy
   with:
     trigger: ".deploy"
@@ -552,7 +552,7 @@ It should be noted that if you do not have pull request approvals enabled in you
 Here is a simple example using only handles below (the monalisa and octocat users will be treated as admins):
 
 ```yaml
-- uses: GrantBirki/branch-deploy@vX.X.X
+- uses: grantbirki/branch-deploy@vX.X.X
   id: branch-deploy
   with:
     admins: monalisa,octocat
@@ -561,7 +561,7 @@ Here is a simple example using only handles below (the monalisa and octocat user
 Here is an example using a mix of GitHub handles and a GitHub org team below:
 
 ```yaml
-- uses: GrantBirki/branch-deploy@vX.X.X
+- uses: grantbirki/branch-deploy@vX.X.X
   id: branch-deploy
   with:
     admins: monalisa,octocat,octo-awesome-org/octo-awesome-team
@@ -580,7 +580,7 @@ Pin this Action to a full commit SHA or an exact release tag for stable usage.
 
 ### Actions Tag Pinning
 
-Choose a version from [this repository's releases](https://github.com/GrantBirki/branch-deploy/releases) and use its exact tag, such as `GrantBirki/branch-deploy@v12.0.0`. The `v12` major tag moves to newer verified releases in that major version; it does not pin an exact version.
+Choose a version from [this repository's releases](https://github.com/grantbirki/branch-deploy/releases) and use its exact tag, such as `grantbirki/branch-deploy@v12.0.0`. The `v12` major tag moves to newer verified releases in that major version; it does not pin an exact version.
 
 ### Actions SHA Pinning
 
@@ -642,7 +642,7 @@ jobs:
       startsWith(github.event.comment.body, '.unlock')) }}
     runs-on: ubuntu-latest
     steps:
-      - uses: GrantBirki/branch-deploy@vX.X.X # replace with the latest version
+      - uses: grantbirki/branch-deploy@vX.X.X # replace with the latest version
         id: branch-deploy
         with:
           trigger: ".deploy"
@@ -685,7 +685,7 @@ Check out some of the links below to see how others are using this Action in the
 - [the-hideout/cloudflare](https://github.com/the-hideout/cloudflare/blob/3f3adedb729b9aba0cc324a161ad8ddd6f56141b/.github/workflows/branch-deploy.yml)
 - [the-hideout/tarkov-api](https://github.com/the-hideout/tarkov-api/blob/1677543951d5f2a848c2650eb3400178b8f9a55b/.github/workflows/branch-deploy.yml)
 - [the-hideout/stash](https://github.com/the-hideout/stash/blob/aef5a5f16b4fa6946d2eba107e7b92c5f6583c0d/.github/workflows/branch-deploy.yml)
-- [GrantBirki/blog](https://github.com/GrantBirki/blog/blob/559b9be5cc3eac923be5d7923ec9a0b50429ced2/.github/workflows/branch-deploy.yml)
+- [grantbirki/blog](https://github.com/grantbirki/blog/blob/559b9be5cc3eac923be5d7923ec9a0b50429ced2/.github/workflows/branch-deploy.yml)
 
 > Are you using this Action in a cool new way? Open a pull request to this repo to have your workflow added to the list above!
 

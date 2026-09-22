@@ -27,7 +27,7 @@ If you want to **enforce** non-naked commands as the default for your project, y
 By setting the following input option (`disable_naked_commands`), you can disable naked commands for your project. This means that users will have to specify an environment for their command to run.
 
 ```yaml
-- uses: GrantBirki/branch-deploy@vX.X.X
+- uses: grantbirki/branch-deploy@vX.X.X
   id: branch-deploy
   with:
     disable_naked_commands: true # <--- this option must be true to disable naked commands

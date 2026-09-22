@@ -98,7 +98,7 @@ Some workflows do not need deployment locking. Mobile pipelines that upload inde
 Set `disable_lock: true` only after confirming that concurrent deployments cannot conflict and that any shared infrastructure or remote state has its own serialization policy:
 
 ```yaml
-- uses: GrantBirki/branch-deploy@v12
+- uses: grantbirki/branch-deploy@v12
   with:
     disable_lock: true
 ```

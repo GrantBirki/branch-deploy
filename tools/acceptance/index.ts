@@ -1032,7 +1032,7 @@ const scenarios = [
           'application/vnd.github.merge-info-preview+json'
         )
         assert.equal(
-          graphqlRoute.userAgent.includes('GrantBirki/branch-deploy@'),
+          graphqlRoute.userAgent.includes('grantbirki/branch-deploy@'),
           true
         )
         const deploymentBody = routeBody(

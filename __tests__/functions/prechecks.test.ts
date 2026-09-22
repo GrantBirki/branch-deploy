@@ -6617,7 +6617,7 @@ test('runs prechecks when an exact sha is set, and the sha deployment feature is
 
   assertCalledWith(
     warningMock,
-    `⚠️ sha deployments are ${COLORS.warning}unsafe${COLORS.reset} as they bypass all checks - read more here: https://github.com/GrantBirki/branch-deploy/blob/main/docs/sha-deployments.md`
+    `⚠️ sha deployments are ${COLORS.warning}unsafe${COLORS.reset} as they bypass all checks - read more here: https://github.com/grantbirki/branch-deploy/blob/main/docs/sha-deployments.md`
   )
 
   assertCalledWith(setOutputMock, 'sha_deployment', data.environmentObj.sha)

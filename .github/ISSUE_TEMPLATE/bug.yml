@@ -29,7 +29,7 @@ body:
         ```yaml
         - name: branch-deploy
           id: branch-deploy
-          uses: GrantBirki/branch-deploy@vX.X.X
+          uses: grantbirki/branch-deploy@vX.X.X
           with:
             trigger: ".deploy"
             environment: "production"
