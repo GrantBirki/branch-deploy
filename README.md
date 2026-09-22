@@ -267,7 +267,7 @@ As seen above, we have two steps. One for a noop deploy, and one for a regular d
 
 ## Inputs 📥
 
-> **Unreleased:** `enable_pr_stacks` and `result_mode`, including its context and result inputs and outputs, are available on `main` but are not included in `v12.0.0` or `v12`. To try them before release, pin a reviewed full commit SHA from this repository. See [PR stacks](docs/pr-stacks.md) and [result mode](docs/result-mode.md).
+> **Version:** `enable_pr_stacks` and `result_mode`, including its context and result inputs and outputs, require `v12.1.0` or later. See [PR stacks](docs/pr-stacks.md) and [result mode](docs/result-mode.md).
 
 | Input | Required? | Default | Description |
 | ----- | --------- | ------- | ----------- |
@@ -580,7 +580,7 @@ Pin this Action to a full commit SHA or an exact release tag for stable usage.
 
 ### Actions Tag Pinning
 
-Choose a version from [this repository's releases](https://github.com/grantbirki/branch-deploy/releases) and use its exact tag, such as `grantbirki/branch-deploy@v12.0.0`. The `v12` major tag moves to newer verified releases in that major version; it does not pin an exact version.
+Choose a version from [this repository's releases](https://github.com/grantbirki/branch-deploy/releases) and use its exact tag, such as `grantbirki/branch-deploy@v12.1.0`. The `v12` major tag moves to newer verified releases in that major version; it does not pin an exact version.
 
 ### Actions SHA Pinning
 
@@ -600,7 +600,7 @@ Checkout the [merge commit workflow strategy](docs/merge-commit-strategy.md) for
 
 ## Manual Deployment Control
 
-> **Unreleased:** Result mode is available on `main` but is not included in `v12.0.0` or `v12`. Pin both invocations to the same reviewed full commit SHA from this repository to try it before release.
+> **Version:** Result mode requires `v12.1.0` or later. Pin both invocations to the same full immutable commit SHA from this repository.
 
 For deployments that span jobs, set `skip_completing: true` on the initial invocation and use [result mode](docs/result-mode.md) in a final job. It handles deployment and noop completion using the original context. See the [multiple-jobs example](docs/examples.md#multiple-jobs).
 
