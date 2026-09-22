@@ -27,15 +27,16 @@ Transient failures can be retried from the original workflow run. A matching exa
 Verify an immutable release with:
 
 ```bash
-gh release verify v12.0.0 --repo GrantBirki/branch-deploy
+gh release verify v12.0.0 --repo grantbirki/branch-deploy
 ```
 
-Verify a downloaded action file with:
+Verify a downloaded action file with the repository's canonical name, since the attestation signer identity is case-sensitive:
 
 ```bash
+repository="$(gh api repos/grantbirki/branch-deploy --jq .full_name)"
 gh attestation verify dist/index.js \
-  --repo GrantBirki/branch-deploy \
-  --signer-workflow GrantBirki/branch-deploy/.github/workflows/release.yml
+  --repo "$repository" \
+  --signer-workflow "$repository/.github/workflows/release.yml"
 ```
 
 The direct file attestations provide build provenance, while the immutable release attestation binds the exact annotated tag to its source commit. This single-workflow design is intentionally not described as SLSA Build Level 3 because it does not use an isolated reusable build boundary.

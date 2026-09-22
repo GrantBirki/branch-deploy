@@ -35989,7 +35989,7 @@ function logParameterMismatch(branch, ruleType, key, failed_checks) {
 function logWarnings(failed_checks) {
     if (failed_checks.length > 0) {
         warning(`😨 the following branch ruleset warnings were detected: ${failed_checks.join(', ')}`);
-        warning(`📚 your branch ruleset settings may be insecure - please review the documentation: https://github.com/GrantBirki/branch-deploy/blob/main/docs/branch-rulesets.md`);
+        warning(`📚 your branch ruleset settings may be insecure - please review the documentation: https://github.com/grantbirki/branch-deploy/blob/main/docs/branch-rulesets.md`);
     }
 }
 
@@ -39671,7 +39671,7 @@ function evaluatePrecheckGates({ allowDraftDeploy, allowShaDeployments, commitOi
                 { level: 'info', message },
                 {
                     level: 'warning',
-                    message: `⚠️ sha deployments are ${COLORS.warning}unsafe${COLORS.reset} as they bypass all checks - read more here: https://github.com/GrantBirki/branch-deploy/blob/main/docs/sha-deployments.md`
+                    message: `⚠️ sha deployments are ${COLORS.warning}unsafe${COLORS.reset} as they bypass all checks - read more here: https://github.com/grantbirki/branch-deploy/blob/main/docs/sha-deployments.md`
                 },
                 {
                     level: 'debug',
@@ -43634,7 +43634,7 @@ async function runResultOperation(request) {
 
 
 const defaultSpecificMessage = '<something went wrong - please report this>';
-const usageGuideLink = 'https://github.com/GrantBirki/branch-deploy/blob/main/docs/usage.md';
+const usageGuideLink = 'https://github.com/grantbirki/branch-deploy/blob/main/docs/usage.md';
 function isChecksArray(value) {
     return typeof value !== 'string';
 }
@@ -44187,7 +44187,7 @@ function analyzeIssueCommand(body, config) {
 
 // The old and common trigger for noop style deployments
 const oldNoopInput = '.deploy noop';
-const docsLink = 'https://github.com/GrantBirki/branch-deploy/blob/main/docs/deprecated.md';
+const docsLink = 'https://github.com/grantbirki/branch-deploy/blob/main/docs/deprecated.md';
 const deprecated_checks_thumbsDown = '-1';
 // A helper function to check against common inputs to see if they are deprecated
 // :param body: The content body of the message being checked (String)
@@ -44234,7 +44234,7 @@ async function isDeprecated(body, octokit, context) {
 
 
 const naked_command_check_thumbsDown = '-1';
-const docs = 'https://github.com/GrantBirki/branch-deploy/blob/main/docs/naked-commands.md';
+const docs = 'https://github.com/grantbirki/branch-deploy/blob/main/docs/naked-commands.md';
 // Helper function to check if a naked command was issued
 // :param body: The body of the issueops command
 // :param param_separator: The separator used to seperate the command from the parameters
@@ -44362,7 +44362,7 @@ async function post() {
         }
         // Create an octokit client with the retry plugin
         const octokit = getOctokit(token, {
-            userAgent: `GrantBirki/branch-deploy@${src_version_VERSION}`,
+            userAgent: `grantbirki/branch-deploy@${src_version_VERSION}`,
             additionalPlugins: [retry]
         });
         info(`🧑‍🚀 commit SHA: ${COLORS.highlight}${data.sha}${COLORS.reset}`);
@@ -44609,7 +44609,7 @@ function main_terminal(operation, outcome) {
 async function run() {
     let operation = 'none';
     try {
-        info(`🛸 GrantBirki/branch-deploy ${COLORS.info}${src_version_VERSION}${COLORS.reset}`);
+        info(`🛸 grantbirki/branch-deploy ${COLORS.info}${src_version_VERSION}${COLORS.reset}`);
         debug(`context: ${JSON.stringify(github_context)}`);
         const token = getActionInput('github_token', { required: true });
         if (getActionInput('result_mode') !== '' &&
@@ -44618,7 +44618,7 @@ async function run() {
             saveActionState('isPost', 'true');
             saveActionState('bypass', 'true');
             const resultOctokit = getOctokit(token, {
-                userAgent: `GrantBirki/branch-deploy@${src_version_VERSION}`,
+                userAgent: `grantbirki/branch-deploy@${src_version_VERSION}`,
                 additionalPlugins: [retry]
             });
             return finish(await runResultOperation({
@@ -44629,7 +44629,7 @@ async function run() {
         }
         const inputs = getInputs();
         const octokit = getOctokit(token, {
-            userAgent: `GrantBirki/branch-deploy@${src_version_VERSION}`,
+            userAgent: `grantbirki/branch-deploy@${src_version_VERSION}`,
             additionalPlugins: [retry]
         });
         saveActionState('isPost', 'true');

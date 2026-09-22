@@ -64,7 +64,7 @@ The `params` and `parsed_params` outputs can be accessed just like any other out
 ```yaml
 - name: branch-deploy
   id: branch-deploy
-  uses: GrantBirki/branch-deploy@vX.X.X
+  uses: grantbirki/branch-deploy@vX.X.X
   with:
     trigger: .deploy
     param_separator: "|"

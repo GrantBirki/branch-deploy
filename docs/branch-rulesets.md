@@ -11,7 +11,7 @@ It should be noted that if you have a good reason to *not* use any of these rule
 Example:
 
 ```yaml
-- uses: GrantBirki/branch-deploy@vX.X.X
+- uses: grantbirki/branch-deploy@vX.X.X
   id: branch-deploy
   with:
     use_security_warnings: false # <-- this will disable all warnings in the logs related to branch rulesets

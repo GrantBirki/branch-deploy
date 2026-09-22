@@ -66,7 +66,7 @@ export async function run(): Promise<RunResult> {
   let operation: Operation = 'none'
   try {
     core.info(
-      `🛸 GrantBirki/branch-deploy ${COLORS.info}${VERSION}${COLORS.reset}`
+      `🛸 grantbirki/branch-deploy ${COLORS.info}${VERSION}${COLORS.reset}`
     )
     core.debug(`context: ${JSON.stringify(context)}`)
 
@@ -79,7 +79,7 @@ export async function run(): Promise<RunResult> {
       saveActionState('isPost', 'true')
       saveActionState('bypass', 'true')
       const resultOctokit = github.getOctokit(token, {
-        userAgent: `GrantBirki/branch-deploy@${VERSION}`,
+        userAgent: `grantbirki/branch-deploy@${VERSION}`,
         additionalPlugins: [retry]
       })
       return finish(
@@ -92,7 +92,7 @@ export async function run(): Promise<RunResult> {
     }
     const inputs = getInputs()
     const octokit = github.getOctokit(token, {
-      userAgent: `GrantBirki/branch-deploy@${VERSION}`,
+      userAgent: `grantbirki/branch-deploy@${VERSION}`,
       additionalPlugins: [retry]
     })
     saveActionState('isPost', 'true')

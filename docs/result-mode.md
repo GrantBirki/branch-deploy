@@ -44,7 +44,7 @@ result:
     deployments: write
     pull-requests: write
   steps:
-    - uses: GrantBirki/branch-deploy@vX.X.X
+    - uses: grantbirki/branch-deploy@vX.X.X
       with:
         result_mode: true
         context: ${{ needs.trigger.outputs.context }}

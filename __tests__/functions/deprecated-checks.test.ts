@@ -19,7 +19,7 @@ installModuleMock(mock, new URL('../../src/actions-core.ts', import.meta.url), {
 const {isDeprecated} = await import('../../src/functions/deprecated-checks.ts')
 
 const docsLink =
-  'https://github.com/GrantBirki/branch-deploy/blob/main/docs/deprecated.md'
+  'https://github.com/grantbirki/branch-deploy/blob/main/docs/deprecated.md'
 
 let context: Parameters<typeof isDeprecated>[2]
 let octokit: Parameters<typeof isDeprecated>[1]

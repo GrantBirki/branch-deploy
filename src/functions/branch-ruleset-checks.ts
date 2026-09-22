@@ -174,7 +174,7 @@ function logWarnings(failed_checks: string[]): void {
       `😨 the following branch ruleset warnings were detected: ${failed_checks.join(', ')}`
     )
     core.warning(
-      `📚 your branch ruleset settings may be insecure - please review the documentation: https://github.com/GrantBirki/branch-deploy/blob/main/docs/branch-rulesets.md`
+      `📚 your branch ruleset settings may be insecure - please review the documentation: https://github.com/grantbirki/branch-deploy/blob/main/docs/branch-rulesets.md`
     )
   }
 }

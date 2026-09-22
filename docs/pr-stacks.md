@@ -9,7 +9,7 @@ GitHub's [native pull request stacks](https://docs.github.com/en/pull-requests/g
 Add the input to your existing Branch Deploy step:
 
 ```yaml
-- uses: GrantBirki/branch-deploy@vX.X.X
+- uses: grantbirki/branch-deploy@vX.X.X
   id: branch-deploy
   with:
     enable_pr_stacks: true
