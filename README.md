@@ -511,6 +511,8 @@ This protection applies only to the workflow definition. Pull request code check
 
 If your workflow checks out pull request code, review the [trusted checkout hardening guide](docs/trusted-checkouts.md). It explains how to keep deployment helpers on a trusted default-branch checkout while deploying the exact working commit selected by Branch Deploy. Custom deployment templates are fetched separately from the repository at the exact trusted workflow SHA.
 
+For Terraform planning policies, provider integrity, rollout edge cases, and safe regression examples, see the [security hardening guides](docs/security_hardening_guides/README.md). Maintainers and coding agents can extend them using the [contribution notes](docs/security_hardening_guides/CONTRIBUTING.md).
+
 To further harden your workflow files, it is strongly suggested to include the base permissions that this Action needs to run:
 
 ```yaml
