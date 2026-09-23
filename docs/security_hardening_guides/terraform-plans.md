@@ -6,6 +6,7 @@
 - Let routine settings changes plan before review only when trusted checks limit what they can do. Require approval for provider changes.
 - Verify provider packages before running them, and check an existing object's identity and ownership before importing it.
 - Use imports for existing objects. New resources do not need imports, and completed imports can be removed after verification.
+- Keep routine edits small. Test the unsafe behavior a check prevents without copying today's resource inventory into tests.
 
 ## Why plans need checks
 
@@ -41,6 +42,40 @@ Choose the smallest configuration subset that supports ordinary work. This examp
 Resource type alone is not enough. An attribute that selects an endpoint, file, command, or template may change plan-time behavior even when its value is a plain string. New imports can cause reads broader than the one object shown in configuration. Document those properties when admitting a provider capability.
 
 Keep the policy about behavior rather than a second inventory of resource names and IDs. Routine configuration changes should not require editing lists of production values in tests or docs. A new capability with different execution or permission behavior deserves a separate policy review.
+
+## Recipe: keep security checks maintainable
+
+Use this recipe when ordinary Terraform edits repeatedly require changes to guard code, tests, and documentation. Repeated policy copies can disagree, and exceptions added to satisfy each new PR can weaken the original restriction. The goal is one clear rule for each security decision, with tests that show the rule still works. This is consumer design guidance, not an additional Branch Deploy feature or a change to this Action's own test requirements.
+
+Start by tracing one supported unapproved plan and one rejected candidate through the actual workflow. Identify which protected code admits the configuration, verifies executable dependencies, obtains credentials, and selects the saved plan for apply. Record what each check prevents before deleting or combining it. Checks at different trust boundaries may look similar but protect different inputs.
+
+### Keep facts with their owner
+
+| Fact | Authoritative place | Maintenance rule |
+| --- | --- | --- |
+| Resource names, IDs, settings, and import targets | Terraform configuration and its reviewed data files | Validate structure and relationships without maintaining a second inventory. |
+| Selected dependency versions and package digests | The consumer's version constraints, lockfile, and release evidence | Derive consistency checks from those inputs; keep independent producer verification. |
+| Allowed publishers, backend identity, supported syntax, and review policy | Protected configuration or tooling | Candidate input cannot redefine the policy used to approve itself. |
+| Permissions required by a supported operation | A reviewed mapping in protected tooling, where scoped credentials are supported | Keep independent expected-permission tests; do not calculate the test's expected result from the mapping being tested. |
+| Deployment and recovery rules | Durable operator guidance | Update when behavior changes, not on every resource or version change. |
+
+Prefer native installation and validation features to another wrapper where they establish the required property. Terraform validation still does not replace the pre-execution admission check. Reuse a parsed representation where practical; avoid several partial parsers with different interpretations of the same input. A restricted checker must continue to reject syntax it cannot safely inspect. Broader language support needs a deliberate parser and policy decision.
+
+### Keep tests tied to failures
+
+Use small synthetic fixtures with dummy credentials. Each test should say which mistake it catches and prove an observable result, such as rejection before a credential request or provider process starts. The permission-selection cases below apply to consumers that support scoped runtime credentials.
+
+| Change under test | Useful assertion |
+| --- | --- |
+| An ordinary admitted value edit or new instance of an admitted type | The existing unapproved-plan path accepts it without changing trusted policy. |
+| A provider upgrade | Verification and approval remain required; altered bytes, an unexpected producer, or an unapproved commit stop before execution. |
+| A new unsupported expression, provider, or backend change | The protected guard rejects it or takes the explicitly configured review-required path before credentials. |
+| A newly supported write operation | It receives only the independently reviewed permissions; an unsupported operation cannot request a broad fallback token. |
+| A no-change plan or malformed plan | The former does not trigger provider-write elevation; the latter is rejected, not interpreted as an empty plan. |
+
+Keep targeted integration tests for workflow ordering and real installation behavior. Avoid tests that only match incidental shell spelling, count helper files, or repeat current versions and IDs. Coverage reports can reveal missing cases, but a percentage alone does not prove the boundary. Preserve the repository's existing test contract unless changing it is an explicitly reviewed part of the work.
+
+Before finishing a simplification, compare the allowed and rejected cases with the old implementation and explain any intentional policy change. Fewer lines or more helper files do not establish that the design is simpler. A useful result reduces the rules maintainers must understand and the files a routine edit must touch while preserving provider verification, protected executable code, credential limits, and apply approval. Credential changes and deployment remain separate operations.
 
 ## Freeze executable controls, then inspect every input
 
@@ -259,7 +294,7 @@ Keep three policies separate: which configuration may be evaluated, which mutati
 1. Create the deployment's saved plan using the established planning identity. Export its JSON with the same pinned Terraform binary and protect both files as sensitive data.
 2. Validate the JSON format and all fields used for decisions. Reject unsupported format versions, incomplete plans, malformed changes, and unknown action combinations. Do not translate a parsing failure or missing required evidence into “no changes.” Use Terraform's [documented JSON representation](https://developer.hashicorp.com/terraform/internals/json-format), not printed summary text.
 3. Enforce the mutation policy before selecting a token. Inspect deletions, replacements, imports, state/output effects, and supported resource families. A permission profile is not approval for every action that profile can perform.
-4. Map accepted provider mutations to explicitly supported permission profiles. Require a reviewed profile for mixed change families; never take an unknown change as a reason to issue the broadest token.
+4. Map accepted provider mutations to explicitly supported permissions. For mixed change families, use a reviewed composition rule or combined profile; never take an unknown change as a reason to issue the broadest token. Where independent permission sets can safely be combined, one protected mapping and a tested composition rule can avoid a named profile for every combination. Review issuer constraints and any operation-specific restrictions before permitting composition.
 5. If elevation is needed, request a short-lived credential and verify granted scope against the requested profile when the issuer exposes that information. Unexpected permissions should stop the operation.
 6. Apply the same saved plan in a fresh controlled child process with the selected runtime credentials. Do not run a second plan under broader credentials or accept a candidate-selected plan path. Keep tool versions, configuration, and backend identity fixed.
 
@@ -271,7 +306,7 @@ An illustrative decision table uses invented change families, not provider-speci
 | Import-only work with reviewed read behavior | No provider-write elevation when the provider supports it; state-write authority and deployment approval still apply. |
 | Updates limited to service metadata | Request the explicitly defined metadata profile. |
 | Updates limited to routing rules | Request the explicitly defined routing profile. |
-| Mixed families | Use a separately reviewed combined profile or require separate deployments. |
+| Mixed families | Use the reviewed composition rule or combined profile, or require separate deployments. |
 | Unsupported type, action, or incomplete classification | Stop; there is no broad fallback. |
 
 This assumes the provider obtains runtime credentials through a supported mechanism that can change between plan and apply without changing the saved configuration. Some providers capture credentials or settings from HCL/variables in the saved plan. Verify actual behavior; changing an environment variable does not necessarily override a credential embedded in that plan. Do not rewrite the saved plan to force a credential swap.

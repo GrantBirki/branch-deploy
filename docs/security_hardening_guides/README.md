@@ -32,6 +32,7 @@ These recipes explain their assumptions, step order, synthetic examples, failure
 | [Order checks before Terraform](workflow-boundaries.md#recipe-order-the-checks-before-terraform) | Which inputs must be admitted before dependencies, backend access, or credentials are used? |
 | [Preserve failures during reporting](rollout-and-recovery.md#recipe-keep-reporting-from-hiding-failure) | How can diagnostics run without turning failed Terraform work into success? |
 | [Constrain baseline expressions](terraform-plans.md#recipe-constrain-expressions-even-when-they-match-the-baseline) | How can existing data-file edits remain previewable without approving every unchanged expression? |
+| [Keep checks maintainable](terraform-plans.md#recipe-keep-security-checks-maintainable) | How can routine changes stay small while tests protect the security boundary? |
 | [Limit credential exposure](workflow-boundaries.md#recipe-give-credentials-only-to-their-intended-process) | How are secrets parsed, stored, passed to Terraform, and removed? |
 | [Adopt existing objects](terraform-plans.md#recipe-adopt-an-existing-object-without-taking-over-unrelated-fields) | How are identity, partial ownership, imports, and deletion protections reviewed? |
 | [Diagnose a runner without deploying](rollout-and-recovery.md#optional-recipe-diagnose-a-runner-without-deploying) | How can protected configuration verify real access without applying or satisfying a deployment gate? |
