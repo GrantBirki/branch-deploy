@@ -5,6 +5,7 @@
 - A `.noop` runs provider code. That code can use the credentials and network access available to the process.
 - Let routine settings changes plan before review only when trusted checks limit what they can do. Require approval for provider changes.
 - Verify provider packages before running them, and check an existing object's identity and ownership before importing it.
+- Use imports for existing objects. New resources do not need imports, and completed imports can be removed after verification.
 
 ## Why plans need checks
 
@@ -232,6 +233,16 @@ Here, `tags` belongs to the other controller; ignoring it is an ownership choice
 6. Require a fresh zero-change plan before calling adoption complete. Keep the resource/import relationship reviewable, and confirm later default-branch execution sees the same configuration and state.
 
 [Terraform's import overview](https://developer.hashicorp.com/terraform/language/import) describes the configuration-based mechanism. Ownership, bounded reads, import-only acceptance, and retained provenance are consumer policy choices.
+
+### New resources and completed imports
+
+An import adopts an object that already exists. A new resource should instead produce a reviewed creation plan. Do not require a matching import for every resource or invent an import ID to satisfy a checker. A consumer's import validation can require every import to target a declared resource, reject duplicate targets and object identities, and restrict identifiers to reviewed literal values without requiring imports for new or already-managed resources.
+
+[Terraform permits removing completed import blocks](https://developer.hashicorp.com/terraform/language/import/single-resource#post-import-tasks). First verify successful adoption and a fresh zero-change plan, then remove only the import blocks in a separate change and require another zero-change plan. Keep the resource configuration; removing it can propose destruction. Retaining imports as history is also valid. Neither choice replaces state backups, ownership review, or checks on the actual saved plan.
+
+Making imports optional does not make arbitrary configuration safe to plan or grant permission to create infrastructure. Preserve the provider, configuration, credential, and deployment controls described above. If the consumer previously required imports through a checker loaded from its protected default branch, land that policy change before submitting cleanup that the old checker rejects. Never execute candidate tooling with production credentials to bypass the old rule.
+
+Test the distinction with synthetic configuration: a new resource without an import should pass admission, as should a mix of imported and new resources. An import targeting an undeclared resource, duplicate target, or invalid identifier should still fail. A resource without an import must still pass every other admission check. A static checker cannot establish that adoption has completed; use the intended state and the authorized plan to verify that.
 
 ### Deletion and ownership tests
 
