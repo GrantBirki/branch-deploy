@@ -660,7 +660,7 @@ jobs:
 
 ## Examples
 
-Start with the hardened workflow when a deployment can access credentials or other privileged capabilities. The remaining examples demonstrate specific integrations and migration patterns and may require additional hardening.
+For a new workflow that can access credentials or other privileged capabilities, start with the hardened example. The remaining examples explain specific integrations and migration paths; review their security notes before adapting them.
 
 - [Hardened Workflow Starting Point](docs/examples.md#hardened-workflow-starting-point) (recommended)
 - [Terraform](docs/examples.md#terraform)

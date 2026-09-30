@@ -4,7 +4,7 @@ This section contains real world and common examples of how you could use this A
 
 > Note: Examples use `uses: grantbirki/branch-deploy@vX.X.X` as a placeholder. Choose a version from [this repository's releases](https://github.com/grantbirki/branch-deploy/releases) that supports the features you use, or pin its full commit SHA.
 
-> **Start here for new security-sensitive workflows:** Use the [Hardened Workflow Starting Point](#hardened-workflow-starting-point). The remaining examples demonstrate specific integrations and migration patterns. Unless an example says otherwise, it may combine admission, pull request code, provider setup, and credentials in one job and should not be treated as a security baseline.
+> **Start here for a new credentialed workflow:** Use the [Hardened Workflow Starting Point](#hardened-workflow-starting-point). The remaining examples explain specific integrations and migration paths. Unless noted otherwise, they may combine admission, pull request code, deployment tooling, and credentials in one job. Treat them as references, not security baselines.
 
 ## Table of Contents
 
@@ -28,18 +28,18 @@ Quick links below to jump to a specific branch-deploy example:
 
 ## Hardened Workflow Starting Point
 
-This is the recommended starting point for a new credentialed deployment workflow. It requires Branch Deploy `v12.1.0` or later and pins `v12.1.0` to its full commit SHA. Review and update both Branch Deploy pins together when adopting a newer release.
+This is the recommended starting point for a new workflow that uses deployment credentials. It requires Branch Deploy `v12.1.0` or later and pins that release to its full commit SHA. Update both Branch Deploy references together when upgrading.
 
-The jobs have separate trust and authority boundaries:
+The four jobs keep code trust separate from deployment authority:
 
-1. `admit` evaluates the IssueOps request without checking out pull request code and without access to a deployment environment, provider credentials, or OIDC.
-2. `validate` checks out the exact admitted candidate SHA with read-only repository access. It also checks out deployment helpers from the exact trusted workflow SHA carried in Branch Deploy's result context.
-3. `deploy` runs only for a real deployment after validation. It checks out the same two exact SHAs again, repeats the fail-closed validation, and exposes credentials only to the trusted deployment helper step.
-4. `result` does not check out or execute candidate code. It reports the selected validation and deployment results through [result mode](result-mode.md).
+1. `admit` evaluates the IssueOps request without checking out pull request code. It has no deployment environment, provider credentials, or OIDC permission.
+2. `validate` checks out the exact admitted candidate SHA with read-only repository access. It checks out deployment helpers separately at the exact trusted workflow SHA from Branch Deploy's result context.
+3. `deploy` runs only after validation and only for `.deploy`. It checks out the same candidate and trusted SHAs, repeats the fail-closed validation, and gives the deployment token only to the trusted helper step.
+4. `result` checks out no code. It reports the selected validation and deployment results through [result mode](result-mode.md).
 
 The example assumes that the protected default branch contains `.github/scripts/validate-candidate` and `.github/scripts/deploy-candidate`. The validation helper must inspect candidate content without executing candidate-controlled tools, providers, hooks, or package scripts. The deployment helper owns credential use and must fail before provider execution when the candidate violates policy.
 
-`.noop` runs only the read-only `validate` job. `.deploy` also runs the credentialed `deploy` job. Fork deployments are disabled, checkouts do not persist credentials, no cache or artifact crosses the boundary, and every candidate checkout uses the exact SHA admitted by Branch Deploy.
+`.noop` runs `validate` and then `result`; it skips the credentialed `deploy` job. `.deploy` runs all four jobs. Fork deployments are disabled, checkouts do not persist credentials, no cache or artifact crosses the boundary, and every candidate checkout uses the exact SHA admitted by Branch Deploy.
 
 ```yaml
 name: branch-deploy
@@ -180,13 +180,13 @@ jobs:
           job_results: ${{ needs.admit.outputs.noop == 'true' && format('["{0}"]', needs.validate.result) || format('["{0}","{1}"]', needs.validate.result, needs.deploy.result) }}
 ```
 
-This pattern does not turn pull request code into trusted code. The trusted helpers still need a repository-specific policy for what candidate content may reach a provider, and the deployment environment still needs appropriate reviewers, secret scoping, and recovery procedures. For the underlying model, see [Trusted Checkouts](trusted-checkouts.md), [Result Mode](result-mode.md), and the [security hardening guides](security_hardening_guides/README.md).
+This layout does not turn pull request code into trusted code. The trusted helpers still need a repository-specific policy for what candidate content may reach a provider. The deployment environment still needs appropriate reviewers, narrowly scoped secrets, and recovery procedures. For the underlying model, see [Trusted Checkouts](trusted-checkouts.md), [Result Mode](result-mode.md), and the [security hardening guides](security_hardening_guides/README.md).
 
 ## Simple Example
 
 This is the simplest possible example of how you could use the branch-deploy Action for reference
 
-> **Reference only:** This compact example demonstrates output routing in one job. It does not separate admission, candidate code, and deployment credentials. Use the [hardened starting point](#hardened-workflow-starting-point) for a new credentialed workflow.
+> **Reference example:** This compact workflow shows output routing in one job. Because it does not separate admission, pull request code, and deployment credentials, use the [hardened starting point](#hardened-workflow-starting-point) for a new credentialed workflow.
 
 - `.noop` will run the noop deploy step only (you can configure noop deployments however you like, this is just an example)
 - `.deploy` will deploy the current branch via the deploy step only (you can configure deployments however you like, this is just an example)
@@ -239,7 +239,7 @@ jobs:
 
 This example shows how you could use this Action with [Terraform](https://www.terraform.io/)
 
-> **Legacy integration example:** This workflow runs admission, candidate Terraform, and provider credentials in one job. It is retained as a migration reference, not as a secure starting point. See the [hardened starting point](#hardened-workflow-starting-point) and [Terraform plan hardening guide](security_hardening_guides/terraform-plans.md) before adapting it.
+> **Migration example:** This workflow runs admission, candidate Terraform, and provider credentials in one job. Before adapting it, review the [hardened starting point](#hardened-workflow-starting-point) and [Terraform plan hardening guide](security_hardening_guides/terraform-plans.md).
 
 - `.noop` triggers a Terraform plan
 - `.deploy` triggers a Terraform apply
@@ -363,7 +363,7 @@ jobs:
 
 ## Terraform with Trusted Checkouts
 
-This legacy migration example separates some helper code from the working pull request code selected by Branch Deploy, but its primary branch workflow still runs candidate-controlled Terraform with deployment credentials in one job. It is retained to explain trusted checkout mechanics across an existing multi-workflow setup. New credentialed workflows should start with the [Hardened Workflow Starting Point](#hardened-workflow-starting-point).
+This migration example explains trusted checkout mechanics across an existing multi-workflow setup. It keeps helper code separate, but its primary branch workflow still runs candidate-controlled Terraform with deployment credentials in one job. New credentialed workflows should start with the [Hardened Workflow Starting Point](#hardened-workflow-starting-point).
 
 - `.noop` runs `terraform plan` from the exact working commit SHA selected by branch-deploy
 - `.deploy` runs `terraform apply` from that same working commit SHA
