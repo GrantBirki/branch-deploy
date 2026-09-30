@@ -46,7 +46,7 @@ inputs:
     required: false
     default: ".deploy"
   noop_trigger:
-    description: 'The string to look for in comments as an IssueOps noop trigger. Example: ".noop"'
+    description: 'The string to look for in comments as an IssueOps noop trigger. This selects consumer-defined noop steps; it does not sandbox them. Example: ".noop"'
     required: false
     default: ".noop"
   lock_trigger:
@@ -255,7 +255,7 @@ outputs:
   parsed_params:
     description: A stringified JSON object of the parsed parameters that were passed into the deployment command
   noop:
-    description: 'The string "true" if the noop trigger was found, otherwise the string "false" - Use this to conditionally control whether your deployment runs as a noop or not'
+    description: 'The string "true" if the noop trigger was found, otherwise "false". This is a routing signal for consumer-defined steps, not a sandbox or a guarantee that downstream tools cannot make changes.'
   sha:
     description: The sha of the branch to be deployed
   default_branch_tree_sha:

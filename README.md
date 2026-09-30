@@ -18,7 +18,7 @@ This Action does the heavy lifting for you to enable branch deployments:
 ## Available Commands 💬
 
 - `.deploy` - Deploy a pull request
-- `.noop` - Deploy a pull request in noop mode. Noop deployments do not require a PR review or approval
+- `.noop` - Admit a pull request in noop mode. The consumer workflow decides what executes next; this is not a sandbox. Non-fork noops do not require PR approval by default. See [Noop Execution Boundary](docs/noop-execution-boundary.md).
 - `.deploy to <environment>` - Deploy a pull request to a specific environment
 - `.noop to <environment>` - Deploy a pull request in noop mode to a specific environment
 - `.deploy <stable_branch>` - Trigger a rollback deploy to your stable branch (main, master, etc)
@@ -171,7 +171,7 @@ Branch deployments are a battle tested way of deploying your changes to a given 
 - The `main` branch is always considered to be a stable and deployable branch
 - All changes are deployed to production before they are merged to the `main` branch
 - To roll back a branch deployment, you deploy the `main` branch
-- `noop` deployments should not make changes but rather report what they "would" have done and do not require approval or review before starting
+- Consumer workflows should design `noop` paths to report what they would do without applying changes. Branch Deploy does not sandbox downstream commands or enforce that property, and non-fork noops do not require approval or review by default.
 
 #### Why use branch deployments?
 
@@ -260,6 +260,8 @@ The core of this Action takes place here. This block of code will trigger the br
 
 As seen above, we have two steps. One for a noop deploy, and one for a regular deploy. For example, the noop deploy could trigger a `terraform plan` and the regular deploy could be a `terraform apply`. These steps are conditionally gated by two variables:
 
+> **Security boundary:** The `noop` output only selects the workflow path. A Terraform plan can load providers, use credentials, and contact remote services. Put protected checks before candidate tooling, initialization, provider loading, and credential access. See [Noop Execution Boundary](docs/noop-execution-boundary.md).
+
 - `steps.branch-deploy.outputs.continue == 'true'` - The `continue` variable is only set to true when a deployment should continue
 - `steps.branch-deploy.outputs.noop == 'true'` - The `noop` variable is only set to true when a noop deployment should be run
 
@@ -275,7 +277,7 @@ As seen above, we have two steps. One for a noop deploy, and one for a regular d
 | `status` | `true` | `${{ job.status }}` | The status of the GitHub Actions - For use in the post run workflow - Provided for you by default! |
 | `reaction` | `false` | `eyes` | If set, the specified emoji "reaction" is put on the comment to indicate that the trigger was detected. For example, "rocket" or "eyes" |
 | `trigger` | `false` | `.deploy` | The string to look for in comments as an IssueOps trigger. Example: ".deploy" |
-| `noop_trigger` | `false` | `.noop` | The string to look for in comments as an IssueOps noop trigger. Example: ".noop" - The usage would then be ".noop" |
+| `noop_trigger` | `false` | `.noop` | The string to look for in comments as an IssueOps noop trigger. This selects consumer-defined noop steps; it does not sandbox them. Example: `.noop` |
 | `lock_trigger` | `false` | `.lock` | The string to look for in comments as an IssueOps lock trigger. Used for locking branch deployments on a specific branch. Example: ".lock" |
 | `unlock_trigger` | `false` | `.unlock` | The string to look for in comments as an IssueOps unlock trigger. Used for unlocking branch deployments. Example: ".unlock" |
 | `help_trigger` | `false` | `.help` | The string to look for in comments as an IssueOps help trigger. Example: ".help" |
@@ -347,7 +349,7 @@ As seen above, we have two steps. One for a noop deploy, and one for a regular d
 | `environment` | The environment that has been selected for a deployment |
 | `params` | The raw parameters that were passed into the deployment command (see param_separator) - Further [documentation](docs/parameters.md) |
 | `parsed_params` | A stringified JSON object of the parsed parameters that were passed into the deployment command - Further [documentation](docs/parameters.md) |
-| `noop` | The string "true" if the noop trigger was found, otherwise the string "false" - Use this to conditionally control whether your deployment runs as a noop or not |
+| `noop` | The string `true` if the noop trigger was found, otherwise `false`. This is a routing signal for consumer-defined steps, not a sandbox or a guarantee that downstream tools cannot make changes. |
 | `sha` | The sha of the branch to be deployed |
 | `default_branch_tree_sha` | The sha of the default branch tree (useful for subsequent workflow steps if they need to do commit comparisons) |
 | `ref` | The ref (branch or sha) to use with deployment |
@@ -508,6 +510,12 @@ on:
 Unlike the `on: pull_request` trigger, the `on: issue_comment` trigger uses the Actions workflow definition from the repository's default branch. A pull request therefore cannot change the workflow that responds to its comments, and branch protection can review and protect changes to that workflow.
 
 This protection applies only to the workflow definition. Pull request code checked out later remains controlled by that pull request. Running scripts, build tools, dependencies, or configuration from that checkout with access to secrets or a write-capable token can expose credentials or modify repository and deployment resources.
+
+### Noop is not a sandbox
+
+The `.noop` command and `noop` output select a consumer-defined workflow path. Branch Deploy does not dry-run, sandbox, or restrict the downstream commands in that path. Terraform `init`, `validate`, and `plan` can install or start providers, initialize configured components, use credentials, read files or state, and contact remote services before any apply.
+
+Run protected, non-executing admission checks against the exact selected SHA before candidate-controlled tools, providers, hooks, initialization, or deployment credentials become available. If the check cannot completely classify the candidate, fail closed or require review. See [Noop Execution Boundary](docs/noop-execution-boundary.md) and the detailed [Terraform plan hardening guide](docs/security_hardening_guides/terraform-plans.md).
 
 If your workflow checks out pull request code, review the [trusted checkout hardening guide](docs/trusted-checkouts.md). It explains how to keep deployment helpers on a trusted default-branch checkout while deploying the exact working commit selected by Branch Deploy. Custom deployment templates are fetched separately from the repository at the exact trusted workflow SHA.
 
