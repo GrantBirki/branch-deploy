@@ -44439,6 +44439,21 @@ async function reactEmote(reaction, context, octokit) {
 
 
 
+async function unlock_on_merge_currentLockRef(octokit, context, lockBranch) {
+    try {
+        const branch = await octokit.rest.repos.getBranch({
+            ...context.repo,
+            branch: lockBranch,
+            headers: API_HEADERS
+        });
+        return branch.data.commit.sha;
+    }
+    catch (error) {
+        if (legacyApiError(error).status === 404)
+            return null;
+        throw new Error('Could not inspect the current deployment lock');
+    }
+}
 // Helper function to automatically find, and release a deployment lock when a pull request is merged
 // :param octokit: the authenticated octokit instance
 // :param context: the context object
@@ -44465,15 +44480,15 @@ async function unlockOnMerge(octokit, context, environment_targets) {
         const environment = rawEnvironment.trim();
         // construct the lock branch name for this environment
         const lockBranch = `${constructValidBranchName(environment)}-${LOCK_METADATA.lockBranchSuffix}`;
-        // Check if the lock branch exists
-        const branchExists = await checkBranch(octokit, context, lockBranch);
+        // Read the exact lock ref so ownership and deletion are bound to the same lock.
+        const lockRefSha = await unlock_on_merge_currentLockRef(octokit, context, lockBranch);
         // if the lock branch does not exist at all, then there is no lock to release
-        if (!branchExists) {
+        if (lockRefSha === null) {
             info(`⏩ no lock branch found for environment ${COLORS.highlight}${environment}${COLORS.reset} - skipping...`);
             continue;
         }
         // attempt to fetch the lockFile for this branch
-        const lockFile = await checkLockFile(octokit, context, lockBranch);
+        const lockFile = await checkLockFile(octokit, context, lockRefSha);
         // check to see if the lockFile exists and if it does, check to see if it has a link property
         if (legacyTruthy(lockFile) && legacyTruthy(lockFile.link)) {
             // if the lockFile has a link property, find the PR number from the link
@@ -44481,24 +44496,14 @@ async function unlockOnMerge(octokit, context, environment_targets) {
             info(`🔍 checking lock for PR ${COLORS.info}${prNumber}${COLORS.reset} (env: ${COLORS.highlight}${environment}${COLORS.reset})`);
             // if the PR number matches the PR number of the merged pull request, then this lock is associated with the merged pull request
             if (prNumber === pullRequest.number.toString()) {
-                // release the lock
-                const result = await unlock({
-                    octokit,
-                    context,
-                    reactionId: null,
-                    target: { type: 'environment', environment },
-                    mode: 'silent'
-                });
-                // if the result is 'removed lock - silent', then the lock was successfully removed - append to the array for later use
-                if (result === 'removed lock - silent') {
+                const removed = await unlockIfUnchanged(octokit, context, environment, lockRefSha);
+                if (removed) {
                     releasedEnvironments.push(environment);
+                    info(`🔓 removed lock - environment: ${COLORS.highlight}${environment}${COLORS.reset}`);
                 }
                 else {
-                    debug(`unlock result for unlock-on-merge: ${result}`);
+                    info(`⏩ original lock could not be removed for environment ${COLORS.highlight}${environment}${COLORS.reset} - leaving the current lock in place`);
                 }
-                // log the result and format the output as it will always be a string ending with '- silent'
-                const resultFmt = result.replace('- silent', '');
-                info(`🔓 ${resultFmt.trim()} - environment: ${COLORS.highlight}${environment}${COLORS.reset}`);
             }
             else {
                 info(`⏩ lock for PR ${COLORS.info}${prNumber}${COLORS.reset} (env: ${COLORS.highlight}${environment}${COLORS.reset}) is not associated with PR ${COLORS.info}${pullRequest.number}${COLORS.reset} - skipping...`);
