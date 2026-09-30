@@ -15,7 +15,7 @@ To view your available commands, environment targets, and how your workflow is s
 Deployments respect your repository's branch protection settings. You can trigger either a regular or noop deployment:
 
 - `.deploy` - Triggers a regular deployment using the default environment (think "Terraform apply" for example)
-- `.noop` - Admits your workflow's noop path and sets the `noop` output. This is not a sandbox. Terraform and similar tools can still execute providers or use credentials during a plan. See [Noop Execution Boundary](noop-execution-boundary.md).
+- `.noop` - Triggers a noop deployment (think "Terraform plan" for example)
 - `.deploy <environment>` - Triggers a deployment for the specified environment
 - `.noop <environment>` - Triggers a noop deployment for the specified environment
 - `.deploy <stable_branch>` - Trigger a rollback deploy to your stable branch (main, master, etc)
