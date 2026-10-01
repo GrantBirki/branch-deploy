@@ -34,14 +34,14 @@ function job(workflow: string, name: string): string {
 
 test('the hardened starting point admits only owner and member comments by default', () => {
   const section = hardenedSection()
-  const admit = job(hardenedWorkflow(), 'admit')
+  const branchDeploy = job(hardenedWorkflow(), 'branch-deploy')
 
-  assert.match(admit, /github\.event\.issue\.pull_request/u)
+  assert.match(branchDeploy, /github\.event\.issue\.pull_request/u)
   assert.match(
-    admit,
+    branchDeploy,
     /contains\(\s*fromJSON\('\["OWNER", "MEMBER"\]'\),\s*github\.event\.comment\.author_association\s*\)/u
   )
-  assert.doesNotMatch(admit, /COLLABORATOR/u)
+  assert.doesNotMatch(branchDeploy, /COLLABORATOR/u)
 
   assert.match(section, /`COLLABORATOR` is deliberately omitted/u)
   assert.match(
@@ -80,43 +80,46 @@ test('the hardened starting point uses lowercase names and commented action pins
 
 test('the hardened starting point keeps admission, validation, deployment, and reporting separate', () => {
   const workflow = hardenedWorkflow()
-  const admit = job(workflow, 'admit')
+  const branchDeploy = job(workflow, 'branch-deploy')
   const validate = job(workflow, 'validate')
   const deploy = job(workflow, 'deploy')
   const result = job(workflow, 'result')
 
-  assert.match(admit, /allow_forks: false/u)
-  assert.match(admit, /environment_targets: production/u)
-  assert.match(admit, /skip_completing: true/u)
+  assert.match(branchDeploy, /allow_forks: false/u)
+  assert.match(branchDeploy, /environment_targets: production/u)
+  assert.match(branchDeploy, /skip_completing: true/u)
   assert.doesNotMatch(
-    admit,
+    branchDeploy,
     /actions\/checkout|environment:|secrets\.|id-token:/u
   )
 
-  assert.match(validate, /needs: admit/u)
+  assert.match(validate, /needs: branch-deploy/u)
   assert.match(validate, /\.run_attempt == github\.run_attempt/u)
   assert.match(validate, /\.trusted_sha/u)
-  assert.match(validate, /ref: \$\{\{ needs\.admit\.outputs\.sha \}\}/u)
+  assert.match(validate, /ref: \$\{\{ needs\.branch-deploy\.outputs\.sha \}\}/u)
   assert.match(validate, /validate-candidate/u)
   assert.doesNotMatch(
     validate,
     /environment:|secrets\.|id-token:|terraform|setup-|cache|artifact/iu
   )
 
-  assert.match(deploy, /needs: \[admit, validate\]/u)
-  assert.match(deploy, /needs\.admit\.outputs\.noop != 'true'/u)
+  assert.match(deploy, /needs: \[branch-deploy, validate\]/u)
+  assert.match(deploy, /needs\.branch-deploy\.outputs\.noop != 'true'/u)
   assert.match(deploy, /needs\.validate\.result == 'success'/u)
   assert.match(deploy, /\.run_attempt == github\.run_attempt/u)
   assert.match(deploy, /environment: production/u)
   assert.match(deploy, /\.trusted_sha/u)
-  assert.match(deploy, /ref: \$\{\{ needs\.admit\.outputs\.sha \}\}/u)
+  assert.match(deploy, /ref: \$\{\{ needs\.branch-deploy\.outputs\.sha \}\}/u)
   assert.match(deploy, /validate-candidate/u)
   assert.match(deploy, /deploy-candidate/u)
   assert.match(deploy, /DEPLOY_TOKEN: \$\{\{ secrets\.DEPLOY_TOKEN \}\}/u)
 
-  assert.match(result, /needs: \[admit, validate, deploy\]/u)
+  assert.match(result, /needs: \[branch-deploy, validate, deploy\]/u)
   assert.match(result, /result_mode: true/u)
-  assert.match(result, /context: \$\{\{ needs\.admit\.outputs\.context \}\}/u)
+  assert.match(
+    result,
+    /context: \$\{\{ needs\.branch-deploy\.outputs\.context \}\}/u
+  )
   assert.match(result, /needs\.validate\.result/u)
   assert.match(result, /needs\.deploy\.result/u)
   assert.doesNotMatch(result, /actions\/checkout|secrets\.|id-token:/u)

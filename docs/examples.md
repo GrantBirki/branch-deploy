@@ -30,11 +30,11 @@ Quick links below to jump to a specific branch-deploy example:
 
 This is the recommended starting point for a new workflow that uses deployment credentials. It requires Branch Deploy `v12.1.0` or later and pins that release to its full commit SHA. Update both Branch Deploy references together when upgrading.
 
-Before a runner starts, the `admit` job accepts pull request comments only from a repository `OWNER` or organization `MEMBER`. `COLLABORATOR` is deliberately omitted; add it to the allowlist only if outside collaborators should be able to request deployments. This field describes the commenter's association with the repository, not the pull request head, so `allow_forks: false` remains the fork control and Branch Deploy still performs its repository-permission and request-admission checks.
+Before a runner starts, the `branch-deploy` job accepts pull request comments only from a repository `OWNER` or organization `MEMBER`. `COLLABORATOR` is deliberately omitted; add it to the allowlist only if outside collaborators should be able to request deployments. This field describes the commenter's association with the repository, not the pull request head, so `allow_forks: false` remains the fork control and Branch Deploy still performs its repository-permission and request-admission checks.
 
 The four jobs keep code trust separate from deployment authority:
 
-1. `admit` evaluates the IssueOps request without checking out pull request code. It has no deployment environment, provider credentials, or OIDC permission.
+1. `branch-deploy` evaluates the IssueOps request without checking out pull request code. It has no deployment environment, provider credentials, or OIDC permission.
 2. `validate` checks out the exact admitted candidate SHA with read-only repository access. It checks out deployment helpers separately at the exact trusted workflow SHA from Branch Deploy's result context.
 3. `deploy` runs only after validation and only for `.deploy`. It checks out the same candidate and trusted SHAs, repeats the fail-closed validation, and gives the deployment token only to the trusted helper step.
 4. `result` checks out no code. It reports the selected validation and deployment results through [result mode](result-mode.md).
@@ -53,7 +53,8 @@ on:
 permissions: {}
 
 jobs:
-  admit:
+  branch-deploy:
+    name: branch-deploy
     if: >-
       ${{
         github.event.issue.pull_request &&
@@ -75,7 +76,7 @@ jobs:
       noop: ${{ steps.branch-deploy.outputs.noop }}
       sha: ${{ steps.branch-deploy.outputs.sha }}
     steps:
-      - name: admit request
+      - name: branch-deploy
         id: branch-deploy
         uses: grantbirki/branch-deploy@a7a7ea40a15a79a036322c2924ab74f5eded702c # v12.1.0
         with:
@@ -84,10 +85,10 @@ jobs:
           skip_completing: true
 
   validate:
-    needs: admit
+    needs: branch-deploy
     if: >-
-      ${{ needs.admit.outputs.continue == 'true' &&
-          fromJSON(needs.admit.outputs.context).run_attempt == github.run_attempt }}
+      ${{ needs.branch-deploy.outputs.continue == 'true' &&
+          fromJSON(needs.branch-deploy.outputs.context).run_attempt == github.run_attempt }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -95,7 +96,7 @@ jobs:
       - name: checkout trusted tools
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ fromJSON(needs.admit.outputs.context).trusted_sha }}
+          ref: ${{ fromJSON(needs.branch-deploy.outputs.context).trusted_sha }}
           path: trusted
           fetch-depth: 1
           persist-credentials: false
@@ -103,15 +104,15 @@ jobs:
       - name: checkout candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ needs.admit.outputs.sha }}
+          ref: ${{ needs.branch-deploy.outputs.sha }}
           path: candidate
           fetch-depth: 1
           persist-credentials: false
 
       - name: verify checkouts
         env:
-          EXPECTED_CANDIDATE_SHA: ${{ needs.admit.outputs.sha }}
-          EXPECTED_TRUSTED_SHA: ${{ fromJSON(needs.admit.outputs.context).trusted_sha }}
+          EXPECTED_CANDIDATE_SHA: ${{ needs.branch-deploy.outputs.sha }}
+          EXPECTED_TRUSTED_SHA: ${{ fromJSON(needs.branch-deploy.outputs.context).trusted_sha }}
         run: |
           set -euo pipefail
           test "$(git -C candidate rev-parse HEAD)" = "$EXPECTED_CANDIDATE_SHA"
@@ -123,12 +124,12 @@ jobs:
         run: ./trusted/.github/scripts/validate-candidate "$CANDIDATE_DIR"
 
   deploy:
-    needs: [admit, validate]
+    needs: [branch-deploy, validate]
     if: >-
-      ${{ needs.admit.outputs.continue == 'true' &&
-          needs.admit.outputs.noop != 'true' &&
+      ${{ needs.branch-deploy.outputs.continue == 'true' &&
+          needs.branch-deploy.outputs.noop != 'true' &&
           needs.validate.result == 'success' &&
-          fromJSON(needs.admit.outputs.context).run_attempt == github.run_attempt }}
+          fromJSON(needs.branch-deploy.outputs.context).run_attempt == github.run_attempt }}
     runs-on: ubuntu-latest
     environment: production
     concurrency:
@@ -140,7 +141,7 @@ jobs:
       - name: checkout trusted tools
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ fromJSON(needs.admit.outputs.context).trusted_sha }}
+          ref: ${{ fromJSON(needs.branch-deploy.outputs.context).trusted_sha }}
           path: trusted
           fetch-depth: 1
           persist-credentials: false
@@ -148,15 +149,15 @@ jobs:
       - name: checkout candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ needs.admit.outputs.sha }}
+          ref: ${{ needs.branch-deploy.outputs.sha }}
           path: candidate
           fetch-depth: 1
           persist-credentials: false
 
       - name: verify checkouts
         env:
-          EXPECTED_CANDIDATE_SHA: ${{ needs.admit.outputs.sha }}
-          EXPECTED_TRUSTED_SHA: ${{ fromJSON(needs.admit.outputs.context).trusted_sha }}
+          EXPECTED_CANDIDATE_SHA: ${{ needs.branch-deploy.outputs.sha }}
+          EXPECTED_TRUSTED_SHA: ${{ fromJSON(needs.branch-deploy.outputs.context).trusted_sha }}
         run: |
           set -euo pipefail
           test "$(git -C candidate rev-parse HEAD)" = "$EXPECTED_CANDIDATE_SHA"
@@ -174,8 +175,8 @@ jobs:
         run: ./trusted/.github/scripts/deploy-candidate "$CANDIDATE_DIR"
 
   result:
-    needs: [admit, validate, deploy]
-    if: ${{ always() && needs.admit.outputs.continue == 'true' }}
+    needs: [branch-deploy, validate, deploy]
+    if: ${{ always() && needs.branch-deploy.outputs.continue == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -186,8 +187,8 @@ jobs:
         uses: grantbirki/branch-deploy@a7a7ea40a15a79a036322c2924ab74f5eded702c # v12.1.0
         with:
           result_mode: true
-          context: ${{ needs.admit.outputs.context }}
-          job_results: ${{ needs.admit.outputs.noop == 'true' && format('["{0}"]', needs.validate.result) || format('["{0}","{1}"]', needs.validate.result, needs.deploy.result) }}
+          context: ${{ needs.branch-deploy.outputs.context }}
+          job_results: ${{ needs.branch-deploy.outputs.noop == 'true' && format('["{0}"]', needs.validate.result) || format('["{0}","{1}"]', needs.validate.result, needs.deploy.result) }}
 ```
 
 This layout does not turn pull request code into trusted code. The trusted helpers still need a repository-specific policy for what candidate content may reach a provider. The deployment environment still needs appropriate reviewers, narrowly scoped secrets, and recovery procedures. For the underlying model, see [Trusted Checkouts](trusted-checkouts.md), [Result Mode](result-mode.md), and the [security hardening guides](security_hardening_guides/README.md).
