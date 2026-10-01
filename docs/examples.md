@@ -30,6 +30,8 @@ Quick links below to jump to a specific branch-deploy example:
 
 This is the recommended starting point for a new workflow that uses deployment credentials. It requires Branch Deploy `v12.1.0` or later and pins that release to its full commit SHA. Update both Branch Deploy references together when upgrading.
 
+Before a runner starts, the `admit` job accepts pull request comments only from a repository `OWNER` or organization `MEMBER`. `COLLABORATOR` is deliberately omitted; add it to the allowlist only if outside collaborators should be able to request deployments. This field describes the commenter's association with the repository, not the pull request head, so `allow_forks: false` remains the fork control and Branch Deploy still performs its repository-permission and request-admission checks.
+
 The four jobs keep code trust separate from deployment authority:
 
 1. `admit` evaluates the IssueOps request without checking out pull request code. It has no deployment environment, provider credentials, or OIDC permission.
@@ -39,7 +41,7 @@ The four jobs keep code trust separate from deployment authority:
 
 The example assumes that the protected default branch contains `.github/scripts/validate-candidate` and `.github/scripts/deploy-candidate`. The validation helper must inspect candidate content without executing candidate-controlled tools, providers, hooks, or package scripts. The deployment helper owns credential use and must fail before provider execution when the candidate violates policy.
 
-`.noop` runs `validate` and then `result`; it skips the credentialed `deploy` job. `.deploy` runs all four jobs. Fork deployments are disabled, checkouts do not persist credentials, no cache or artifact crosses the boundary, and every candidate checkout uses the exact SHA admitted by Branch Deploy.
+`.noop` runs `validate` and then `result`; it skips the credentialed `deploy` job. `.deploy` runs all four jobs and accepts only `production` as its target. Fork deployments are disabled, checkouts do not persist credentials, no cache or artifact crosses the boundary, and every candidate checkout uses the exact SHA admitted by Branch Deploy.
 
 ```yaml
 name: branch-deploy
@@ -52,7 +54,14 @@ permissions: {}
 
 jobs:
   admit:
-    if: ${{ github.event.issue.pull_request }}
+    if: >-
+      ${{
+        github.event.issue.pull_request &&
+        contains(
+          fromJSON('["OWNER", "MEMBER"]'),
+          github.event.comment.author_association
+        )
+      }}
     runs-on: ubuntu-latest
     permissions:
       checks: read
@@ -66,11 +75,12 @@ jobs:
       noop: ${{ steps.branch-deploy.outputs.noop }}
       sha: ${{ steps.branch-deploy.outputs.sha }}
     steps:
-      - name: Admit the request
+      - name: admit request
         id: branch-deploy
         uses: grantbirki/branch-deploy@a7a7ea40a15a79a036322c2924ab74f5eded702c # v12.1.0
         with:
           allow_forks: false
+          environment_targets: production
           skip_completing: true
 
   validate:
@@ -82,7 +92,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Check out trusted deployment tooling
+      - name: checkout trusted tools
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ fromJSON(needs.admit.outputs.context).trusted_sha }}
@@ -90,7 +100,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Check out the admitted candidate
+      - name: checkout candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.admit.outputs.sha }}
@@ -98,7 +108,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Verify exact checkouts
+      - name: verify checkouts
         env:
           EXPECTED_CANDIDATE_SHA: ${{ needs.admit.outputs.sha }}
           EXPECTED_TRUSTED_SHA: ${{ fromJSON(needs.admit.outputs.context).trusted_sha }}
@@ -107,7 +117,7 @@ jobs:
           test "$(git -C candidate rev-parse HEAD)" = "$EXPECTED_CANDIDATE_SHA"
           test "$(git -C trusted rev-parse HEAD)" = "$EXPECTED_TRUSTED_SHA"
 
-      - name: Validate candidate without provider execution
+      - name: validate candidate
         env:
           CANDIDATE_DIR: ${{ github.workspace }}/candidate
         run: ./trusted/.github/scripts/validate-candidate "$CANDIDATE_DIR"
@@ -127,7 +137,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Check out trusted deployment tooling
+      - name: checkout trusted tools
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ fromJSON(needs.admit.outputs.context).trusted_sha }}
@@ -135,7 +145,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Check out the admitted candidate
+      - name: checkout candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.admit.outputs.sha }}
@@ -143,7 +153,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Verify exact checkouts
+      - name: verify checkouts
         env:
           EXPECTED_CANDIDATE_SHA: ${{ needs.admit.outputs.sha }}
           EXPECTED_TRUSTED_SHA: ${{ fromJSON(needs.admit.outputs.context).trusted_sha }}
@@ -152,12 +162,12 @@ jobs:
           test "$(git -C candidate rev-parse HEAD)" = "$EXPECTED_CANDIDATE_SHA"
           test "$(git -C trusted rev-parse HEAD)" = "$EXPECTED_TRUSTED_SHA"
 
-      - name: Revalidate candidate before credentials
+      - name: revalidate candidate
         env:
           CANDIDATE_DIR: ${{ github.workspace }}/candidate
         run: ./trusted/.github/scripts/validate-candidate "$CANDIDATE_DIR"
 
-      - name: Deploy through trusted tooling
+      - name: deploy candidate
         env:
           CANDIDATE_DIR: ${{ github.workspace }}/candidate
           DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
@@ -172,7 +182,7 @@ jobs:
       deployments: write
       pull-requests: write
     steps:
-      - name: Report the admitted operation
+      - name: report result
         uses: grantbirki/branch-deploy@a7a7ea40a15a79a036322c2924ab74f5eded702c # v12.1.0
         with:
           result_mode: true

@@ -5,13 +5,18 @@ import {test} from 'node:test'
 const BRANCH_DEPLOY_V12_1_0 = 'a7a7ea40a15a79a036322c2924ab74f5eded702c'
 const CHECKOUT_V7_0_0 = '9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0'
 
-function hardenedWorkflow(): string {
+function hardenedSection(): string {
   const examples = readFileSync('docs/examples.md', 'utf8')
   const section =
     /^## Hardened Workflow Starting Point\n([\s\S]*?)(?=^## )/mu.exec(
       examples
     )?.[1]
   assert.ok(section !== undefined)
+  return section
+}
+
+function hardenedWorkflow(): string {
+  const section = hardenedSection()
   const workflow = /```yaml\n([\s\S]*?)\n```/u.exec(section)?.[1]
   assert.ok(workflow !== undefined)
   return workflow
@@ -27,6 +32,47 @@ function job(workflow: string, name: string): string {
   return remaining.slice(0, nextJob?.index ?? remaining.length)
 }
 
+test('the hardened starting point admits only owner and member comments by default', () => {
+  const section = hardenedSection()
+  const admit = job(hardenedWorkflow(), 'admit')
+
+  assert.match(admit, /github\.event\.issue\.pull_request/u)
+  assert.match(
+    admit,
+    /contains\(\s*fromJSON\('\["OWNER", "MEMBER"\]'\),\s*github\.event\.comment\.author_association\s*\)/u
+  )
+  assert.doesNotMatch(admit, /COLLABORATOR/u)
+
+  assert.match(section, /`COLLABORATOR` is deliberately omitted/u)
+  assert.match(
+    section,
+    /commenter's association with the repository, not the pull request head/u
+  )
+  assert.match(section, /`allow_forks: false` remains the fork control/u)
+  assert.match(section, /repository-permission and request-admission checks/u)
+})
+
+test('the hardened starting point uses lowercase names and commented action pins', () => {
+  const workflow = hardenedWorkflow()
+  const names = Array.from(
+    workflow.matchAll(/^\s*name: (.+)$/gmu),
+    match => match[1]
+  )
+  assert.ok(names.length > 0)
+  for (const name of names) {
+    assert.strictEqual(name, name.toLowerCase())
+  }
+
+  const actionUses = Array.from(
+    workflow.matchAll(/^\s*uses: (.+)$/gmu),
+    match => match[1]
+  )
+  assert.strictEqual(actionUses.length, 6)
+  for (const actionUse of actionUses) {
+    assert.match(actionUse, /@[0-9a-f]{40} # v\d+\.\d+\.\d+$/u)
+  }
+})
+
 test('the hardened starting point keeps admission, validation, deployment, and reporting separate', () => {
   const workflow = hardenedWorkflow()
   const admit = job(workflow, 'admit')
@@ -35,6 +81,7 @@ test('the hardened starting point keeps admission, validation, deployment, and r
   const result = job(workflow, 'result')
 
   assert.match(admit, /allow_forks: false/u)
+  assert.match(admit, /environment_targets: production/u)
   assert.match(admit, /skip_completing: true/u)
   assert.doesNotMatch(
     admit,
