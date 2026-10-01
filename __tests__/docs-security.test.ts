@@ -3,12 +3,22 @@ import {readFileSync, readdirSync} from 'node:fs'
 import {join} from 'node:path'
 import {test} from 'node:test'
 
-const markdownFiles = [
-  'README.md',
-  ...readdirSync('docs', {withFileTypes: true})
-    .filter(entry => entry.isFile() && entry.name.endsWith('.md'))
-    .map(entry => join('docs', entry.name))
-]
+function markdownFilesUnder(directory: string): string[] {
+  const paths: string[] = []
+
+  for (const entry of readdirSync(directory, {withFileTypes: true})) {
+    const path = join(directory, entry.name)
+    if (entry.isDirectory()) {
+      paths.push(...markdownFilesUnder(path))
+    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      paths.push(path)
+    }
+  }
+
+  return paths.sort()
+}
+
+const markdownFiles = ['README.md', ...markdownFilesUnder('docs')]
 
 const documentedWorkflowFiles = [
   ...markdownFiles,
@@ -93,6 +103,21 @@ function unsafeInlineScriptLines(lines: readonly string[]): number[] {
 function fixedDeploymentDelimiters(source: string): string[] {
   return source.match(/DEPLOY_MESSAGE<<[A-Za-z_][A-Za-z0-9_.-]*/gu) ?? []
 }
+
+test('documentation security scanners include nested markdown files', () => {
+  assert.ok(
+    documentedWorkflowFiles.includes(
+      'docs/security_hardening_guides/workflow-boundaries.md'
+    )
+  )
+})
+
+test('check documentation names every accepted terminal conclusion', () => {
+  const checks = readFileSync('docs/checks.md', 'utf8')
+
+  assert.match(checks, /`SUCCESS`, `SKIPPED`, or `NEUTRAL`/u)
+  assert.match(checks, /Any other selected state or conclusion blocks/u)
+})
 
 test('documented checkout steps do not persist credentials', () => {
   const checkouts = documentedWorkflowFiles.flatMap(checkoutSteps)

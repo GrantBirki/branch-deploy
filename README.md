@@ -18,7 +18,7 @@ This Action does the heavy lifting for you to enable branch deployments:
 ## Available Commands 💬
 
 - `.deploy` - Deploy a pull request
-- `.noop` - Deploy a pull request in noop mode. Noop deployments do not require a PR review or approval
+- `.noop` - Run the workflow's noop steps for a pull request. Non-fork noops do not require a PR review or approval by default.
 - `.deploy to <environment>` - Deploy a pull request to a specific environment
 - `.noop to <environment>` - Deploy a pull request in noop mode to a specific environment
 - `.deploy <stable_branch>` - Trigger a rollback deploy to your stable branch (main, master, etc)
@@ -171,7 +171,7 @@ Branch deployments are a battle tested way of deploying your changes to a given 
 - The `main` branch is always considered to be a stable and deployable branch
 - All changes are deployed to production before they are merged to the `main` branch
 - To roll back a branch deployment, you deploy the `main` branch
-- `noop` deployments should not make changes but rather report what they "would" have done and do not require approval or review before starting
+- `noop` deployments should report what they would do without applying changes. The consumer workflow defines those steps, and non-fork noops do not require approval or review before starting.
 
 #### Why use branch deployments?
 
@@ -260,6 +260,8 @@ The core of this Action takes place here. This block of code will trigger the br
 
 As seen above, we have two steps. One for a noop deploy, and one for a regular deploy. For example, the noop deploy could trigger a `terraform plan` and the regular deploy could be a `terraform apply`. These steps are conditionally gated by two variables:
 
+> A Terraform noop can run `terraform init` and `terraform plan`. Initialization can install candidate-selected providers, and planning can execute them with any credentials available to the job. Review the [Terraform plan hardening guide](docs/security_hardening_guides/terraform-plans.md) before adding deployment credentials to that job.
+
 - `steps.branch-deploy.outputs.continue == 'true'` - The `continue` variable is only set to true when a deployment should continue
 - `steps.branch-deploy.outputs.noop == 'true'` - The `noop` variable is only set to true when a noop deployment should be run
 
@@ -347,7 +349,7 @@ As seen above, we have two steps. One for a noop deploy, and one for a regular d
 | `environment` | The environment that has been selected for a deployment |
 | `params` | The raw parameters that were passed into the deployment command (see param_separator) - Further [documentation](docs/parameters.md) |
 | `parsed_params` | A stringified JSON object of the parsed parameters that were passed into the deployment command - Further [documentation](docs/parameters.md) |
-| `noop` | The string "true" if the noop trigger was found, otherwise the string "false" - Use this to conditionally control whether your deployment runs as a noop or not |
+| `noop` | The string `true` if the noop trigger was found, otherwise `false`. Use it to decide which deployment steps run. |
 | `sha` | The sha of the branch to be deployed |
 | `default_branch_tree_sha` | The sha of the default branch tree (useful for subsequent workflow steps if they need to do commit comparisons) |
 | `ref` | The ref (branch or sha) to use with deployment |

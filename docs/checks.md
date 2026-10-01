@@ -18,7 +18,7 @@ In this repository, the current ruleset requires the following CI checks:
 
 Any other CI checks that run on a pull request are not required and are considered non-required checks.
 
-Branch Deploy v12 evaluates the complete paginated check rollup for the selected commit. When the same GitHub App and check name, or the same legacy status context, appears more than once, the newest run is authoritative. A newer pending or failing rerun blocks deployment even if an older run passed. If GitHub returns incomplete, malformed, mismatched, or non-advancing check data, Branch Deploy fails closed and sets `commit_status` to `UNAVAILABLE`.
+Branch Deploy v12 evaluates the complete paginated check rollup for the selected commit. When the same GitHub App and check name, or the same legacy status context, appears more than once, the newest run is authoritative. A selected check is healthy when its newest state or conclusion is `SUCCESS`, `SKIPPED`, or `NEUTRAL`. Any other selected state or conclusion blocks deployment, including a newer pending or failing rerun even when an older run passed. This means a skipped or neutral check does not block Branch Deploy by itself; configure the check to fail if your deployment policy requires that work to run successfully. If GitHub returns incomplete, malformed, mismatched, or non-advancing check data, Branch Deploy fails closed and sets `commit_status` to `UNAVAILABLE`.
 
 ## Using the `checks` Input Option
 
@@ -63,7 +63,7 @@ If you only care about a specific CI check, you can use the `checks` option with
     checks: 'test1' # we only care about the check named `test1`
 ```
 
-This will require that a CI check named `test1` must pass before a deployment (to any environment) can start. If the `test1` check is in any state other than **passing** (successful), the deployment will not start. This option will scan all CI checks (required or not) and only the checks that are specified in the `checks` option will be considered are blocking for deployment. If you have 10 failing CI checks, and only one passing check, and that check is the only one specified in the `checks` option, the deployment will start.
+This will require that the latest CI check named `test1` is healthy before a deployment (to any environment) can start. Its newest state or conclusion must be `SUCCESS`, `SKIPPED`, or `NEUTRAL`. This option will scan all CI checks (required or not), and only the checks specified in the `checks` option will be considered blocking for deployment. If you have 10 failing CI checks and one healthy selected check, the deployment will start.
 
 Please note that just because you can _deploy_, doesn't always mean you can merge. You should always review the configuration options of this Action and the branch protection (or ruleset) polices within your repository and ensure that they are configured to meet your team's requirements.
 
