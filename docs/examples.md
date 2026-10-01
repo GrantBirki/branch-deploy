@@ -4,12 +4,15 @@ This section contains real world and common examples of how you could use this A
 
 > Note: Examples use `uses: grantbirki/branch-deploy@vX.X.X` as a placeholder. Choose a version from [this repository's releases](https://github.com/grantbirki/branch-deploy/releases) that supports the features you use, or pin its full commit SHA.
 
+> **Start here for a new credentialed workflow:** Use the [Hardened Workflow Starting Point](#hardened-workflow-starting-point). The remaining examples explain specific integrations and migration paths. Unless noted otherwise, they may combine admission, pull request code, deployment tooling, and credentials in one job. Treat them as references, not security baselines.
+
 ## Table of Contents
 
 Quick links below to jump to a specific branch-deploy example:
 
 - [Examples](#examples)
   - [Table of Contents](#table-of-contents)
+  - [Hardened Workflow Starting Point](#hardened-workflow-starting-point)
   - [Simple Example](#simple-example)
   - [Terraform](#terraform)
   - [Terraform with Trusted Checkouts](#terraform-with-trusted-checkouts)
@@ -23,9 +26,177 @@ Quick links below to jump to a specific branch-deploy example:
   - [Multiple Jobs with GitHub Pages and Astro](#multiple-jobs-with-github-pages-and-astro)
   - [Multiple Jobs with GitHub Environments](#multiple-jobs-with-github-environments)
 
+## Hardened Workflow Starting Point
+
+This is the recommended starting point for a new workflow that uses deployment credentials. It requires Branch Deploy `v12.1.0` or later and pins that release to its full commit SHA. Update both Branch Deploy references together when upgrading.
+
+Before a runner starts, the `branch-deploy` job accepts pull request comments only from a repository `OWNER` or organization `MEMBER`. `COLLABORATOR` is deliberately omitted; add it to the allowlist only if outside collaborators should be able to request deployments. This field describes the commenter's association with the repository, not the pull request head, so Branch Deploy's secure `allow_forks: false` default remains the fork control and the Action still performs its repository-permission and request-admission checks.
+
+The four jobs keep code trust separate from deployment authority:
+
+1. `branch-deploy` evaluates the IssueOps request without checking out pull request code. It has no deployment environment, provider credentials, or OIDC permission.
+2. `validate` checks out the exact admitted candidate SHA with read-only repository access. It checks out deployment helpers separately at the exact trusted workflow SHA from Branch Deploy's result context.
+3. `deploy` runs only after validation and only for `.deploy`. It checks out the same candidate and trusted SHAs, repeats the fail-closed validation, and gives the deployment token only to the trusted helper step.
+4. `result` checks out no code. It reports the selected validation and deployment results through [result mode](result-mode.md).
+
+The example assumes that the protected default branch contains `.github/scripts/validate-candidate` and `.github/scripts/deploy-candidate`. The validation helper must inspect candidate content without executing candidate-controlled tools, providers, hooks, or package scripts. The deployment helper owns credential use and must fail before provider execution when the candidate violates policy.
+
+`.noop` runs `validate` and then `result`; it skips the credentialed `deploy` job. `.deploy` runs all four jobs and accepts only `production` as its target. Fork deployments are disabled, checkouts do not persist credentials, no cache or artifact crosses the boundary, and every candidate checkout uses the exact SHA admitted by Branch Deploy.
+
+```yaml
+name: branch-deploy
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  branch-deploy:
+    name: branch-deploy
+    if: >-
+      ${{
+        github.event.issue.pull_request &&
+        contains(
+          fromJSON('["OWNER", "MEMBER"]'),
+          github.event.comment.author_association
+        )
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      checks: read
+      contents: write
+      deployments: write
+      pull-requests: write
+      statuses: read
+    outputs:
+      continue: ${{ steps.branch-deploy.outputs.continue }}
+      context: ${{ steps.branch-deploy.outputs.context }}
+      noop: ${{ steps.branch-deploy.outputs.noop }}
+      sha: ${{ steps.branch-deploy.outputs.sha }}
+    steps:
+      - name: branch-deploy
+        id: branch-deploy
+        uses: grantbirki/branch-deploy@a7a7ea40a15a79a036322c2924ab74f5eded702c # v12.1.0
+        with:
+          environment_targets: production
+          skip_completing: true
+
+  validate:
+    needs: branch-deploy
+    if: >-
+      ${{ needs.branch-deploy.outputs.continue == 'true' &&
+          fromJSON(needs.branch-deploy.outputs.context).run_attempt == github.run_attempt }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: checkout trusted tools
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ fromJSON(needs.branch-deploy.outputs.context).trusted_sha }}
+          path: trusted
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: checkout candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.branch-deploy.outputs.sha }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: verify checkouts
+        env:
+          EXPECTED_CANDIDATE_SHA: ${{ needs.branch-deploy.outputs.sha }}
+          EXPECTED_TRUSTED_SHA: ${{ fromJSON(needs.branch-deploy.outputs.context).trusted_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$EXPECTED_CANDIDATE_SHA"
+          test "$(git -C trusted rev-parse HEAD)" = "$EXPECTED_TRUSTED_SHA"
+
+      - name: validate candidate
+        env:
+          CANDIDATE_DIR: ${{ github.workspace }}/candidate
+        run: ./trusted/.github/scripts/validate-candidate "$CANDIDATE_DIR"
+
+  deploy:
+    needs: [branch-deploy, validate]
+    if: >-
+      ${{ needs.branch-deploy.outputs.continue == 'true' &&
+          needs.branch-deploy.outputs.noop != 'true' &&
+          needs.validate.result == 'success' &&
+          fromJSON(needs.branch-deploy.outputs.context).run_attempt == github.run_attempt }}
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: branch-deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: checkout trusted tools
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ fromJSON(needs.branch-deploy.outputs.context).trusted_sha }}
+          path: trusted
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: checkout candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.branch-deploy.outputs.sha }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: verify checkouts
+        env:
+          EXPECTED_CANDIDATE_SHA: ${{ needs.branch-deploy.outputs.sha }}
+          EXPECTED_TRUSTED_SHA: ${{ fromJSON(needs.branch-deploy.outputs.context).trusted_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$EXPECTED_CANDIDATE_SHA"
+          test "$(git -C trusted rev-parse HEAD)" = "$EXPECTED_TRUSTED_SHA"
+
+      - name: revalidate candidate
+        env:
+          CANDIDATE_DIR: ${{ github.workspace }}/candidate
+        run: ./trusted/.github/scripts/validate-candidate "$CANDIDATE_DIR"
+
+      - name: deploy candidate
+        env:
+          CANDIDATE_DIR: ${{ github.workspace }}/candidate
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+        run: ./trusted/.github/scripts/deploy-candidate "$CANDIDATE_DIR"
+
+  result:
+    needs: [branch-deploy, validate, deploy]
+    if: ${{ always() && needs.branch-deploy.outputs.continue == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      deployments: write
+      pull-requests: write
+    steps:
+      - name: report result
+        uses: grantbirki/branch-deploy@a7a7ea40a15a79a036322c2924ab74f5eded702c # v12.1.0
+        with:
+          result_mode: true
+          context: ${{ needs.branch-deploy.outputs.context }}
+          job_results: ${{ needs.branch-deploy.outputs.noop == 'true' && format('["{0}"]', needs.validate.result) || format('["{0}","{1}"]', needs.validate.result, needs.deploy.result) }}
+```
+
+This layout does not turn pull request code into trusted code. The trusted helpers still need a repository-specific policy for what candidate content may reach a provider. The deployment environment still needs appropriate reviewers, narrowly scoped secrets, and recovery procedures. For the underlying model, see [Trusted Checkouts](trusted-checkouts.md), [Result Mode](result-mode.md), and the [security hardening guides](security_hardening_guides/README.md).
+
 ## Simple Example
 
 This is the simplest possible example of how you could use the branch-deploy Action for reference
+
+> **Reference example:** This compact workflow shows output routing in one job. Because it does not separate admission, pull request code, and deployment credentials, use the [hardened starting point](#hardened-workflow-starting-point) for a new credentialed workflow.
 
 - `.noop` will run the noop deploy step only (you can configure noop deployments however you like, this is just an example)
 - `.deploy` will deploy the current branch via the deploy step only (you can configure deployments however you like, this is just an example)
@@ -77,6 +248,8 @@ jobs:
 ## Terraform
 
 This example shows how you could use this Action with [Terraform](https://www.terraform.io/)
+
+> **Migration example:** This workflow runs admission, candidate Terraform, and provider credentials in one job. Before adapting it, review the [hardened starting point](#hardened-workflow-starting-point) and [Terraform plan hardening guide](security_hardening_guides/terraform-plans.md).
 
 - `.noop` triggers a Terraform plan
 - `.deploy` triggers a Terraform apply
@@ -200,8 +373,7 @@ jobs:
 
 ## Terraform with Trusted Checkouts
 
-This example shows a hardened Terraform setup that separates trusted deployment
-helper code from the working pull request code selected by branch-deploy.
+This migration example explains trusted checkout mechanics across an existing multi-workflow setup. It keeps helper code separate, but its primary branch workflow still runs candidate-controlled Terraform with deployment credentials in one job. New credentialed workflows should start with the [Hardened Workflow Starting Point](#hardened-workflow-starting-point).
 
 - `.noop` runs `terraform plan` from the exact working commit SHA selected by branch-deploy
 - `.deploy` runs `terraform apply` from that same working commit SHA

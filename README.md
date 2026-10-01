@@ -662,8 +662,9 @@ jobs:
 
 ## Examples
 
-This section contains real world examples of how this Action can be used
+For a new workflow that can access credentials or other privileged capabilities, start with the hardened example. The remaining examples explain specific integrations and migration paths; review their security notes before adapting them.
 
+- [Hardened Workflow Starting Point](docs/examples.md#hardened-workflow-starting-point) (recommended)
 - [Terraform](docs/examples.md#terraform)
 - [Terraform with Trusted Checkouts](docs/examples.md#terraform-with-trusted-checkouts)
 - [Heroku](docs/examples.md#heroku)
