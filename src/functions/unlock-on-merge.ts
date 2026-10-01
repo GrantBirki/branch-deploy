@@ -131,6 +131,11 @@ export async function unlockOnMerge(
             `🔓 removed lock - environment: ${COLORS.highlight}${environment}${COLORS.reset}`
           )
         } else {
+          if (
+            (await currentLockRef(octokit, context, lockBranch)) === lockRefSha
+          ) {
+            throw new Error('Could not remove the original deployment lock')
+          }
           core.info(
             `⏩ original lock could not be removed for environment ${COLORS.highlight}${environment}${COLORS.reset} - leaving the current lock in place`
           )

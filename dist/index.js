@@ -44502,6 +44502,9 @@ async function unlockOnMerge(octokit, context, environment_targets) {
                     info(`🔓 removed lock - environment: ${COLORS.highlight}${environment}${COLORS.reset}`);
                 }
                 else {
+                    if ((await unlock_on_merge_currentLockRef(octokit, context, lockBranch)) === lockRefSha) {
+                        throw new Error('Could not remove the original deployment lock');
+                    }
                     info(`⏩ original lock could not be removed for environment ${COLORS.highlight}${environment}${COLORS.reset} - leaving the current lock in place`);
                 }
             }

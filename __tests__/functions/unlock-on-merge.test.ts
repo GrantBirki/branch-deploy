@@ -10,6 +10,7 @@ import type {
 } from '../../src/types.ts'
 import {createContext, createOctokit} from '../test-helpers.ts'
 import {
+  assertCalledTimes,
   assertCalledWith,
   assertNotCalled,
   createMock,
@@ -202,16 +203,32 @@ test('binds lock ownership and deletion to each observed lock ref', async () => 
 
 test('leaves replacement locks in place when conditional removal fails', async () => {
   unlockIfUnchangedMock.mock.mockImplementation(() => Promise.resolve(false))
-
-  assert.strictEqual(
-    await unlockOnMerge(octokit, context, environmentTargets),
-    true
+  queueMockImplementation(
+    getBranchMock,
+    () => Promise.resolve({data: {commit: {sha: lockRefSha}}}),
+    () =>
+      Promise.resolve({
+        data: {commit: {sha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'}}
+      })
   )
+
+  assert.strictEqual(await unlockOnMerge(octokit, context, 'production'), true)
   assertCalledWith(
     infoMock,
     `⏩ original lock could not be removed for environment ${COLORS.highlight}production${COLORS.reset} - leaving the current lock in place`
   )
   assertCalledWith(setOutputMock, 'unlocked_environments', '')
+})
+
+test('propagates operational conditional removal failures', async () => {
+  unlockIfUnchangedMock.mock.mockImplementation(() => Promise.resolve(false))
+
+  await assert.rejects(
+    unlockOnMerge(octokit, context, 'production'),
+    new Error('Could not remove the original deployment lock')
+  )
+  assertCalledTimes(getBranchMock, 2)
+  assertNotCalled(setOutputMock)
 })
 
 test('fails closed when the current lock cannot be inspected', async () => {
