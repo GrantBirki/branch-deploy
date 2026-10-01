@@ -1,18 +1,16 @@
 import assert from 'node:assert/strict'
 import {beforeEach, mock, test} from 'node:test'
 import {COLORS} from '../../src/functions/colors.ts'
-import type {
-  SilentUnlockRequest,
-  SilentUnlockResult
-} from '../../src/functions/unlock.ts'
+import {API_HEADERS} from '../../src/functions/api-headers.ts'
+import type {UnlockOnMergeOctokit} from '../../src/functions/unlock-on-merge.ts'
 import type {
   BranchDeployContext,
-  BranchDeployOctokit,
   LockData,
   PullRequestContext
 } from '../../src/types.ts'
 import {createContext, createOctokit} from '../test-helpers.ts'
 import {
+  assertCalledTimes,
   assertCalledWith,
   assertNotCalled,
   createMock,
@@ -23,16 +21,18 @@ import {unsafeInvalidValue} from '../unsafe-fixtures.ts'
 
 type ActionsCore = typeof import('../../src/actions-core.ts')
 type CheckLockFile = typeof import('../../src/functions/check-lock-file.ts')
-type Lock = typeof import('../../src/functions/lock.ts')
+type UnlockIfUnchanged =
+  typeof import('../../src/functions/unlock-if-unchanged.ts')
 
 const debugMock = createMock<ActionsCore['debug']>()
 const infoMock = createMock<ActionsCore['info']>()
 const setOutputMock = createMock<ActionsCore['setOutput']>()
 const warningMock = createMock<ActionsCore['warning']>()
-const checkBranchMock = createMock<Lock['checkBranch']>()
 const checkLockFileMock = createMock<CheckLockFile['checkLockFile']>()
-const unlockMock =
-  createMock<(request: SilentUnlockRequest) => Promise<SilentUnlockResult>>()
+const unlockIfUnchangedMock =
+  createMock<UnlockIfUnchanged['unlockIfUnchanged']>()
+const getBranchMock =
+  createMock<UnlockOnMergeOctokit['rest']['repos']['getBranch']>()
 
 installModuleMock(mock, new URL('../../src/actions-core.ts', import.meta.url), {
   debug: debugMock,
@@ -47,18 +47,14 @@ installModuleMock(
 )
 installModuleMock(
   mock,
-  new URL('../../src/functions/lock.ts', import.meta.url),
-  {checkBranch: checkBranchMock}
-)
-installModuleMock(
-  mock,
-  new URL('../../src/functions/unlock.ts', import.meta.url),
-  {unlock: unlockMock}
+  new URL('../../src/functions/unlock-if-unchanged.ts', import.meta.url),
+  {unlockIfUnchanged: unlockIfUnchangedMock}
 )
 
 const {unlockOnMerge} = await import('../../src/functions/unlock-on-merge.ts')
 
 const environmentTargets = 'production,development,staging'
+const lockRefSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 const matchingLock = {
   branch: 'acceptance-branch',
   created_at: '2025-01-01T00:00:00Z',
@@ -72,8 +68,7 @@ const matchingLock = {
 } satisfies LockData
 
 let context: PullRequestContext
-let octokit: BranchDeployOctokit
-let silentUnlockResult: SilentUnlockResult
+let octokit: UnlockOnMergeOctokit
 
 function pullRequestContext(
   action: string,
@@ -98,20 +93,28 @@ beforeEach(() => {
     infoMock,
     setOutputMock,
     warningMock,
-    checkBranchMock,
     checkLockFileMock,
-    unlockMock
+    unlockIfUnchangedMock,
+    getBranchMock
   ]) {
     mockFunction.mock.resetCalls()
   }
 
-  silentUnlockResult = 'removed lock - silent'
-  unlockMock.mock.mockImplementation(() => Promise.resolve(silentUnlockResult))
+  unlockIfUnchangedMock.mock.mockImplementation(() => Promise.resolve(true))
   checkLockFileMock.mock.mockImplementation(() => Promise.resolve(matchingLock))
-  checkBranchMock.mock.mockImplementation(() => Promise.resolve(true))
+  getBranchMock.mock.mockImplementation(() =>
+    Promise.resolve({data: {commit: {sha: lockRefSha}}})
+  )
 
   context = pullRequestContext('closed', true)
-  octokit = createOctokit()
+  const client = createOctokit()
+  octokit = {
+    ...client,
+    rest: {
+      ...client.rest,
+      repos: {...client.rest.repos, getBranch: getBranchMock}
+    }
+  }
 })
 
 test('successfully unlocks all environments on a pull request merge', async () => {
@@ -149,19 +152,20 @@ test('trims whitespace around environment targets before unlocking', async () =>
   )
 
   for (const environment of ['production', 'development', 'staging']) {
-    assertCalledWith(
-      checkBranchMock,
-      octokit,
-      context,
-      `${environment}-branch-deploy-lock`
-    )
-    assertCalledWith(unlockMock, {
-      octokit,
-      context,
-      reactionId: null,
-      target: {type: 'environment', environment},
-      mode: 'silent'
+    assertCalledWith(getBranchMock, {
+      owner: 'corp',
+      repo: 'test',
+      branch: `${environment}-branch-deploy-lock`,
+      headers: API_HEADERS
     })
+    assertCalledWith(checkLockFileMock, octokit, context, lockRefSha)
+    assertCalledWith(
+      unlockIfUnchangedMock,
+      octokit,
+      context,
+      environment,
+      lockRefSha
+    )
   }
 
   assertCalledWith(
@@ -171,18 +175,73 @@ test('trims whitespace around environment targets before unlocking', async () =>
   )
 })
 
-test('finds that no deployment lock is set so none are removed', async () => {
-  silentUnlockResult = 'no deployment lock currently set - silent'
+test('binds lock ownership and deletion to each observed lock ref', async () => {
+  const observedLocks = [
+    ['production', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+    ['development', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'],
+    ['staging', 'cccccccccccccccccccccccccccccccccccccccc']
+  ] as const
+  queueMockImplementation(
+    getBranchMock,
+    ...observedLocks.map(
+      ([, sha]) =>
+        () =>
+          Promise.resolve({data: {commit: {sha}}})
+    )
+  )
 
   assert.strictEqual(
     await unlockOnMerge(octokit, context, environmentTargets),
     true
   )
+
+  for (const [environment, sha] of observedLocks) {
+    assertCalledWith(checkLockFileMock, octokit, context, sha)
+    assertCalledWith(unlockIfUnchangedMock, octokit, context, environment, sha)
+  }
+})
+
+test('leaves replacement locks in place when conditional removal fails', async () => {
+  unlockIfUnchangedMock.mock.mockImplementation(() => Promise.resolve(false))
+  queueMockImplementation(
+    getBranchMock,
+    () => Promise.resolve({data: {commit: {sha: lockRefSha}}}),
+    () =>
+      Promise.resolve({
+        data: {commit: {sha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'}}
+      })
+  )
+
+  assert.strictEqual(await unlockOnMerge(octokit, context, 'production'), true)
   assertCalledWith(
-    debugMock,
-    'unlock result for unlock-on-merge: no deployment lock currently set - silent'
+    infoMock,
+    `⏩ original lock could not be removed for environment ${COLORS.highlight}production${COLORS.reset} - leaving the current lock in place`
   )
   assertCalledWith(setOutputMock, 'unlocked_environments', '')
+})
+
+test('propagates operational conditional removal failures', async () => {
+  unlockIfUnchangedMock.mock.mockImplementation(() => Promise.resolve(false))
+
+  await assert.rejects(
+    unlockOnMerge(octokit, context, 'production'),
+    new Error('Could not remove the original deployment lock')
+  )
+  assertCalledTimes(getBranchMock, 2)
+  assertNotCalled(setOutputMock)
+})
+
+test('fails closed when the current lock cannot be inspected', async () => {
+  getBranchMock.mock.mockImplementation(() =>
+    Promise.reject(Object.assign(new Error('server error'), {status: 500}))
+  )
+
+  await assert.rejects(
+    unlockOnMerge(octokit, context, environmentTargets),
+    new Error('Could not inspect the current deployment lock')
+  )
+  assertNotCalled(checkLockFileMock)
+  assertNotCalled(unlockIfUnchangedMock)
 })
 
 test('only unlocks one environment when another belongs to a different pull request and one has no lock file', async () => {
@@ -242,9 +301,9 @@ test('only unlocks one environment when another belongs to a different pull requ
     })
   )
   queueMockImplementation(
-    checkBranchMock,
-    () => Promise.resolve(true),
-    () => Promise.resolve(false)
+    getBranchMock,
+    () => Promise.resolve({data: {commit: {sha: lockRefSha}}}),
+    () => Promise.reject(Object.assign(new Error('not found'), {status: 404}))
   )
 
   assert.strictEqual(
@@ -317,6 +376,6 @@ for (const payload of [null, undefined]) {
       infoMock,
       'event name: pull_request, action: undefined, merged: undefined'
     )
-    assertNotCalled(checkBranchMock)
+    assertNotCalled(getBranchMock)
   })
 }
