@@ -255,7 +255,7 @@ outputs:
   parsed_params:
     description: A stringified JSON object of the parsed parameters that were passed into the deployment command
   noop:
-    description: 'The string "true" if the noop trigger was found, otherwise the string "false" - Use this to conditionally control whether your deployment runs as a noop or not'
+    description: 'The string "true" if the noop trigger was found, otherwise "false". Use it to decide which deployment steps run.'
   sha:
     description: The sha of the branch to be deployed
   default_branch_tree_sha:
