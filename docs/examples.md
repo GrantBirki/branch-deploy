@@ -30,7 +30,7 @@ Quick links below to jump to a specific branch-deploy example:
 
 This is the recommended starting point for a new workflow that uses deployment credentials. It requires Branch Deploy `v12.1.0` or later and pins that release to its full commit SHA. Update both Branch Deploy references together when upgrading.
 
-Before a runner starts, the `branch-deploy` job accepts pull request comments only from a repository `OWNER` or organization `MEMBER`. `COLLABORATOR` is deliberately omitted; add it to the allowlist only if outside collaborators should be able to request deployments. This field describes the commenter's association with the repository, not the pull request head, so `allow_forks: false` remains the fork control and Branch Deploy still performs its repository-permission and request-admission checks.
+Before a runner starts, the `branch-deploy` job accepts pull request comments only from a repository `OWNER` or organization `MEMBER`. `COLLABORATOR` is deliberately omitted; add it to the allowlist only if outside collaborators should be able to request deployments. This field describes the commenter's association with the repository, not the pull request head, so Branch Deploy's secure `allow_forks: false` default remains the fork control and the Action still performs its repository-permission and request-admission checks.
 
 The four jobs keep code trust separate from deployment authority:
 
@@ -80,7 +80,6 @@ jobs:
         id: branch-deploy
         uses: grantbirki/branch-deploy@a7a7ea40a15a79a036322c2924ab74f5eded702c # v12.1.0
         with:
-          allow_forks: false
           environment_targets: production
           skip_completing: true
 

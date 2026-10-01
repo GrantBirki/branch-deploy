@@ -48,7 +48,10 @@ test('the hardened starting point admits only owner and member comments by defau
     section,
     /commenter's association with the repository, not the pull request head/u
   )
-  assert.match(section, /`allow_forks: false` remains the fork control/u)
+  assert.match(
+    section,
+    /secure `allow_forks: false` default remains the fork control/u
+  )
   assert.match(section, /repository-permission and request-admission checks/u)
 })
 
@@ -85,7 +88,7 @@ test('the hardened starting point keeps admission, validation, deployment, and r
   const deploy = job(workflow, 'deploy')
   const result = job(workflow, 'result')
 
-  assert.match(branchDeploy, /allow_forks: false/u)
+  assert.doesNotMatch(branchDeploy, /allow_forks:/u)
   assert.match(branchDeploy, /environment_targets: production/u)
   assert.match(branchDeploy, /skip_completing: true/u)
   assert.doesNotMatch(
