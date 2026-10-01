@@ -54,10 +54,11 @@ test('the hardened starting point admits only owner and member comments by defau
 
 test('the hardened starting point uses lowercase names and commented action pins', () => {
   const workflow = hardenedWorkflow()
-  const names = Array.from(
-    workflow.matchAll(/^\s*name: (.+)$/gmu),
-    match => match[1]
-  )
+  const names = Array.from(workflow.matchAll(/^\s*name: (.+)$/gmu), match => {
+    const name = match[1]
+    assert.ok(name !== undefined)
+    return name
+  })
   assert.ok(names.length > 0)
   for (const name of names) {
     assert.strictEqual(name, name.toLowerCase())
@@ -65,7 +66,11 @@ test('the hardened starting point uses lowercase names and commented action pins
 
   const actionUses = Array.from(
     workflow.matchAll(/^\s*uses: (.+)$/gmu),
-    match => match[1]
+    match => {
+      const actionUse = match[1]
+      assert.ok(actionUse !== undefined)
+      return actionUse
+    }
   )
   assert.strictEqual(actionUses.length, 6)
   for (const actionUse of actionUses) {
