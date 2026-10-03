@@ -8,6 +8,8 @@ on:
 permissions: {}
 concurrency: {group: release, queue: max}
 
+cache-mode: none
+
 jobs:
   release:
     if: ${{ github.ref == 'refs/heads/main' && (github.repository == 'github/branch-deploy' || vars.ENABLE_RELEASES == 'true') }}
@@ -38,6 +40,7 @@ jobs:
       - name: setup node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # pin@v6.4.0
         with:
+          package-manager-cache: false
           node-version-file: .node-version
 
       - name: validate the release
