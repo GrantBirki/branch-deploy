@@ -46,6 +46,8 @@ The example assumes that the protected default branch contains `.github/scripts/
 ```yaml
 name: branch-deploy
 
+cache-mode: none
+
 on:
   issue_comment:
     types: [created]
