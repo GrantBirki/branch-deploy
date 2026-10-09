@@ -429,6 +429,25 @@ test('rejects required workflows instead of guessing their expected jobs', async
   )
 })
 
+test('ordinary PRs inventory named status checks without treating workflow or deployment rules as CI names', async () => {
+  getBranchRulesMock.mock.mockImplementation(() =>
+    Promise.resolve({
+      data: [
+        {type: 'workflows', parameters: {workflows: []}},
+        {type: 'required_deployments'},
+        statusRule([{context: 'build', integration_id: 123}])
+      ]
+    })
+  )
+  assert.deepStrictEqual(
+    await loadPrStackRequiredChecks(octokit, {
+      ...requestFor(),
+      scope: 'ordinary'
+    }),
+    [{context: 'build', appId: 123}]
+  )
+})
+
 test('ignores unrelated current and future rules', async () => {
   getBranchRulesMock.mock.mockImplementation(() =>
     Promise.resolve({

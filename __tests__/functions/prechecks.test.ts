@@ -754,8 +754,10 @@ for (const membership of [undefined, null]) {
         resolvePrStackMock.mock.mockImplementation(() =>
           Promise.reject(new Error('Stack preview unavailable'))
         )
-        loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
-          Promise.reject(new Error('Stack rules unavailable'))
+        loadPrStackRequiredChecksMock.mock.mockImplementation((_, request) =>
+          request.scope === 'ordinary'
+            ? Promise.resolve([])
+            : Promise.reject(new Error('Stack rules unavailable'))
         )
 
         assert.deepStrictEqual(await prechecks(context, octokit, data), {
@@ -768,7 +770,7 @@ for (const membership of [undefined, null]) {
           expectNoStack: true
         })
         assertCalledTimes(resolvePrStackMock, 0)
-        assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+        assertCalledTimes(loadPrStackRequiredChecksMock, 1)
         assertCalledTimes(graphQLOK, 1)
         assertCalledWith(parsePrStackMembershipMock, membership)
       }
@@ -814,8 +816,10 @@ for (const [description, fullName, requiresRecheck] of [
       resolvePrStackMock.mock.mockImplementation(() =>
         Promise.reject(new Error('Stack preview unavailable'))
       )
-      loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
-        Promise.reject(new Error('Stack rules unavailable'))
+      loadPrStackRequiredChecksMock.mock.mockImplementation((_, request) =>
+        request.scope === 'ordinary'
+          ? Promise.resolve([])
+          : Promise.reject(new Error('Stack rules unavailable'))
       )
 
       assert.deepStrictEqual(await prechecks(context, octokit, data), {
@@ -835,7 +839,7 @@ for (const [description, fullName, requiresRecheck] of [
       assertCalledWith(setOutputMock, 'fork_full_name', fullName)
       assertCalledTimes(getPullsOK, 1)
       assertCalledTimes(resolvePrStackMock, 0)
-      assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+      assertCalledTimes(loadPrStackRequiredChecksMock, 1)
       assertCalledTimes(graphQLOK, 1)
     })
   }
@@ -898,7 +902,10 @@ for (const membership of [undefined, null]) {
         assert.strictEqual(result.status, scenario === 'noop review exception')
         assert.match(result.message, message)
         assertCalledTimes(resolvePrStackMock, 0)
-        assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+        assertCalledTimes(
+          loadPrStackRequiredChecksMock,
+          scenario === 'missing named CI' ? 0 : 1
+        )
         assertCalledTimes(
           updateBranchMock,
           scenario === 'forced update' ? 1 : 0
@@ -916,7 +923,7 @@ test('ignores malformed stack metadata when stack support is disabled', async ()
   assert.strictEqual((await prechecks(context, octokit, data)).status, true)
   assertCalledTimes(parsePrStackMembershipMock, 0)
   assertCalledTimes(resolvePrStackMock, 0)
-  assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+  assertCalledTimes(loadPrStackRequiredChecksMock, 1)
 })
 
 for (const allowed of [false, true]) {
@@ -936,7 +943,7 @@ for (const allowed of [false, true]) {
       assert.strictEqual(result.status, allowed)
       assert.strictEqual('stack' in result, false)
       assertCalledTimes(resolvePrStackMock, 0)
-      assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+      assertCalledTimes(loadPrStackRequiredChecksMock, allowed ? 1 : 0)
       assertCalledTimes(graphQLOK, allowed ? 1 : 0)
       if (allowed) {
         assert.ok(
@@ -1575,7 +1582,7 @@ for (const enabled of [false, true]) {
             (await prechecks(context, octokit, data)).status,
             true
           )
-          assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+          assertCalledTimes(loadPrStackRequiredChecksMock, 1)
         }
       )
     }
@@ -1745,6 +1752,130 @@ test('uses the selected stack draft state instead of older REST data', async () 
 
   assert.strictEqual(result.status, false)
   assert.match(result.message, /pull request is in a draft state/u)
+})
+
+for (const checks of ['all', 'required', 'empty list'] as const) {
+  for (const noop of [true, false]) {
+    test(`ordinary ${checks} noop=${String(noop)} blocks missing required CI even when returned checks pass`, async () => {
+      data.inputs.checks = checks === 'empty list' ? [] : checks
+      data.environmentObj.noop = noop
+      isAdminMock.mock.mockImplementation(() => Promise.resolve(true))
+      loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+        Promise.resolve([{context: 'never-started', appId: 15368}])
+      )
+      const result = await prechecks(context, octokit, data)
+      assert.equal(result.status, false)
+      assertCalledWith(setOutputMock, 'commit_status', 'MISSING')
+      assert.match(result.message, /never-started/u)
+      assertCalledTimes(resolvePrStackMock, 0)
+    })
+  }
+}
+
+test('ordinary no-CI repository remains deployable with no required checks', async () => {
+  graphQLOK.mock.mockImplementation(() =>
+    Promise.resolve({
+      repository: {
+        pullRequest: {
+          reviewDecision: null,
+          mergeStateStatus: 'BLOCKED',
+          reviews: {totalCount: 0},
+          commits: baseCommitWithOid
+        }
+      }
+    })
+  )
+  assert.equal((await prechecks(context, octokit, data)).status, true)
+  assertCalledWith(setOutputMock, 'commit_status', null)
+  assertCalledTimes(loadPrStackRequiredChecksMock, 1)
+})
+
+test('ordinary deploy-before-merge ignores BLOCKED when named CI passes', async () => {
+  graphQLOK.mock.mockImplementation(() =>
+    Promise.resolve({
+      repository: {
+        pullRequest: {
+          reviewDecision: null,
+          mergeStateStatus: 'BLOCKED',
+          reviews: {totalCount: 0},
+          commits: {
+            nodes: [
+              {
+                commit: {
+                  oid: 'abc123',
+                  statusCheckRollup: checkRollup('SUCCESS')
+                }
+              }
+            ]
+          }
+        }
+      }
+    })
+  )
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.resolve([{context: 'legacy-ci', appId: null}])
+  )
+  assert.equal((await prechecks(context, octokit, data)).status, true)
+})
+
+test('ordinary PR to an explicitly allowed non-default base reads that base policy', async () => {
+  data.inputs.stable_branch = 'release'
+  data.inputs.allow_non_default_target_branch_deployments = true
+  await prechecks(context, octokit, data)
+  assert.equal(getBranchMock.mock.calls[1]?.arguments[0]?.branch, 'main')
+  assert.partialDeepStrictEqual(
+    loadPrStackRequiredChecksMock.mock.calls[0]?.arguments[1],
+    {
+      owner: 'corp',
+      repo: 'test',
+      stableBranch: 'main',
+      scope: 'ordinary'
+    }
+  )
+})
+
+for (const base of [undefined, '']) {
+  test(`ordinary rejects unreadable allowed base ${String(base)}`, async () => {
+    data.inputs.allow_non_default_target_branch_deployments = true
+    getPullsOK.mock.mockImplementation(() =>
+      Promise.resolve({
+        status: 200,
+        data: {
+          head: {ref: 'test-ref', sha: 'abc123', repo: {fork: false}},
+          base: base === undefined ? {} : {ref: base}
+        }
+      })
+    )
+    assert.partialDeepStrictEqual(await prechecks(context, octokit, data), {
+      status: false,
+      message:
+        '### ⚠️ Cannot proceed with deployment\n\nThe Action could not read the required CI checks for this pull request. Make sure its base-branch rules are readable.'
+    })
+    assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+  })
+}
+
+test('ordinary denies deployment when its required CI policy cannot be verified', async () => {
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.reject(new Error('Unavailable'))
+  )
+  assert.partialDeepStrictEqual(await prechecks(context, octokit, data), {
+    status: false,
+    message:
+      '### ⚠️ Cannot proceed with deployment\n\nThe Action could not read the required CI checks for this pull request. Make sure its base-branch rules are readable.'
+  })
+  assertCalledTimes(graphQLOK, 0)
+})
+
+test('ordinary explicit and ignored checks keep the configured overrides', async () => {
+  data.inputs.ignored_checks = ['never-started']
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.resolve([{context: 'never-started', appId: 15368}])
+  )
+  assert.equal((await prechecks(context, octokit, data)).status, true)
+  data.inputs.checks = ['test']
+  assert.equal((await prechecks(context, octokit, data)).status, true)
+  assertCalledTimes(loadPrStackRequiredChecksMock, 1)
 })
 
 test('accepts a selected stack PR that is no longer a draft', async () => {
@@ -2068,7 +2199,7 @@ for (const membership of [undefined, null]) {
 
       await assert.rejects(prechecks(context, octokit, data), failure)
       assertCalledTimes(resolvePrStackMock, 0)
-      assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+      assertCalledTimes(loadPrStackRequiredChecksMock, 1)
     }
   )
 }
@@ -2820,6 +2951,7 @@ test('preserves the fallback when raw GraphQL debug output throws', async () => 
 })
 
 test('preserves the optional default-branch tree lookup', async () => {
+  data.inputs.checks = ['test']
   getBranchMock.mock.mockImplementationOnce(() =>
     Promise.resolve(unsafeInvalidValue<PrechecksBranchResponse>(null))
   )

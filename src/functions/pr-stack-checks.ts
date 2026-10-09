@@ -27,6 +27,7 @@ interface RequiredChecksRequest {
   readonly stableBranch: string
   readonly stableSha: string
   readonly branch: unknown
+  readonly scope?: 'ordinary'
 }
 
 function invalid(reason: string): never {
@@ -128,10 +129,13 @@ function classicChecks(
   return checks
 }
 
-function rulesetChecks(value: unknown): readonly PrStackRequiredCheck[] {
+function rulesetChecks(
+  value: unknown,
+  request: RequiredChecksRequest
+): readonly PrStackRequiredCheck[] {
   const rule = record(value)
   const type = string(rule['type'])
-  if (type === 'workflows') {
+  if (type === 'workflows' && request.scope !== 'ordinary') {
     invalid('required workflows are not supported by this preview')
   }
   if (type !== 'required_status_checks') return []
@@ -172,7 +176,7 @@ export async function loadPrStackRequiredChecks(
     if (previousPages.some(previous => isDeepStrictEqual(previous, rules))) {
       invalid('ruleset pagination did not advance')
     }
-    for (const rule of rules) checks.push(...rulesetChecks(rule))
+    for (const rule of rules) checks.push(...rulesetChecks(rule, request))
     if (rules.length < 100) break
     previousPages.push(rules)
     page += 1

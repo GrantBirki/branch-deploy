@@ -401,6 +401,45 @@ export async function prechecks(
     saveActionState('fork', 'false')
   }
 
+  if (
+    stack === null &&
+    isNotStableBranchDeploy &&
+    data.environmentObj.sha === null &&
+    !skipCi &&
+    (typeof checks === 'string' || checks.length === 0)
+  ) {
+    try {
+      // Only named CI requirements block admission, not deploy-before-merge
+      // rules. An allowed non-default base must use its own policy.
+      if (typeof baseRef !== 'string' || baseRef === '') {
+        throw new Error('Pull request base branch is unavailable')
+      }
+      const baseBranch = nonDefaultTargetBranchUsed
+        ? await octokit.rest.repos.getBranch({
+            ...context.repo,
+            branch: baseRef,
+            headers: API_HEADERS
+          })
+        : stableBaseBranch
+      stackRequiredChecks = await loadPrStackRequiredChecks(octokit, {
+        ...context.repo,
+        stableBranch: baseRef,
+        stableSha: baseBranch.data.commit.sha,
+        branch: baseBranch.data,
+        scope: 'ordinary'
+      })
+    } catch (error) {
+      core.debug(
+        `Required CI verification failed: ${legacyApiError(error).message}`
+      )
+      return {
+        message:
+          '### ⚠️ Cannot proceed with deployment\n\nThe Action could not read the required CI checks for this pull request. Make sure its base-branch rules are readable.',
+        status: false
+      }
+    }
+  }
+
   // Check to ensure PR CI checks are passing and the PR has been reviewed
   const query = `query($owner:String!, $name:String!, $number:Int!) {
                   repository(owner:$owner, name:$name) {
@@ -1058,7 +1097,7 @@ function missingRequiredStackChecks({
       ? check.context
       : `${check.context} (GitHub App ${String(check.appId)})`
   )
-  const message = `Required CI checks have not been reported for this stack: \`${names.join(', ')}\``
+  const message = `Required CI checks have not been reported for this pull request: \`${names.join(', ')}\``
   core.warning(message)
   return {
     commitStatus: 'MISSING',
