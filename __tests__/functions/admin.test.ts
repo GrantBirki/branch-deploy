@@ -118,6 +118,51 @@ test('runs isAdmin checks and finds a valid handle that is a GitHub EMU', async 
   )
 })
 
+for (const actor of [
+  'false',
+  'False',
+  'FALSE',
+  'fAlSe',
+  'true',
+  'True',
+  'TRUE',
+  'tRuE'
+]) {
+  for (const admins of [
+    'false',
+    'true',
+    'MoNaLiSa, FaLsE, TrUe',
+    'octoawesome/octo-awesome-team'
+  ]) {
+    test(`never grants admin to reserved actor ${actor} with ${admins}`, async () => {
+      process.env['INPUT_ADMINS'] = admins
+      assert.strictEqual(
+        await isAdmin(createContext({actor}), createClientMock),
+        false
+      )
+      assert.strictEqual(createClientMock.mock.callCount(), 0)
+      assert.strictEqual(requestMock.mock.callCount(), 0)
+    })
+  }
+}
+
+test('boolean tokens in a mixed admins list do not disable real handles', async () => {
+  process.env['INPUT_ADMINS'] = 'FaLsE,monalisa,TRUE'
+  assert.strictEqual(await isAdmin(context), true)
+})
+
+test('boolean tokens in a mixed admins list do not disable a real org team', async () => {
+  process.env['INPUT_ADMINS'] = 'FaLsE, octoawesome/octo-awesome-team, TRUE'
+  assert.strictEqual(await isAdmin(context, createClientMock), true)
+})
+
+for (const actor of ['false-positive', 'true_user', 'yes', 'no', 'on', 'off']) {
+  test(`preserves non-boolean admin handles like ${actor}`, async () => {
+    process.env['INPUT_ADMINS'] = actor
+    assert.strictEqual(await isAdmin(createContext({actor})), true)
+  })
+}
+
 for (const {admin, valid} of [
   {admin: '', valid: false},
   {admin: 'a', valid: true},

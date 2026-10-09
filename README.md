@@ -551,6 +551,9 @@ This Action supports a configurable input called `admins` which can be used to s
 
 The `admins` input option takes a comma separated list of GitHub handles or GitHub org teams which can bypass branch protection rules related to approvals for deployments. For example, if you give the option `admins: monalisa`, the `monalisa` user will be able to deploy without needing approval on their pull requests. CI checks will still need to pass however.
 
+> [!IMPORTANT]
+> `admins: false` is the default and designates no admins. The exact usernames `true` and `false` (case-insensitive) are reserved and cannot issue Branch Deploy commands, even through a designated team. Those words in an admin list are ignored, not treated as GitHub usernames. Other handles and `org/team` entries still work as before.
+
 It should be noted that if you do not have pull request approvals enabled in your branch protection rules, then this option will not make a difference either way
 
 Here is a simple example using only handles below (the monalisa and octocat users will be treated as admins):

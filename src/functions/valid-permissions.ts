@@ -22,6 +22,11 @@ export interface PermissionsOctokit {
   }
 }
 
+// GitHub usernames ignore case. Reserve the two YAML 1.2 boolean names only.
+export function isReservedActor(actor: string): boolean {
+  return /^(?:true|false)$/i.test(actor)
+}
+
 // Helper function to check if an actor has permissions to use this Action in a given repository
 // :param octokit: The octokit client
 // :param context: The GitHub Actions event context
@@ -35,6 +40,10 @@ export async function validPermissions(
   // fetch the defined permissions from the Action input
 
   setActionOutput('actor', context.actor)
+
+  if (isReservedActor(context.actor)) {
+    return 'GitHub usernames `true` and `false` are reserved by Branch Deploy and cannot issue commands.'
+  }
 
   // Get the permissions of the user who made the comment
   const permissionRes = await octokit.rest.repos.getCollaboratorPermissionLevel(

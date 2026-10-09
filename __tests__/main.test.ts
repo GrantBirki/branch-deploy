@@ -203,10 +203,15 @@ installModuleMock(
   new URL('../src/functions/valid-deployment-order.ts', import.meta.url),
   {validDeploymentOrder: validDeploymentOrderMock}
 )
+const actualValidPermissions =
+  await import('../src/functions/valid-permissions.ts')
 installModuleMock(
   mock,
   new URL('../src/functions/valid-permissions.ts', import.meta.url),
-  {validPermissions: validPermissionsMock}
+  {
+    ...actualValidPermissions,
+    validPermissions: validPermissionsMock
+  }
 )
 
 const {run} = await import('../src/main.ts')
@@ -1875,6 +1880,35 @@ test('runs the action in lock mode and fails due to bad permissions', async () =
   assertCalledWith(saveStateMock, 'comment_id', 123)
   assertCalledWith(setFailedMock, permissionsMsg)
 })
+
+for (const [body, operation] of [
+  ['.help', 'help'],
+  ['.lock', 'lock'],
+  ['.unlock', 'unlock'],
+  ['.wcid', 'lock_info']
+] as const) {
+  test(`blocks reserved actors before ${body} can read or change locks`, async () => {
+    githubContext.actor = 'FaLsE'
+    validPermissionsMock.mock.mockImplementation(
+      actualValidPermissions.validPermissions
+    )
+    setCommentBody(body)
+    assert.strictEqual(await run(), 'failure')
+    assertOperationResult({
+      decision: 'failure',
+      reason_code: 'permission_denied',
+      operation
+    })
+    assertCalledWith(saveStateMock, 'bypass', 'true')
+    assertCalledWith(
+      setFailedMock,
+      'GitHub usernames `true` and `false` are reserved by Branch Deploy and cannot issue commands.'
+    )
+    assertNotCalled(helpMock)
+    assertNotCalled(lockMock)
+    assertNotCalled(unlockMock)
+  })
+}
 
 for (const [body, operation] of [
   ['.lock', 'lock'],

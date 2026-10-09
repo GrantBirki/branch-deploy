@@ -62,6 +62,42 @@ test('determines that a user has valid permissions to invoke the Action', async 
   assertCalledWith(setActionOutputMock, 'actor', 'monalisa')
 })
 
+for (const actor of [
+  'false',
+  'False',
+  'FALSE',
+  'fAlSe',
+  'true',
+  'True',
+  'TRUE',
+  'tRuE'
+]) {
+  test(`denies reserved actor ${actor} even when the repository permission would allow it`, async () => {
+    getPermissionMock.mock.mockImplementation(() =>
+      Promise.resolve({status: 200, data: {permission: 'admin'}})
+    )
+    assert.strictEqual(
+      await validPermissions(octokit, createContext({actor}), [
+        'admin',
+        'write'
+      ]),
+      'GitHub usernames `true` and `false` are reserved by Branch Deploy and cannot issue commands.'
+    )
+    assertCalledWith(setActionOutputMock, 'actor', actor)
+    assert.strictEqual(getPermissionMock.mock.callCount(), 0)
+  })
+}
+
+for (const actor of ['false-positive', 'true_user', 'yes', 'no', 'on', 'off']) {
+  test(`does not ban non-boolean username ${actor}`, async () => {
+    assert.strictEqual(
+      await validPermissions(octokit, createContext({actor}), permissions),
+      true
+    )
+    assert.strictEqual(getPermissionMock.mock.callCount(), 1)
+  })
+}
+
 test('determines that a user has does not valid permissions to invoke the Action', async () => {
   getPermissionMock.mock.mockImplementation(() =>
     Promise.resolve({

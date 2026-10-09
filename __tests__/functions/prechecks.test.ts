@@ -726,6 +726,23 @@ async function assertLowerStackFailure(
   assertCalledTimes(updateBranchMock, 0)
 }
 
+for (const noop of [false, true]) {
+  test(`denies boolean-named actors at admission for ${noop ? 'noop' : 'deploy'}`, async () => {
+    context = createContext({...context, actor: 'TrUe'})
+    data.environmentObj.noop = noop
+    const result = await prechecks(context, octokit, data)
+    assert.deepStrictEqual(result, {
+      status: false,
+      message:
+        'GitHub usernames `true` and `false` are reserved by Branch Deploy and cannot issue commands.'
+    })
+    assertCalledTimes(getCollabOK, 0)
+    assertCalledTimes(getPullsOK, 0)
+    assertCalledTimes(graphQLOK, 0)
+    assertCalledTimes(isAdminMock, 0)
+  })
+}
+
 test('does not resolve PR stacks while the feature is disabled', async () => {
   mockNativeStack()
   data.inputs.enable_pr_stacks = false
