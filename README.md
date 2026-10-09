@@ -548,11 +548,9 @@ Here are some additional security best practices to consider:
 
 ### Workflow reruns 🔁
 
-Branch Deploy stops on workflow attempt 2 or later by default, before it processes commands or calls GitHub. This applies to deployments, noops, lock commands, and all alternate modes. To try again after a failed deployment, post a fresh command so a new workflow run checks the requesting user's permissions.
+Reruns are off by default because GitHub reuses the original actor's permissions. For IssueOps, post a new command to retry. If you accept the risk, set `allow_reruns: true` on each invocation that needs it.
 
-GitHub runs rerun attempts with the original actor's privileges, which can differ from the person requesting the rerun. If your team accepts that risk, set `allow_reruns: true` on each Branch Deploy invocation that needs to run on later attempts. Normal permissions and checks still apply; this does not change whose privileges GitHub supplies. Result mode still requires start and completion in the same run and attempt.
-
-> ⚠️ This default intentionally changes existing rerun behavior. The guard only protects jobs that invoke this Action. Keep the [result-mode worker attempt guards](docs/result-mode.md#usage) or equivalent checks in separate deployment jobs; rerunning only those jobs never invokes Branch Deploy.
+Separate deployment jobs still need [attempt guards](docs/result-mode.md#usage); Branch Deploy cannot block a job it never runs in.
 
 ### Admins 👩‍🔬
 
