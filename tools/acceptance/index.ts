@@ -4009,7 +4009,12 @@ const scenarios = [
             assertReason(context, result, 'prechecks_failed')
             assertNoDeployment(context, result)
             assertNoLockRoutes(context)
-            assertCommentIncludes(context, 'acceptance (GitHub App 15368)')
+            assertCommentIncludes(
+              context,
+              testCase.name === 'unknown App'
+                ? 'UNAVAILABLE'
+                : 'acceptance (GitHub App 15368)'
+            )
             assertCommentIncludes(context, 'PR #1')
           }
         })
@@ -4075,6 +4080,98 @@ const scenarios = [
             }
           }
         )
+      }
+    }
+  },
+  {
+    name: 'ordinary CI App verification and legacy source policy through main and post',
+    run: async () => {
+      for (const mode of [
+        'verified modern',
+        'modern noop',
+        'moved check commit',
+        'wrong App',
+        'unavailable App',
+        'any-source legacy',
+        'App-bound legacy'
+      ] as const) {
+        await withMockGitHub(`required CI source ${mode}`, async context => {
+          const legacy =
+            mode === 'any-source legacy' || mode === 'App-bound legacy'
+          const accepted =
+            mode === 'verified modern' ||
+            mode === 'modern noop' ||
+            mode === 'any-source legacy'
+          setClassicRequiredChecks(context.state, [
+            {
+              context: 'acceptance',
+              app_id: mode === 'any-source legacy' ? null : 15368
+            }
+          ])
+          context.state.rollupContexts = legacy
+            ? [
+                {
+                  context: 'acceptance',
+                  isRequired: true,
+                  state: 'SUCCESS',
+                  type: 'status-context'
+                }
+              ]
+            : [
+                {
+                  conclusion: 'SUCCESS',
+                  databaseId: 40,
+                  integrationId: null,
+                  isRequired: true,
+                  name: 'acceptance',
+                  type: 'check-run'
+                }
+              ]
+          if (mode === 'modern noop') setTriggerComment(context.state, '.noop')
+          if (mode !== 'unavailable App') {
+            context.state.checkRuns.set(40, {
+              id: 40,
+              node_id: 'CR_40',
+              name: 'acceptance',
+              head_sha:
+                mode === 'moved check commit'
+                  ? ACCEPTANCE_SHAS.default
+                  : ACCEPTANCE_SHAS.feature,
+              conclusion: 'success',
+              app: {id: mode === 'wrong App' ? 987 : 15368}
+            })
+          }
+          const inputs = {checks: 'required', use_security_warnings: 'false'}
+          const result = await runMain(context, inputs)
+          assert.equal(
+            context.routeLog.filter(
+              route => route.path === apiPath('/check-runs/40')
+            ).length,
+            legacy ? 0 : 1,
+            diagnostics(context, result)
+          )
+          if (accepted) {
+            assertExit(context, result, 0)
+            assertOutput(context, result, 'continue', 'true')
+          } else {
+            assertExit(context, result, 1)
+            assertReason(context, result, 'prechecks_failed')
+            assertNoDeployment(context, result)
+            assertNoLockRoutes(context)
+            if (mode === 'App-bound legacy') {
+              assertCommentIncludes(
+                context,
+                'Legacy commit statuses cannot prove a required GitHub App'
+              )
+            }
+          }
+          const post = await runPost(context, result, inputs)
+          assertExit(context, post, 0)
+          if (!accepted) {
+            assertNoDeployment(context, result)
+            assertNoLockRoutes(context)
+          }
+        })
       }
     }
   },

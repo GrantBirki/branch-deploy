@@ -24,6 +24,8 @@ For PR deployments and noops, `checks: all` (the default) and `checks: required`
 
 If GitHub reports that rulesets are unavailable on the repository's plan, ordinary PRs still check classic protection. Other policy-read errors stop deployment. Required-workflow rules are not treated as named status checks for ordinary PRs. Explicit check lists, `ignored_checks`, `skip_ci`, and stable-branch/SHA deployments retain their usual behavior.
 
+When a required check names a specific GitHub App, Branch Deploy verifies that App. If the App is hidden in the PR's check data, the Action checks the exact run using the GitHub Checks API. If GitHub cannot verify the source, deployment stops. Legacy commit statuses still work for `any source` rules, but cannot satisfy an App-bound rule; report those checks with the Checks API instead.
+
 ## Using the `checks` Input Option
 
 This section will contain a few examples of how you can use the `checks` option

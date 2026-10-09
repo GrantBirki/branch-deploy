@@ -117,6 +117,7 @@ function assertNotCalledWith<FunctionType extends Callable>(
 interface PrechecksOctokitFixture {
   graphql: Mock<PrechecksOctokit['graphql']>
   rest: {
+    checks: {get: Mock<PrechecksOctokit['rest']['checks']['get']>}
     pulls: {
       get: Mock<PrechecksOctokit['rest']['pulls']['get']>
       updateBranch: Mock<PrechecksOctokit['rest']['pulls']['updateBranch']>
@@ -166,6 +167,7 @@ let getBranchMock: Mock<PrechecksOctokit['rest']['repos']['getBranch']>
 let getBranchRulesMock: Mock<
   PrechecksOctokit['rest']['repos']['getBranchRules']
 >
+let getCheckRunMock: Mock<PrechecksOctokit['rest']['checks']['get']>
 let updateBranchMock: Mock<PrechecksOctokit['rest']['pulls']['updateBranch']>
 let octokit: PrechecksOctokitFixture
 let data: DeepMutable<PrecheckData>
@@ -337,9 +339,13 @@ beforeEach(testContext => {
   updateBranchMock = createMock<
     PrechecksOctokit['rest']['pulls']['updateBranch']
   >(() => Promise.resolve({status: 202}))
+  getCheckRunMock = createMock<PrechecksOctokit['rest']['checks']['get']>(() =>
+    Promise.reject(new Error('Check run unavailable'))
+  )
 
   octokit = {
     rest: {
+      checks: {get: getCheckRunMock},
       repos: {
         compareCommits: compareCommitsMock,
         getBranch: getBranchMock,
@@ -1338,12 +1344,19 @@ for (const mode of ['all', 'required', 'empty list'] as const) {
           const result = await prechecks(context, octokit, data)
 
           assert.strictEqual(result.status, false)
-          assert.match(result.message, /commitStatus: `MISSING`/u)
-          assert.ok(result.message.includes(missingContext))
+          const expectedStatus =
+            description === 'missing GitHub App identity'
+              ? 'UNAVAILABLE'
+              : 'MISSING'
+          assert.ok(
+            result.message.includes(`commitStatus: \`${expectedStatus}\``)
+          )
+          if (expectedStatus === 'MISSING')
+            assert.ok(result.message.includes(missingContext))
           if (pullNumber === 121) {
             assert.ok(result.message.includes('PR #121 in stack #7'))
           } else {
-            assertCalledWith(setOutputMock, 'commit_status', 'MISSING')
+            assertCalledWith(setOutputMock, 'commit_status', expectedStatus)
           }
           assertCalledTimes(loadPrStackRequiredChecksMock, 1)
           assertCalledTimes(updateBranchMock, 0)
@@ -1876,6 +1889,278 @@ test('ordinary explicit and ignored checks keep the configured overrides', async
   data.inputs.checks = ['test']
   assert.equal((await prechecks(context, octokit, data)).status, true)
   assertCalledTimes(loadPrStackRequiredChecksMock, 1)
+})
+
+const HIDDEN_CHECK = {
+  id: 'CR_123',
+  databaseId: 123,
+  name: 'ci',
+  isRequired: true,
+  conclusion: 'SUCCESS',
+  checkSuite: {app: null}
+} as const
+const VISIBLE_CHECK_RUN = {
+  id: 123,
+  node_id: 'CR_123',
+  head_sha: 'abc123',
+  name: 'ci',
+  conclusion: 'success',
+  app: {id: 15368}
+} as const
+
+function setAppCheckPolicy(
+  reported: readonly RawCheckResult[],
+  required: readonly PrStackRequiredCheck[] = [{context: 'ci', appId: 15368}]
+): void {
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.resolve(required)
+  )
+  graphQLOK.mock.mockImplementation(() =>
+    Promise.resolve(initialCheckPage(reported, LAST_PAGE, 'SUCCESS'))
+  )
+}
+
+test('resolves a hidden App from the exact run before admitting an ordinary PR', async () => {
+  setAppCheckPolicy([HIDDEN_CHECK])
+  getCheckRunMock.mock.mockImplementation(() =>
+    Promise.resolve({data: VISIBLE_CHECK_RUN})
+  )
+  assert.equal((await prechecks(context, octokit, data)).status, true)
+  assertCalledTimes(getCheckRunMock, 1)
+  assert.partialDeepStrictEqual(getCheckRunMock.mock.calls[0]?.arguments[0], {
+    ...context.repo,
+    check_run_id: 123
+  })
+  assertCalledWith(setOutputMock, 'commit_status', 'SUCCESS')
+})
+
+for (const checks of ['all', 'required'] as const) {
+  test(`${checks}: one recovered App never satisfies a second App with the same check name`, async () => {
+    data.inputs.checks = checks
+    setAppCheckPolicy(
+      [HIDDEN_CHECK],
+      [
+        {context: 'ci', appId: 15368},
+        {context: 'ci', appId: 987}
+      ]
+    )
+    getCheckRunMock.mock.mockImplementation(() =>
+      Promise.resolve({data: VISIBLE_CHECK_RUN})
+    )
+    const result = await prechecks(context, octokit, data)
+    assert.equal(result.status, false)
+    assert.match(result.message, /ci \(GitHub App 987\)/u)
+    assertCalledWith(setOutputMock, 'commit_status', 'MISSING')
+  })
+}
+
+test('a newer hidden failing check supersedes an older passing visible check', async () => {
+  setAppCheckPolicy([
+    {
+      ...HIDDEN_CHECK,
+      id: 'CR_120',
+      databaseId: 120,
+      checkSuite: {app: {databaseId: 15368}}
+    },
+    {...HIDDEN_CHECK, conclusion: 'FAILURE'}
+  ])
+  getCheckRunMock.mock.mockImplementation(() =>
+    Promise.resolve({data: {...VISIBLE_CHECK_RUN, conclusion: 'failure'}})
+  )
+  assert.equal((await prechecks(context, octokit, data)).status, false)
+  assertCalledWith(setOutputMock, 'commit_status', 'FAILURE')
+})
+
+test('recovers a newer optional result before grouping it with an earlier required result', async () => {
+  data.inputs.checks = 'required'
+  setAppCheckPolicy([
+    {
+      ...HIDDEN_CHECK,
+      id: 'CR_120',
+      databaseId: 120,
+      checkSuite: {app: {databaseId: 15368}}
+    },
+    {...HIDDEN_CHECK, isRequired: false}
+  ])
+  getCheckRunMock.mock.mockImplementation(() =>
+    Promise.resolve({data: VISIBLE_CHECK_RUN})
+  )
+  const result = await prechecks(context, octokit, data)
+  assert.equal(result.status, false)
+  assertCalledTimes(getCheckRunMock, 1)
+  assertCalledWith(setOutputMock, 'commit_status', 'MISSING')
+})
+
+for (const {name, value} of [
+  {name: 'not an object', value: 'bad'},
+  {name: 'null', value: null},
+  {name: 'missing ID', value: {}},
+  {name: 'another run ID', value: {...VISIBLE_CHECK_RUN, id: 124}},
+  {name: 'missing node ID', value: {id: 123}},
+  {name: 'another node ID', value: {...VISIBLE_CHECK_RUN, node_id: 'CR_other'}},
+  {name: 'missing SHA', value: {id: 123, node_id: 'CR_123'}},
+  {name: 'another commit', value: {...VISIBLE_CHECK_RUN, head_sha: 'other'}},
+  {
+    name: 'missing name',
+    value: {id: 123, node_id: 'CR_123', head_sha: 'abc123'}
+  },
+  {name: 'another name', value: {...VISIBLE_CHECK_RUN, name: 'other'}},
+  {
+    name: 'missing conclusion',
+    value: {id: 123, node_id: 'CR_123', head_sha: 'abc123', name: 'ci'}
+  },
+  {
+    name: 'a changed conclusion',
+    value: {...VISIBLE_CHECK_RUN, conclusion: 'failure'}
+  },
+  {
+    name: 'missing App',
+    value: {
+      id: 123,
+      node_id: 'CR_123',
+      head_sha: 'abc123',
+      name: 'ci',
+      conclusion: 'success'
+    }
+  },
+  {name: 'null App', value: {...VISIBLE_CHECK_RUN, app: null}},
+  {name: 'non-object App', value: {...VISIBLE_CHECK_RUN, app: 'other'}},
+  {name: 'missing App ID', value: {...VISIBLE_CHECK_RUN, app: {}}},
+  {name: 'text App ID', value: {...VISIBLE_CHECK_RUN, app: {id: '15368'}}},
+  {name: 'noninteger App ID', value: {...VISIBLE_CHECK_RUN, app: {id: 2.5}}},
+  {name: 'zero App ID', value: {...VISIBLE_CHECK_RUN, app: {id: 0}}}
+]) {
+  test(`refuses REST check evidence with ${name}`, async () => {
+    setAppCheckPolicy([HIDDEN_CHECK])
+    getCheckRunMock.mock.mockImplementation(() =>
+      Promise.resolve({data: value})
+    )
+    assert.equal((await prechecks(context, octokit, data)).status, false)
+    assertCalledWith(setOutputMock, 'commit_status', 'UNAVAILABLE')
+  })
+}
+
+for (const databaseId of [undefined, null, 0, 2.5]) {
+  test(`does not guess a missing App for run ID ${String(databaseId)}`, async () => {
+    const {databaseId: _, ...rest} = HIDDEN_CHECK
+    setAppCheckPolicy([databaseId === undefined ? rest : {...rest, databaseId}])
+    assert.equal((await prechecks(context, octokit, data)).status, false)
+    assertCalledTimes(getCheckRunMock, 0)
+    assertCalledWith(setOutputMock, 'commit_status', 'UNAVAILABLE')
+  })
+}
+test('does not guess a missing App without a GraphQL node ID', async () => {
+  const {id: _, ...rest} = HIDDEN_CHECK
+  setAppCheckPolicy([rest])
+  assert.equal((await prechecks(context, octokit, data)).status, false)
+  assertCalledTimes(getCheckRunMock, 0)
+  assertCalledWith(setOutputMock, 'commit_status', 'UNAVAILABLE')
+})
+test('does not guess a missing App with an empty GraphQL node ID', async () => {
+  setAppCheckPolicy([{...HIDDEN_CHECK, id: ''}])
+  assert.equal((await prechecks(context, octokit, data)).status, false)
+  assertCalledTimes(getCheckRunMock, 0)
+  assertCalledWith(setOutputMock, 'commit_status', 'UNAVAILABLE')
+})
+
+for (const status of [403, 404, 500]) {
+  test(`does not accept App identity when the run API returns ${String(status)}`, async () => {
+    setAppCheckPolicy([HIDDEN_CHECK])
+    getCheckRunMock.mock.mockImplementation(() =>
+      Promise.reject(Object.assign(new Error('Unavailable'), {status}))
+    )
+    assert.equal((await prechecks(context, octokit, data)).status, false)
+    assertCalledWith(setOutputMock, 'commit_status', 'UNAVAILABLE')
+  })
+}
+
+test('a retrieved App with the wrong identity remains missing', async () => {
+  setAppCheckPolicy([HIDDEN_CHECK])
+  getCheckRunMock.mock.mockImplementation(() =>
+    Promise.resolve({data: {...VISIBLE_CHECK_RUN, app: {id: 987}}})
+  )
+  const result = await prechecks(context, octokit, data)
+  assert.equal(result.status, false)
+  assert.match(result.message, /ci \(GitHub App 15368\)/u)
+  assertCalledWith(setOutputMock, 'commit_status', 'MISSING')
+})
+
+test('a still-pending verified check is not accepted as passing', async () => {
+  setAppCheckPolicy([{...HIDDEN_CHECK, conclusion: null}])
+  getCheckRunMock.mock.mockImplementation(() =>
+    Promise.resolve({data: {...VISIBLE_CHECK_RUN, conclusion: null}})
+  )
+  assert.equal((await prechecks(context, octokit, data)).status, false)
+  assertCalledWith(setOutputMock, 'commit_status', 'PENDING')
+})
+
+for (const {name, inputs, required, reported} of [
+  {
+    name: 'visible App',
+    inputs: {},
+    required: [{context: 'ci', appId: 15368}],
+    reported: [{...HIDDEN_CHECK, checkSuite: {app: {databaseId: 15368}}}]
+  },
+  {
+    name: 'any-source modern check',
+    inputs: {},
+    required: [{context: 'ci', appId: null}],
+    reported: [HIDDEN_CHECK]
+  },
+  {
+    name: 'any-source legacy',
+    inputs: {},
+    required: [{context: 'ci', appId: null}],
+    reported: [{context: 'ci', isRequired: true, state: 'SUCCESS'}]
+  },
+  {
+    name: 'no defined policy',
+    inputs: {},
+    required: [],
+    reported: [HIDDEN_CHECK]
+  },
+  {
+    name: 'explicit checks',
+    inputs: {checks: ['ci']},
+    required: [{context: 'ci', appId: 15368}],
+    reported: [HIDDEN_CHECK]
+  },
+  {
+    name: 'ignored checks',
+    inputs: {ignored_checks: ['ci']},
+    required: [{context: 'ci', appId: 15368}],
+    reported: [HIDDEN_CHECK]
+  },
+  {
+    name: 'skip CI',
+    inputs: {skipCi: 'production'},
+    required: [{context: 'ci', appId: 15368}],
+    reported: [HIDDEN_CHECK]
+  }
+] satisfies readonly {
+  name: string
+  inputs: Partial<DeepMutable<PrecheckData['inputs']>>
+  required: readonly PrStackRequiredCheck[]
+  reported: readonly RawCheckResult[]
+}[]) {
+  test(`does not request App metadata for ${name}`, async () => {
+    Object.assign(data.inputs, inputs)
+    setAppCheckPolicy(reported, required)
+    assert.equal((await prechecks(context, octokit, data)).status, true)
+    assertCalledTimes(getCheckRunMock, 0)
+  })
+}
+
+test('App-bound legacy statuses stay blocked and explain how to report verifiable checks', async () => {
+  setAppCheckPolicy([{context: 'ci', isRequired: true, state: 'SUCCESS'}])
+  const result = await prechecks(context, octokit, data)
+  assert.equal(result.status, false)
+  assert.match(
+    result.message,
+    /Legacy commit statuses cannot prove a required GitHub App/u
+  )
+  assertCalledTimes(getCheckRunMock, 0)
+  assertCalledWith(setOutputMock, 'commit_status', 'MISSING')
 })
 
 test('accepts a selected stack PR that is no longer a draft', async () => {

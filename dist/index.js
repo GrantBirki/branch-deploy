@@ -40659,6 +40659,7 @@ async function prechecks(context, octokit, data) {
         ignoredChecks,
         octokit,
         pullRequestNumber: context.issue.number,
+        repo: context.repo,
         result,
         skipCi,
         stackRequiredChecks
@@ -40899,6 +40900,7 @@ async function checkStackPrerequisites({ context, data, octokit, query, stack, a
                 ignoredChecks,
                 octokit,
                 pullRequestNumber: pull.number,
+                repo: context.repo,
                 result,
                 skipCi,
                 stackRequiredChecks
@@ -40940,7 +40942,7 @@ async function checkStackPrerequisites({ context, data, octokit, query, stack, a
     }
     return null;
 }
-async function evaluateCommitChecks({ checks, environment, ignoredChecks, octokit, pullRequestNumber, result, skipCi, stackRequiredChecks }) {
+async function evaluateCommitChecks({ checks, environment, ignoredChecks, octokit, pullRequestNumber, repo, result, skipCi, stackRequiredChecks }) {
     if (skipCi) {
         info(`⏩ CI checks have been ${COLORS.highlight}disabled${COLORS.reset} for the ${COLORS.highlight}${environment}${COLORS.reset} environment`);
         return { commitStatus: 'skip_ci', kind: 'skipped' };
@@ -40975,7 +40977,60 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
         if (statusCheckRollup === undefined) {
             throw new Error('The GraphQL response did not include a check rollup');
         }
-        const checkResults = await loadAllCheckResults(octokit, pullRequestNumber, commit, statusCheckRollup);
+        const checkResults = [
+            ...(await loadAllCheckResults(octokit, pullRequestNumber, commit, statusCheckRollup))
+        ];
+        // Resolve identities before grouping reruns, or a newer hidden result could
+        // escape the earlier known App's group. Never resolve from display URLs.
+        if (stackRequiredChecks !== null) {
+            for (const [index, check] of checkResults.entries()) {
+                if (isCheckRun(check) &&
+                    checkIntegrationId(check) === null &&
+                    !ignoredChecks.includes(check.name) &&
+                    stackRequiredChecks.some(required => required.appId !== null && required.context === check.name)) {
+                    const id = check.databaseId;
+                    if (typeof id !== 'number' ||
+                        !Number.isSafeInteger(id) ||
+                        id < 1 ||
+                        typeof check.id !== 'string' ||
+                        check.id === '') {
+                        throw new Error('Cannot verify required check App: missing check run identity');
+                    }
+                    const { data: run } = await octokit.rest.checks.get({
+                        ...repo,
+                        check_run_id: id,
+                        headers: API_HEADERS
+                    });
+                    if (typeof run !== 'object' ||
+                        run === null ||
+                        !('id' in run) ||
+                        run.id !== id ||
+                        !('node_id' in run) ||
+                        run.node_id !== check.id ||
+                        !('head_sha' in run) ||
+                        run.head_sha !== commit.oid ||
+                        !('name' in run) ||
+                        run.name !== check.name ||
+                        !('conclusion' in run) ||
+                        (typeof run.conclusion === 'string'
+                            ? run.conclusion.toUpperCase()
+                            : run.conclusion) !== check.conclusion ||
+                        !('app' in run) ||
+                        typeof run.app !== 'object' ||
+                        run.app === null ||
+                        !('id' in run.app) ||
+                        typeof run.app.id !== 'number' ||
+                        !Number.isSafeInteger(run.app.id) ||
+                        run.app.id < 1) {
+                        throw new Error('Cannot verify required check App: check run identity, SHA, name, result, or App did not match');
+                    }
+                    checkResults[index] = {
+                        ...check,
+                        checkSuite: { app: { databaseId: run.app.id } }
+                    };
+                }
+            }
+        }
         const missing = missingRequiredStackChecks({
             checks,
             checkResults,
@@ -41053,7 +41108,14 @@ function missingRequiredStackChecks({ checks, checkResults, ignoredChecks, requi
     const names = missing.map(check => check.appId === null
         ? check.context
         : `${check.context} (GitHub App ${String(check.appId)})`);
-    const message = `Required CI checks have not been reported for this pull request: \`${names.join(', ')}\``;
+    const legacyCannotProveApp = missing.some(expected => expected.appId !== null &&
+        latest.some(check => !isCheckRun(check) &&
+            check.isRequired &&
+            checkName(check) === expected.context));
+    const message = `Required CI checks have not been reported for this pull request: \`${names.join(', ')}\`` +
+        (legacyCannotProveApp
+            ? '\n\nLegacy commit statuses cannot prove a required GitHub App. Report App-bound checks with the GitHub Checks API.'
+            : '');
     warning(message);
     return {
         commitStatus: 'MISSING',
