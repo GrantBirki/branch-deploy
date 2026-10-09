@@ -3801,7 +3801,7 @@ const scenarios = [
             assertNoLockRoutes(context)
             assertCommentIncludes(
               context,
-              'Required CI checks have not been reported for this stack'
+              'Required CI checks have not been reported for this pull request'
             )
             if (number === context.state.pullRequest.number) {
               assertOutput(context, result, 'commit_status', 'MISSING')
@@ -4009,7 +4009,12 @@ const scenarios = [
             assertReason(context, result, 'prechecks_failed')
             assertNoDeployment(context, result)
             assertNoLockRoutes(context)
-            assertCommentIncludes(context, 'acceptance (GitHub App 15368)')
+            assertCommentIncludes(
+              context,
+              testCase.name === 'unknown App'
+                ? 'UNAVAILABLE'
+                : 'acceptance (GitHub App 15368)'
+            )
             assertCommentIncludes(context, 'PR #1')
           }
         })
@@ -4079,6 +4084,98 @@ const scenarios = [
     }
   },
   {
+    name: 'ordinary CI App verification and legacy source policy through main and post',
+    run: async () => {
+      for (const mode of [
+        'verified modern',
+        'modern noop',
+        'moved check commit',
+        'wrong App',
+        'unavailable App',
+        'any-source legacy',
+        'App-bound legacy'
+      ] as const) {
+        await withMockGitHub(`required CI source ${mode}`, async context => {
+          const legacy =
+            mode === 'any-source legacy' || mode === 'App-bound legacy'
+          const accepted =
+            mode === 'verified modern' ||
+            mode === 'modern noop' ||
+            mode === 'any-source legacy'
+          setClassicRequiredChecks(context.state, [
+            {
+              context: 'acceptance',
+              app_id: mode === 'any-source legacy' ? null : 15368
+            }
+          ])
+          context.state.rollupContexts = legacy
+            ? [
+                {
+                  context: 'acceptance',
+                  isRequired: true,
+                  state: 'SUCCESS',
+                  type: 'status-context'
+                }
+              ]
+            : [
+                {
+                  conclusion: 'SUCCESS',
+                  databaseId: 40,
+                  integrationId: null,
+                  isRequired: true,
+                  name: 'acceptance',
+                  type: 'check-run'
+                }
+              ]
+          if (mode === 'modern noop') setTriggerComment(context.state, '.noop')
+          if (mode !== 'unavailable App') {
+            context.state.checkRuns.set(40, {
+              id: 40,
+              node_id: 'CR_40',
+              name: 'acceptance',
+              head_sha:
+                mode === 'moved check commit'
+                  ? ACCEPTANCE_SHAS.default
+                  : ACCEPTANCE_SHAS.feature,
+              conclusion: 'success',
+              app: {id: mode === 'wrong App' ? 987 : 15368}
+            })
+          }
+          const inputs = {checks: 'required', use_security_warnings: 'false'}
+          const result = await runMain(context, inputs)
+          assert.equal(
+            context.routeLog.filter(
+              route => route.path === apiPath('/check-runs/40')
+            ).length,
+            legacy ? 0 : 1,
+            diagnostics(context, result)
+          )
+          if (accepted) {
+            assertExit(context, result, 0)
+            assertOutput(context, result, 'continue', 'true')
+          } else {
+            assertExit(context, result, 1)
+            assertReason(context, result, 'prechecks_failed')
+            assertNoDeployment(context, result)
+            assertNoLockRoutes(context)
+            if (mode === 'App-bound legacy') {
+              assertCommentIncludes(
+                context,
+                'Legacy commit statuses cannot prove a required GitHub App'
+              )
+            }
+          }
+          const post = await runPost(context, result, inputs)
+          assertExit(context, post, 0)
+          if (!accepted) {
+            assertNoDeployment(context, result)
+            assertNoLockRoutes(context)
+          }
+        })
+      }
+    }
+  },
+  {
     name: 'native PR stacks fail closed on unavailable required CI policy',
     run: async () => {
       for (const failure of [
@@ -4126,7 +4223,65 @@ const scenarios = [
     }
   },
   {
-    name: 'native PR stacks limit automatic required CI inventory',
+    name: 'ordinary PRs enforce classic CI when rulesets are unavailable on the plan',
+    run: async () => {
+      for (const mode of [
+        'no required CI',
+        'missing classic CI',
+        'permissions denied',
+        'native stack'
+      ] as const) {
+        await withMockGitHub(`rules unavailable: ${mode}`, async context => {
+          if (mode === 'native stack') seedPrStack(context.state)
+          if (mode === 'missing classic CI') {
+            setClassicRequiredChecks(context.state, [
+              {context: 'missing-required', app_id: 15368}
+            ])
+          }
+          queueFault(context.state, {
+            method: 'GET',
+            path: apiPath('/rules/branches/main'),
+            response: {
+              status: 403,
+              message:
+                mode === 'permissions denied'
+                  ? 'Resource not accessible by integration'
+                  : 'Upgrade to GitHub Pro or make this repository public to enable this feature.'
+            }
+          })
+
+          const result = await runMain(context, {
+            enable_pr_stacks: 'true',
+            checks: 'required',
+            use_security_warnings: 'false'
+          })
+          if (mode === 'no required CI') {
+            assertExit(context, result, 0)
+            assertReason(context, result, 'deployment_ready')
+          } else {
+            assertExit(context, result, 1)
+            assertReason(context, result, 'prechecks_failed')
+            assertNoDeployment(context, result)
+            assertNoLockRoutes(context)
+            if (mode === 'missing classic CI') {
+              assertOutput(context, result, 'commit_status', 'MISSING')
+              assertCommentIncludes(
+                context,
+                'missing-required (GitHub App 15368)'
+              )
+            } else {
+              assertCommentIncludes(
+                context,
+                'could not read the required CI checks'
+              )
+            }
+          }
+        })
+      }
+    }
+  },
+  {
+    name: 'ordinary PRs and stacks enforce automatic CI inventory except configured overrides',
     run: async () => {
       for (const mode of [
         'ordinary PR',
@@ -4156,7 +4311,7 @@ const scenarios = [
             use_security_warnings: 'false'
           })
 
-          if (mode === 'disabled stacks') {
+          if (mode === 'disabled stacks' || mode === 'ordinary PR') {
             assertExit(context, result, 1)
             assertReason(context, result, 'prechecks_failed')
             assertNoDeployment(context, result)
@@ -4164,11 +4319,11 @@ const scenarios = [
             assertExit(context, result, 0)
             assertReason(context, result, 'deployment_ready')
           }
-          assert.deepEqual(
+          assert.equal(
             context.routeLog.filter(
               route => route.path === apiPath('/rules/branches/main')
-            ),
-            [],
+            ).length,
+            mode === 'ordinary PR' ? 1 : 0,
             diagnostics(context, result)
           )
         })

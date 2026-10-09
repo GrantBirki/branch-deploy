@@ -40170,6 +40170,7 @@ async function prStackSnapshotMatches(octokit, snapshot) {
 ;// CONCATENATED MODULE: ./src/functions/pr-stack-checks.ts
 
 
+
 function pr_stack_checks_invalid(reason) {
     throw new Error(`Cannot verify pull request stack required checks: ${reason}`);
 }
@@ -40252,10 +40253,10 @@ function classicChecks(request) {
     }
     return checks;
 }
-function rulesetChecks(value) {
+function rulesetChecks(value, request) {
     const rule = pr_stack_checks_record(value);
     const type = pr_stack_checks_string(rule['type']);
-    if (type === 'workflows') {
+    if (type === 'workflows' && request.scope !== 'ordinary') {
         pr_stack_checks_invalid('required workflows are not supported by this preview');
     }
     if (type !== 'required_status_checks')
@@ -40274,14 +40275,29 @@ async function loadPrStackRequiredChecks(octokit, request) {
     const previousPages = [];
     let page = 1;
     while (true) {
-        const response = await octokit.rest.repos.getBranchRules({
-            owner: request.owner,
-            repo: request.repo,
-            branch: request.stableBranch,
-            per_page: 100,
-            page,
-            headers: API_HEADERS
-        });
+        let response;
+        try {
+            response = await octokit.rest.repos.getBranchRules({
+                owner: request.owner,
+                repo: request.repo,
+                branch: request.stableBranch,
+                per_page: 100,
+                page,
+                headers: API_HEADERS
+            });
+        }
+        catch (error) {
+            // No rulesets can exist on this plan. Still enforce readable classic checks.
+            if (request.scope === 'ordinary' &&
+                page === 1 &&
+                error instanceof Error &&
+                'status' in error &&
+                error.status === ERROR.messages.upgrade_or_public.status &&
+                error.message.includes(ERROR.messages.upgrade_or_public.message)) {
+                break;
+            }
+            throw error;
+        }
         const rules = pr_stack_checks_array(response.data);
         if (rules.length > 100)
             pr_stack_checks_invalid('invalid ruleset page size');
@@ -40289,7 +40305,7 @@ async function loadPrStackRequiredChecks(octokit, request) {
             pr_stack_checks_invalid('ruleset pagination did not advance');
         }
         for (const rule of rules)
-            checks.push(...rulesetChecks(rule));
+            checks.push(...rulesetChecks(rule, request));
         if (rules.length < 100)
             break;
         previousPages.push(rules);
@@ -40498,6 +40514,40 @@ async function prechecks(context, octokit, data) {
         setActionOutput('fork', 'false');
         saveActionState('fork', 'false');
     }
+    if (stack === null &&
+        isNotStableBranchDeploy &&
+        data.environmentObj.sha === null &&
+        !skipCi &&
+        (typeof checks === 'string' || checks.length === 0)) {
+        try {
+            // Only named CI requirements block admission, not deploy-before-merge
+            // rules. An allowed non-default base must use its own policy.
+            if (typeof baseRef !== 'string' || baseRef === '') {
+                throw new Error('Pull request base branch is unavailable');
+            }
+            const baseBranch = nonDefaultTargetBranchUsed
+                ? await octokit.rest.repos.getBranch({
+                    ...context.repo,
+                    branch: baseRef,
+                    headers: API_HEADERS
+                })
+                : stableBaseBranch;
+            stackRequiredChecks = await loadPrStackRequiredChecks(octokit, {
+                ...context.repo,
+                stableBranch: baseRef,
+                stableSha: baseBranch.data.commit.sha,
+                branch: baseBranch.data,
+                scope: 'ordinary'
+            });
+        }
+        catch (error) {
+            debug(`Required CI verification failed: ${legacyApiError(error).message}`);
+            return {
+                message: '### ⚠️ Cannot proceed with deployment\n\nThe Action could not read the required CI checks for this pull request. Make sure its base-branch rules are readable.',
+                status: false
+            };
+        }
+    }
     // Check to ensure PR CI checks are passing and the PR has been reviewed
     const query = `query($owner:String!, $name:String!, $number:Int!) {
                   repository(owner:$owner, name:$name) {
@@ -40609,6 +40659,7 @@ async function prechecks(context, octokit, data) {
         ignoredChecks,
         octokit,
         pullRequestNumber: context.issue.number,
+        repo: context.repo,
         result,
         skipCi,
         stackRequiredChecks
@@ -40849,6 +40900,7 @@ async function checkStackPrerequisites({ context, data, octokit, query, stack, a
                 ignoredChecks,
                 octokit,
                 pullRequestNumber: pull.number,
+                repo: context.repo,
                 result,
                 skipCi,
                 stackRequiredChecks
@@ -40890,7 +40942,7 @@ async function checkStackPrerequisites({ context, data, octokit, query, stack, a
     }
     return null;
 }
-async function evaluateCommitChecks({ checks, environment, ignoredChecks, octokit, pullRequestNumber, result, skipCi, stackRequiredChecks }) {
+async function evaluateCommitChecks({ checks, environment, ignoredChecks, octokit, pullRequestNumber, repo, result, skipCi, stackRequiredChecks }) {
     if (skipCi) {
         info(`⏩ CI checks have been ${COLORS.highlight}disabled${COLORS.reset} for the ${COLORS.highlight}${environment}${COLORS.reset} environment`);
         return { commitStatus: 'skip_ci', kind: 'skipped' };
@@ -40925,7 +40977,60 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
         if (statusCheckRollup === undefined) {
             throw new Error('The GraphQL response did not include a check rollup');
         }
-        const checkResults = await loadAllCheckResults(octokit, pullRequestNumber, commit, statusCheckRollup);
+        const checkResults = [
+            ...(await loadAllCheckResults(octokit, pullRequestNumber, commit, statusCheckRollup))
+        ];
+        // Resolve identities before grouping reruns, or a newer hidden result could
+        // escape the earlier known App's group. Never resolve from display URLs.
+        if (stackRequiredChecks !== null) {
+            for (const [index, check] of checkResults.entries()) {
+                if (isCheckRun(check) &&
+                    checkIntegrationId(check) === null &&
+                    !ignoredChecks.includes(check.name) &&
+                    stackRequiredChecks.some(required => required.appId !== null && required.context === check.name)) {
+                    const id = check.databaseId;
+                    if (typeof id !== 'number' ||
+                        !Number.isSafeInteger(id) ||
+                        id < 1 ||
+                        typeof check.id !== 'string' ||
+                        check.id === '') {
+                        throw new Error('Cannot verify required check App: missing check run identity');
+                    }
+                    const { data: run } = await octokit.rest.checks.get({
+                        ...repo,
+                        check_run_id: id,
+                        headers: API_HEADERS
+                    });
+                    if (typeof run !== 'object' ||
+                        run === null ||
+                        !('id' in run) ||
+                        run.id !== id ||
+                        !('node_id' in run) ||
+                        run.node_id !== check.id ||
+                        !('head_sha' in run) ||
+                        run.head_sha !== commit.oid ||
+                        !('name' in run) ||
+                        run.name !== check.name ||
+                        !('conclusion' in run) ||
+                        (typeof run.conclusion === 'string'
+                            ? run.conclusion.toUpperCase()
+                            : run.conclusion) !== check.conclusion ||
+                        !('app' in run) ||
+                        typeof run.app !== 'object' ||
+                        run.app === null ||
+                        !('id' in run.app) ||
+                        typeof run.app.id !== 'number' ||
+                        !Number.isSafeInteger(run.app.id) ||
+                        run.app.id < 1) {
+                        throw new Error('Cannot verify required check App: check run identity, SHA, name, result, or App did not match');
+                    }
+                    checkResults[index] = {
+                        ...check,
+                        checkSuite: { app: { databaseId: run.app.id } }
+                    };
+                }
+            }
+        }
         const missing = missingRequiredStackChecks({
             checks,
             checkResults,
@@ -41003,7 +41108,14 @@ function missingRequiredStackChecks({ checks, checkResults, ignoredChecks, requi
     const names = missing.map(check => check.appId === null
         ? check.context
         : `${check.context} (GitHub App ${String(check.appId)})`);
-    const message = `Required CI checks have not been reported for this stack: \`${names.join(', ')}\``;
+    const legacyCannotProveApp = missing.some(expected => expected.appId !== null &&
+        latest.some(check => !isCheckRun(check) &&
+            check.isRequired &&
+            checkName(check) === expected.context));
+    const message = `Required CI checks have not been reported for this pull request: \`${names.join(', ')}\`` +
+        (legacyCannotProveApp
+            ? '\n\nLegacy commit statuses cannot prove a required GitHub App. Report App-bound checks with the GitHub Checks API.'
+            : '');
     warning(message);
     return {
         commitStatus: 'MISSING',

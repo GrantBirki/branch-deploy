@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import {beforeEach, test} from 'node:test'
 import {API_HEADERS} from '../../src/functions/api-headers.ts'
+import {ERROR} from '../../src/functions/templates/error.ts'
 import {
   loadPrStackRequiredChecks,
   type PrStackRequiredChecksOctokit
@@ -426,6 +427,121 @@ test('rejects required workflows instead of guessing their expected jobs', async
   await assert.rejects(
     loadPrStackRequiredChecks(octokit, requestFor()),
     /required workflows are not supported by this preview/u
+  )
+})
+
+test('ordinary PRs inventory named status checks without treating workflow or deployment rules as CI names', async () => {
+  getBranchRulesMock.mock.mockImplementation(() =>
+    Promise.resolve({
+      data: [
+        {type: 'workflows', parameters: {workflows: []}},
+        {type: 'required_deployments'},
+        statusRule([{context: 'build', integration_id: 123}])
+      ]
+    })
+  )
+  assert.deepStrictEqual(
+    await loadPrStackRequiredChecks(octokit, {
+      ...requestFor(),
+      scope: 'ordinary'
+    }),
+    [{context: 'build', appId: 123}]
+  )
+})
+
+for (const classic of [
+  {name: 'no CI', value: branch(), expected: []},
+  {
+    name: 'classic protection',
+    value: branch({
+      enabled: true,
+      enforcement: 'everyone',
+      contexts: ['build', 'legacy'],
+      checks: [{context: 'build', app_id: 123}]
+    }),
+    expected: [
+      {context: 'build', appId: 123},
+      {context: 'legacy', appId: null}
+    ]
+  }
+]) {
+  test(`ordinary PRs retain ${classic.name} when the plan cannot provide rulesets`, async () => {
+    const failure = Object.assign(
+      new Error(
+        `${ERROR.messages.upgrade_or_public.message}. See the documentation.`
+      ),
+      {status: 403}
+    )
+    getBranchRulesMock.mock.mockImplementation(() => Promise.reject(failure))
+    assert.deepStrictEqual(
+      await loadPrStackRequiredChecks(octokit, {
+        ...requestFor(classic.value),
+        scope: 'ordinary'
+      }),
+      classic.expected
+    )
+    assertCalledTimes(getBranchRulesMock, 1)
+  })
+}
+
+for (const {name, failure} of [
+  {
+    name: 'a permission error',
+    failure: Object.assign(
+      new Error('Resource not accessible by integration'),
+      {status: 403}
+    )
+  },
+  {
+    name: 'a plain error',
+    failure: new Error(ERROR.messages.upgrade_or_public.message)
+  },
+  {
+    name: 'a missing resource',
+    failure: Object.assign(
+      new Error(ERROR.messages.upgrade_or_public.message),
+      {status: 404}
+    )
+  },
+  {
+    name: 'a non-Error response',
+    failure: {message: ERROR.messages.upgrade_or_public.message, status: 403}
+  }
+]) {
+  test(`ordinary PRs fail closed on ${name}`, async () => {
+    getBranchRulesMock.mock.mockImplementation(() => Promise.reject(failure))
+    await assert.rejects(
+      loadPrStackRequiredChecks(octokit, {...requestFor(), scope: 'ordinary'}),
+      error => error === failure
+    )
+  })
+}
+
+test('stacks still fail closed when the plan cannot provide rulesets', async () => {
+  const failure = Object.assign(
+    new Error(ERROR.messages.upgrade_or_public.message),
+    {status: 403}
+  )
+  getBranchRulesMock.mock.mockImplementation(() => Promise.reject(failure))
+  await assert.rejects(
+    loadPrStackRequiredChecks(octokit, requestFor()),
+    error => error === failure
+  )
+})
+
+test('ordinary PRs reject a plan error after rules have already been returned', async () => {
+  const failure = Object.assign(
+    new Error(ERROR.messages.upgrade_or_public.message),
+    {status: 403}
+  )
+  queueMockImplementation(
+    getBranchRulesMock,
+    () => Promise.resolve({data: otherRules()}),
+    () => Promise.reject(failure)
+  )
+  await assert.rejects(
+    loadPrStackRequiredChecks(octokit, {...requestFor(), scope: 'ordinary'}),
+    error => error === failure
   )
 })
 
