@@ -40170,6 +40170,7 @@ async function prStackSnapshotMatches(octokit, snapshot) {
 ;// CONCATENATED MODULE: ./src/functions/pr-stack-checks.ts
 
 
+
 function pr_stack_checks_invalid(reason) {
     throw new Error(`Cannot verify pull request stack required checks: ${reason}`);
 }
@@ -40274,14 +40275,29 @@ async function loadPrStackRequiredChecks(octokit, request) {
     const previousPages = [];
     let page = 1;
     while (true) {
-        const response = await octokit.rest.repos.getBranchRules({
-            owner: request.owner,
-            repo: request.repo,
-            branch: request.stableBranch,
-            per_page: 100,
-            page,
-            headers: API_HEADERS
-        });
+        let response;
+        try {
+            response = await octokit.rest.repos.getBranchRules({
+                owner: request.owner,
+                repo: request.repo,
+                branch: request.stableBranch,
+                per_page: 100,
+                page,
+                headers: API_HEADERS
+            });
+        }
+        catch (error) {
+            // No rulesets can exist on this plan. Still enforce readable classic checks.
+            if (request.scope === 'ordinary' &&
+                page === 1 &&
+                error instanceof Error &&
+                'status' in error &&
+                error.status === ERROR.messages.upgrade_or_public.status &&
+                error.message.includes(ERROR.messages.upgrade_or_public.message)) {
+                break;
+            }
+            throw error;
+        }
         const rules = pr_stack_checks_array(response.data);
         if (rules.length > 100)
             pr_stack_checks_invalid('invalid ruleset page size');

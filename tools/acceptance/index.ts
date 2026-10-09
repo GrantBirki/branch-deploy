@@ -4126,6 +4126,64 @@ const scenarios = [
     }
   },
   {
+    name: 'ordinary PRs enforce classic CI when rulesets are unavailable on the plan',
+    run: async () => {
+      for (const mode of [
+        'no required CI',
+        'missing classic CI',
+        'permissions denied',
+        'native stack'
+      ] as const) {
+        await withMockGitHub(`rules unavailable: ${mode}`, async context => {
+          if (mode === 'native stack') seedPrStack(context.state)
+          if (mode === 'missing classic CI') {
+            setClassicRequiredChecks(context.state, [
+              {context: 'missing-required', app_id: 15368}
+            ])
+          }
+          queueFault(context.state, {
+            method: 'GET',
+            path: apiPath('/rules/branches/main'),
+            response: {
+              status: 403,
+              message:
+                mode === 'permissions denied'
+                  ? 'Resource not accessible by integration'
+                  : 'Upgrade to GitHub Pro or make this repository public to enable this feature.'
+            }
+          })
+
+          const result = await runMain(context, {
+            enable_pr_stacks: 'true',
+            checks: 'required',
+            use_security_warnings: 'false'
+          })
+          if (mode === 'no required CI') {
+            assertExit(context, result, 0)
+            assertReason(context, result, 'deployment_ready')
+          } else {
+            assertExit(context, result, 1)
+            assertReason(context, result, 'prechecks_failed')
+            assertNoDeployment(context, result)
+            assertNoLockRoutes(context)
+            if (mode === 'missing classic CI') {
+              assertOutput(context, result, 'commit_status', 'MISSING')
+              assertCommentIncludes(
+                context,
+                'missing-required (GitHub App 15368)'
+              )
+            } else {
+              assertCommentIncludes(
+                context,
+                'could not read the required CI checks'
+              )
+            }
+          }
+        })
+      }
+    }
+  },
+  {
     name: 'ordinary PRs and stacks enforce automatic CI inventory except configured overrides',
     run: async () => {
       for (const mode of [

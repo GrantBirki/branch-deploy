@@ -1,5 +1,6 @@
 import {isDeepStrictEqual} from 'node:util'
 import {API_HEADERS} from './api-headers.ts'
+import {ERROR} from './templates/error.ts'
 import type {BranchDeployOctokit} from '../types.ts'
 
 type GetBranchRulesParameters = Parameters<
@@ -163,14 +164,30 @@ export async function loadPrStackRequiredChecks(
   const previousPages: (readonly unknown[])[] = []
   let page = 1
   while (true) {
-    const response = await octokit.rest.repos.getBranchRules({
-      owner: request.owner,
-      repo: request.repo,
-      branch: request.stableBranch,
-      per_page: 100,
-      page,
-      headers: API_HEADERS
-    })
+    let response: {readonly data: unknown}
+    try {
+      response = await octokit.rest.repos.getBranchRules({
+        owner: request.owner,
+        repo: request.repo,
+        branch: request.stableBranch,
+        per_page: 100,
+        page,
+        headers: API_HEADERS
+      })
+    } catch (error) {
+      // No rulesets can exist on this plan. Still enforce readable classic checks.
+      if (
+        request.scope === 'ordinary' &&
+        page === 1 &&
+        error instanceof Error &&
+        'status' in error &&
+        error.status === ERROR.messages.upgrade_or_public.status &&
+        error.message.includes(ERROR.messages.upgrade_or_public.message)
+      ) {
+        break
+      }
+      throw error
+    }
     const rules = array(response.data)
     if (rules.length > 100) invalid('invalid ruleset page size')
     if (previousPages.some(previous => isDeepStrictEqual(previous, rules))) {

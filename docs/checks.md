@@ -22,7 +22,7 @@ Branch Deploy v12 evaluates the complete paginated check rollup for the selected
 
 For PR deployments and noops, `checks: all` (the default) and `checks: required` also read the target branch's named status checks from classic protection and active rulesets. Required checks that have not reported yet block deployment. Repositories without required checks still work, and a rule that requires deployment before merge will not block the deployment itself.
 
-The Action needs to be able to read branch rules. If GitHub cannot provide that policy, deployment stops. Required-workflow rules are not treated as named status checks for ordinary PRs. Explicit check lists, `ignored_checks`, `skip_ci`, and stable-branch/SHA deployments retain their usual behavior.
+If GitHub reports that rulesets are unavailable on the repository's plan, ordinary PRs still check classic protection. Other policy-read errors stop deployment. Required-workflow rules are not treated as named status checks for ordinary PRs. Explicit check lists, `ignored_checks`, `skip_ci`, and stable-branch/SHA deployments retain their usual behavior.
 
 ## Using the `checks` Input Option
 
