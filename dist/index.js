@@ -35696,6 +35696,7 @@ const ACTION_INPUT_KEYS = (/* unused pure expression or super */ null && ([
     'ignored_checks',
     'skip_reviews',
     'allow_forks',
+    'allow_reruns',
     'admins',
     'admins_pat',
     'merge_deploy_mode',
@@ -35730,6 +35731,7 @@ const BOOLEAN_ACTION_INPUT_KEYS = (/* unused pure expression or super */ null &&
     'environment_url_in_comment',
     'commit_verification',
     'allow_forks',
+    'allow_reruns',
     'merge_deploy_mode',
     'unlock_on_merge_mode',
     'skip_completing',
@@ -44529,6 +44531,7 @@ const OPERATION_REASON_CODES = (/* unused pure expression or super */ null && ([
     'merge_deploy_required',
     'merge_deploy_not_required',
     'unsupported_event',
+    'rerun_not_allowed',
     'result_completed',
     'result_non_success',
     'invalid_result_context',
@@ -44619,6 +44622,21 @@ async function run() {
     try {
         info(`🛸 grantbirki/branch-deploy ${COLORS.info}${src_version_VERSION}${COLORS.reset}`);
         debug(`context: ${JSON.stringify(github_context)}`);
+        if (Number(process.env['GITHUB_RUN_ATTEMPT']) > 1) {
+            // Also dispatch failed or malformed rerun inputs to post, never back to main.
+            saveActionState('isPost', 'true');
+            if (getActionInput('allow_reruns') === '' ||
+                !getBooleanActionInput('allow_reruns')) {
+                saveActionState('bypass', 'true');
+                setActionOutput('continue', 'false');
+                setFailed('Workflow reruns are disabled for Branch Deploy. Start a new workflow run with a new command, or set allow_reruns: true if you accept the original-actor privilege risk.');
+                return main_terminal(operation, {
+                    runResult: 'failure',
+                    decision: 'failure',
+                    reasonCode: 'rerun_not_allowed'
+                });
+            }
+        }
         const token = getActionInput('github_token', { required: true });
         if (getActionInput('result_mode') !== '' &&
             getBooleanActionInput('result_mode')) {

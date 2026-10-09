@@ -17,6 +17,7 @@ export interface RunActionRequest {
   readonly inputs: Readonly<Record<string, string>>
   readonly mode: 'main' | 'post'
   readonly port: number
+  readonly runAttempt?: number
   readonly previousState: AcceptanceOutputs
   readonly state: MockGitHubState
   readonly status: 'cancelled' | 'failure' | 'success'
@@ -191,7 +192,7 @@ function baseEnvironment(
       ? 'refs/heads/main'
       : 'refs/heads/feature-branch'
   env['GITHUB_REPOSITORY'] = `${request.state.owner}/${request.state.repo}`
-  env['GITHUB_RUN_ATTEMPT'] = '1'
+  env['GITHUB_RUN_ATTEMPT'] = String(request.runAttempt ?? 1)
   env['GITHUB_RUN_ID'] = '123456789'
   env['GITHUB_RUN_NUMBER'] = '1'
   env['GITHUB_SERVER_URL'] = 'https://github.com'

@@ -107,7 +107,7 @@ Result mode handles lock cleanup based on the outcome:
 
 Pass `context` only from the original trusted trigger job's output. Do not load it from pull request files, artifacts, or untrusted build output. The context is not an authentication token or a signed attestation. For noops, the Action relies on that trusted job output to know that the noop was ready, because there is no deployment record to check.
 
-Result mode validates the original deployment or noop and only works within the **same workflow run and attempt**. To deploy again, rerun the complete workflow so the trigger job can perform fresh checks. Result mode cannot replay or repair an earlier deployment.
+Result mode validates the original deployment or noop and only works within the **same workflow run and attempt**. To deploy again, post a new command to start a fresh workflow run. If your team accepts the [rerun privilege risk](../README.md#workflow-reruns-), set `allow_reruns: true` on both the start and result invocations before rerunning a complete workflow. Result mode still cannot replay or repair an earlier deployment, and worker attempt guards are still required.
 
 Run the result-mode action **once per context**. GitHub API writes do not provide an exactly-once guarantee, so do not configure multiple jobs or steps to complete the same context.
 
