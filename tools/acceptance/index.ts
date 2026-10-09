@@ -3801,7 +3801,7 @@ const scenarios = [
             assertNoLockRoutes(context)
             assertCommentIncludes(
               context,
-              'Required CI checks have not been reported for this stack'
+              'Required CI checks have not been reported for this pull request'
             )
             if (number === context.state.pullRequest.number) {
               assertOutput(context, result, 'commit_status', 'MISSING')
@@ -4126,7 +4126,7 @@ const scenarios = [
     }
   },
   {
-    name: 'native PR stacks limit automatic required CI inventory',
+    name: 'ordinary PRs and stacks enforce automatic CI inventory except configured overrides',
     run: async () => {
       for (const mode of [
         'ordinary PR',
@@ -4156,7 +4156,7 @@ const scenarios = [
             use_security_warnings: 'false'
           })
 
-          if (mode === 'disabled stacks') {
+          if (mode === 'disabled stacks' || mode === 'ordinary PR') {
             assertExit(context, result, 1)
             assertReason(context, result, 'prechecks_failed')
             assertNoDeployment(context, result)
@@ -4164,11 +4164,11 @@ const scenarios = [
             assertExit(context, result, 0)
             assertReason(context, result, 'deployment_ready')
           }
-          assert.deepEqual(
+          assert.equal(
             context.routeLog.filter(
               route => route.path === apiPath('/rules/branches/main')
-            ),
-            [],
+            ).length,
+            mode === 'ordinary PR' ? 1 : 0,
             diagnostics(context, result)
           )
         })
