@@ -3,6 +3,7 @@ import * as github from '@actions/github'
 import {retry} from '@octokit/plugin-retry'
 import {COLORS} from './colors.ts'
 import {API_HEADERS} from './api-headers.ts'
+import {isReservedActor} from './valid-permissions.ts'
 import {getActionInput} from '../action-io.ts'
 import {legacyApiError, legacyArrayElement} from '../trust-boundaries.ts'
 import type {BranchDeployContext, BranchDeployOctokit} from '../types.ts'
@@ -119,6 +120,10 @@ export async function isAdmin(
   context: BranchDeployContext,
   createClient: AdminOctokitFactory = defaultAdminOctokitFactory
 ): Promise<boolean> {
+  if (isReservedActor(context.actor)) {
+    return false
+  }
+
   // Get the admins string from the action inputs
   const admins = getActionInput('admins')
 
@@ -128,6 +133,7 @@ export async function isAdmin(
   const adminsSanitized = admins
     .split(',')
     .map(admin => admin.trim().toLowerCase())
+    .filter(admin => !isReservedActor(admin))
 
   // loop through admins
   const handles: string[] = []

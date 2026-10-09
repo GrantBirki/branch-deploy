@@ -118,7 +118,7 @@ inputs:
     required: false
     default: "false"
   admins:
-    description: 'A comma separated list of GitHub usernames or teams that should be considered admins by this Action. Admins can deploy pull requests without the need for branch protection approvals. Example: "monalisa,octocat,my-org/my-team"'
+    description: 'A comma separated list of GitHub usernames or teams that should be considered admins by this Action. Admins can deploy pull requests without the need for branch protection approvals. Example: "monalisa,octocat,my-org/my-team". Default "false" disables designated admins; "true" and "false" (any case) are reserved, not usernames.'
     required: false
     default: "false"
   admins_pat:
