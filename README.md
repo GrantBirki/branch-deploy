@@ -301,6 +301,7 @@ As seen above, we have two steps. One for a noop deploy, and one for a regular d
 | `ignored_checks` | `false` | `""` | A comma separated list of checks that will be ignored when determining if a deployment can continue. This setting allows you to skip failing, pending, or incomplete checks regardless of the `checks` setting above. Example: `"lint,markdown-formatting,update-pr-label"`. View the [documentation](docs/checks.md) for more details. |
 | `skip_reviews` | `false` | `""` | A comma separated list of environment that will not use reviews/approvals as a requirement for deployment. Use this options to explicitly bypass branch protection settings for a certain environment in your repository. Default is an empty string `""` - Example: `"development,staging"` |
 | `allow_forks` | `false` | `false` | Allow branch deployments to run on repository forks. Default is `false`. Set this to `true` only when your workflow intentionally supports deployments from forked pull requests. |
+| `allow_reruns` | `false` | `false` | Allow this Action to run on later workflow attempts. Reruns reuse the original actor's privileges, even when someone else starts the rerun. Leave this disabled unless your workflow accepts that risk. See [workflow reruns](#workflow-reruns-). |
 | `admins` | `false` | `"false"` | A comma separated list of GitHub usernames or teams that should be considered admins by this Action. Admins can deploy pull requests without the need for branch protection approvals. Example: "monalisa,octocat,my-org/my-team" |
 | `admins_pat` | `false` | `"false"` | A GitHub personal access token with "read:org" scopes. This is only needed if you are using the "admins" option with a GitHub org team. For example: "my-org/my-team" |
 | `merge_deploy_mode` | `false` | `false` | Advanced configuration option for operations on merge commits. See the [merge commit docs](#merge-commit-workflow-strategy) below |
@@ -544,6 +545,12 @@ Here are some additional security best practices to consider:
 - Ensure that your branch protection settings define required CI checks. This ensures that the code being deployed has passing CI checks.
 - Set the [`deployment_confirmation: true`](./docs/deployment-confirmation.md) input option to require a final safety check of human approval before each deployment can continue. Ensure that you review the sha being used in the deployment confirmation comment with the sha that you expect to be deployed.
 - Use a [trusted checkout](docs/trusted-checkouts.md) for deployment helper code when your workflow also checks out pull request code for deployment. Branch Deploy independently fetches custom deployment templates at the exact trusted workflow SHA.
+
+### Workflow reruns 🔁
+
+Reruns are off by default because GitHub reuses the original actor's permissions. For IssueOps, post a new command to retry. If you accept the risk, set `allow_reruns: true` on each invocation that needs it.
+
+Separate deployment jobs still need [attempt guards](docs/result-mode.md#usage); Branch Deploy cannot block a job it never runs in.
 
 ### Admins 👩‍🔬
 

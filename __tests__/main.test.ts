@@ -303,6 +303,7 @@ const environmentDefaults = {
   INPUT_LOCK_INFO_ALIAS: '.wcid',
   INPUT_REQUIRED_CONTEXTS: 'false',
   INPUT_ALLOW_FORKS: 'false',
+  INPUT_ALLOW_RERUNS: 'false',
   GITHUB_REPOSITORY: 'corp/test',
   INPUT_GLOBAL_LOCK_FLAG: '--global',
   INPUT_MERGE_DEPLOY_MODE: 'false',
@@ -688,6 +689,113 @@ test('successfully runs the action', async () => {
     infoMock,
     `🚀 ${COLORS.success}deployment started!${COLORS.reset}`
   )
+})
+
+for (const command of [
+  '.deploy',
+  '.noop',
+  '.lock',
+  '.unlock',
+  '.wcid',
+  '.help'
+]) {
+  for (const setting of ['', 'false', 'False', 'FALSE']) {
+    test(`rerun ${command} is blocked with allow_reruns=${JSON.stringify(setting)}`, async () => {
+      setEnv('GITHUB_RUN_ATTEMPT', '2')
+      setEnv('INPUT_ALLOW_RERUNS', setting)
+      setCommentBody(command)
+
+      assert.strictEqual(await run(), 'failure')
+      assertOperationResult({
+        decision: 'failure',
+        reason_code: 'rerun_not_allowed',
+        operation: 'none'
+      })
+      assertCalledWith(saveStateMock, 'isPost', 'true')
+      assertCalledWith(saveStateMock, 'bypass', 'true')
+      assertCalledWith(setOutputMock, 'continue', 'false')
+      assertNotCalledWith(setOutputMock, 'continue', 'true')
+      assertNotCalledWith(saveStateMock, 'actionsToken', String)
+      assertCalledTimes(setFailedMock, 1)
+      assertNotCalled(getOctokitMock)
+      assertNotCalled(contextCheckMock)
+      assertNotCalled(reactEmoteMock)
+      assertNotCalled(prechecksMock)
+      assertNotCalled(lockMock)
+      assertNotCalled(unlockMock)
+      assertNotCalled(createDeploymentMock)
+    })
+  }
+}
+
+for (const mode of [
+  'MERGE_DEPLOY_MODE',
+  'UNLOCK_ON_MERGE_MODE',
+  'RESULT_MODE'
+]) {
+  test(`rerun blocks ${mode} before dispatch`, async () => {
+    setEnv('GITHUB_RUN_ATTEMPT', '3')
+    setEnv(`INPUT_${mode}`, 'true')
+    assert.strictEqual(await run(), 'failure')
+    assertCalledWith(saveStateMock, 'isPost', 'true')
+    assertCalledWith(saveStateMock, 'bypass', 'true')
+    assertCalledWith(setOutputMock, 'reason_code', 'rerun_not_allowed')
+    assertNotCalled(getOctokitMock)
+    assertNotCalled(identicalCommitCheckMock)
+    assertNotCalled(unlockOnMergeMock)
+    assertNotCalled(resultOperationMock)
+  })
+}
+
+for (const setting of ['true', 'True', 'TRUE']) {
+  test(`allow_reruns=${setting} runs the ordinary prechecks and deployment path on a later attempt`, async () => {
+    setEnv('GITHUB_RUN_ATTEMPT', '2')
+    setEnv('INPUT_ALLOW_RERUNS', setting)
+    assert.strictEqual(await run(), 'success')
+    assertCalledTimes(prechecksMock, 1)
+    assertCalledTimes(createDeploymentMock, 1)
+    assertNotCalledWith(saveStateMock, 'bypass', 'true')
+    assertCalledWith(setOutputMock, 'continue', 'true')
+  })
+}
+
+test('opting into a lock rerun still requires ordinary repository permissions', async () => {
+  setEnv('GITHUB_RUN_ATTEMPT', '2')
+  setEnv('INPUT_ALLOW_RERUNS', 'true')
+  setCommentBody('.lock')
+  setValidPermissionsResult('Permission denied')
+  assert.strictEqual(await run(), 'failure')
+  assertCalledTimes(validPermissionsMock, 1)
+  assertNotCalled(lockMock)
+  assertCalledWith(setOutputMock, 'reason_code', 'permission_denied')
+})
+
+test('opted-in result mode still dispatches its own verification on a later attempt', async () => {
+  setEnv('GITHUB_RUN_ATTEMPT', '2')
+  setEnv('INPUT_ALLOW_RERUNS', 'true')
+  setEnv('INPUT_RESULT_MODE', 'true')
+  assert.strictEqual(await run(), 'success - result mode')
+  assertCalledTimes(resultOperationMock, 1)
+  assertNotCalled(prechecksMock)
+  assertCalledWith(saveStateMock, 'bypass', 'true')
+})
+
+test('a malformed opt-in fails without sending a rerun post hook back through main', async () => {
+  setEnv('GITHUB_RUN_ATTEMPT', '2')
+  setEnv('INPUT_ALLOW_RERUNS', 'maybe')
+  assert.strictEqual(await run(), undefined)
+  assertCalledWith(setOutputMock, 'reason_code', 'unexpected_error')
+  assertCalledWith(saveStateMock, 'isPost', 'true')
+  assertCalledWith(saveStateMock, 'bypass', 'true')
+  assertNotCalled(getOctokitMock)
+  assertNotCalledWith(setOutputMock, 'continue', 'true')
+  assertCalledTimes(setFailedMock, 1)
+})
+
+test('first attempts do not add opt-in input validation to the existing path', async () => {
+  setEnv('INPUT_ALLOW_RERUNS', 'maybe')
+  assert.strictEqual(await run(), 'success')
+  assertNotCalledWith(saveStateMock, 'bypass', 'true')
 })
 
 for (const phase of [

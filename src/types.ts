@@ -542,6 +542,7 @@ export type OperationReasonCode =
   | 'unlock_failed'
   | 'unlock_on_merge_completed'
   | 'unsupported_event'
+  | 'rerun_not_allowed'
   | 'result_completed'
   | 'result_non_success'
   | 'invalid_result_context'
