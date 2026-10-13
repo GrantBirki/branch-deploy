@@ -205,6 +205,7 @@ export function createMockState(): MockGitHubState {
     deploymentResponseSha: null,
     failInitialReaction: false,
     faults: [],
+    checkRuns: new Map(),
     graphqlCommitOid: null,
     labels: new Set(),
     lockFiles: new Map(),
@@ -941,6 +942,13 @@ function routeRest(
   }
 
   const area = part(parts, 3)
+
+  if (area === 'check-runs' && method === 'GET' && parts.length === 5) {
+    const run = state.checkRuns.get(Number(part(parts, 4)))
+    return run === undefined
+      ? {status: 404, value: {message: 'Not Found'}}
+      : {status: 200, value: run}
+  }
 
   if (
     area === 'collaborators' &&
