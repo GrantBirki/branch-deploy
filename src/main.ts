@@ -70,6 +70,26 @@ export async function run(): Promise<RunResult> {
     )
     core.debug(`context: ${JSON.stringify(context)}`)
 
+    if (Number(process.env['GITHUB_RUN_ATTEMPT']) > 1) {
+      // Also dispatch failed or malformed rerun inputs to post, never back to main.
+      saveActionState('isPost', 'true')
+      if (
+        getActionInput('allow_reruns') === '' ||
+        !getBooleanActionInput('allow_reruns')
+      ) {
+        saveActionState('bypass', 'true')
+        setActionOutput('continue', 'false')
+        core.setFailed(
+          'Workflow reruns are disabled for Branch Deploy. Start a new workflow run with a new command, or set allow_reruns: true if you accept the original-actor privilege risk.'
+        )
+        return terminal(operation, {
+          runResult: 'failure',
+          decision: 'failure',
+          reasonCode: 'rerun_not_allowed'
+        })
+      }
+    }
+
     const token = getActionInput('github_token', {required: true})
     if (
       getActionInput('result_mode') !== '' &&

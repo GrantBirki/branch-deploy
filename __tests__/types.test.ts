@@ -59,6 +59,7 @@ test('action registries expose only their literal key unions', () => {
 test('typed input registries expose exact ActionInputKey subsets', () => {
   type ExpectedBooleanInputKey =
     | 'allow_forks'
+    | 'allow_reruns'
     | 'allow_non_default_target_branch_deployments'
     | 'allow_sha_deployments'
     | 'commit_verification'

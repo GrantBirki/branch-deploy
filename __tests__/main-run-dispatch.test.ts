@@ -68,10 +68,12 @@ github.context.payload = {
 
 const originalCi = process.env['CI']
 const originalRepository = process.env['GITHUB_REPOSITORY']
+const originalAttempt = process.env['GITHUB_RUN_ATTEMPT']
 const originalSentinel = process.env['BRANCH_DEPLOY_VITEST_TEST']
 try {
   process.env['CI'] = 'true'
   process.env['GITHUB_REPOSITORY'] = 'corp/test'
+  process.env['GITHUB_RUN_ATTEMPT'] = '1'
   process.env['BRANCH_DEPLOY_VITEST_TEST'] = 'false'
   await import('../src/main.ts')
 } finally {
@@ -79,6 +81,8 @@ try {
   else process.env['CI'] = originalCi
   if (originalRepository === undefined) delete process.env['GITHUB_REPOSITORY']
   else process.env['GITHUB_REPOSITORY'] = originalRepository
+  if (originalAttempt === undefined) delete process.env['GITHUB_RUN_ATTEMPT']
+  else process.env['GITHUB_RUN_ATTEMPT'] = originalAttempt
   if (originalSentinel === undefined) {
     delete process.env['BRANCH_DEPLOY_VITEST_TEST']
   } else {

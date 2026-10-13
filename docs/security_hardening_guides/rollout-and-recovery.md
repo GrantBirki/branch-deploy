@@ -192,7 +192,7 @@ Splitting authorization, build, and deployment can reduce authority in a build j
 
 For releases supporting [result mode](../result-mode.md), use `skip_completing: true` on the trusted start step and forward its unchanged context to a trusted final job. Pin both Action invocations to the same verified commit. Include every required worker in result selection and do not execute candidate code in the result job.
 
-Each worker must enforce the start context's run-attempt match before doing work. Checking only during final reporting is too late to prevent a partial rerun from executing with old admission evidence. Rerun the whole workflow to obtain fresh checks.
+Each worker must enforce the start context's run-attempt match before doing work. Checking only during final reporting is too late to prevent a partial rerun from executing with old admission evidence. Start a new workflow run with a new command to obtain fresh checks; Branch Deploy itself refuses later attempts unless `allow_reruns: true` is explicitly set on each invocation.
 
 Use `always()` plus an admitted-operation condition for the final job. Distinguish success, failure, cancellation, and intentionally skipped work. For noops, select the jobs actually required for the preview; do not relabel a skipped deploy job as successful work. Noops have no deployment record to complete, but their comments and locks still need truthful completion.
 

@@ -586,6 +586,78 @@ function requestMockRoute(
 
 const scenarios = [
   {
+    name: 'workflow rerun policy through bundled main and post',
+    run: async () => {
+      for (const [name, inputs, accepted] of [
+        ['reruns default off', {}, false],
+        ['reruns disabled', {allow_reruns: 'false'}, false],
+        ['opted-in rerun', {allow_reruns: 'true'}, true],
+        ['result-mode rerun default off', {result_mode: 'true'}, false],
+        ['merge-deploy rerun default off', {merge_deploy_mode: 'true'}, false],
+        [
+          'unlock-on-merge rerun default off',
+          {unlock_on_merge_mode: 'true'},
+          false
+        ]
+      ] as const) {
+        await withMockGitHub(name, async context => {
+          setTriggerComment(context.state, '.deploy to production')
+          const request = {
+            actor: 'octocat',
+            inputs,
+            mode: 'main',
+            port: context.port,
+            runAttempt: 2,
+            previousState: {},
+            state: context.state,
+            status: 'success'
+          } as const
+          const result = await runAction(request)
+
+          if (accepted) {
+            assertExit(context, result, 0)
+            assertReason(context, result, 'deployment_ready')
+            assertOutput(context, result, 'continue', 'true')
+            assert.equal(
+              context.state.deployments.length,
+              1,
+              diagnostics(context)
+            )
+          } else {
+            assertExit(context, result, 1)
+            assertReason(context, result, 'rerun_not_allowed')
+            assertOutput(context, result, 'continue', 'false')
+            assert.deepEqual(context.routeLog, [], diagnostics(context))
+            assert.equal(
+              context.state.deployments.length,
+              0,
+              diagnostics(context)
+            )
+          }
+          const postResult = await runAction({
+            ...request,
+            mode: 'post',
+            previousState: result.state
+          })
+          assertExit(context, postResult, 0)
+          if (accepted) {
+            assert.equal(
+              context.state.branches.has(lockBranch('production')),
+              false
+            )
+            assert.equal(
+              context.state.deployments[0]?.statuses.at(-1)?.state,
+              'success'
+            )
+          } else {
+            assert.deepEqual(context.routeLog, [], diagnostics(context))
+            assert.equal(context.state.lockFiles.size, 0, diagnostics(context))
+          }
+        })
+      }
+    }
+  },
+  {
     name: '.help',
     run: () =>
       withMockGitHub('.help', async context => {

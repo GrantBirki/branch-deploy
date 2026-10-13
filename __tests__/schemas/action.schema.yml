@@ -320,6 +320,16 @@ inputs:
     default:
       type: string
       required: true
+  allow_reruns:
+    description:
+      type: string
+      required: true
+    required:
+      type: boolean
+      required: true
+    default:
+      type: string
+      required: true
   admins_pat:
     description:
       type: string

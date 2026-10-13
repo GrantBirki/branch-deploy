@@ -10,6 +10,7 @@ export const OPERATION_REASON_CODES = [
   'merge_deploy_required',
   'merge_deploy_not_required',
   'unsupported_event',
+  'rerun_not_allowed',
   'result_completed',
   'result_non_success',
   'invalid_result_context',

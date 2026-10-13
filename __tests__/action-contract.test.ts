@@ -58,6 +58,7 @@ const expectedInputContract = {
   ignored_checks: {default: '', required: false},
   skip_reviews: {default: '', required: false},
   allow_forks: {default: 'false', required: false},
+  allow_reruns: {default: 'false', required: false},
   admins: {default: 'false', required: false},
   admins_pat: {default: 'false', required: false},
   merge_deploy_mode: {default: 'false', required: false},
@@ -105,6 +106,7 @@ const expectedBooleanInputKeys = [
   'environment_url_in_comment',
   'commit_verification',
   'allow_forks',
+  'allow_reruns',
   'merge_deploy_mode',
   'unlock_on_merge_mode',
   'skip_completing',
@@ -182,7 +184,7 @@ test('action input and output registries exactly match action.yml', () => {
     [...ACTION_OUTPUT_KEYS].sort(),
     Object.keys(outputs).sort()
   )
-  assert.strictEqual(ACTION_INPUT_KEYS.length, 57)
+  assert.strictEqual(ACTION_INPUT_KEYS.length, 58)
   assert.strictEqual(ACTION_OUTPUT_KEYS.length, 43)
 })
 
@@ -214,7 +216,7 @@ test('action input defaults, required flags, and accepted literals stay fixed', 
 
 test('typed input registries stay complete and exact', () => {
   assert.deepStrictEqual(BOOLEAN_ACTION_INPUT_KEYS, expectedBooleanInputKeys)
-  assert.strictEqual(BOOLEAN_ACTION_INPUT_KEYS.length, 19)
+  assert.strictEqual(BOOLEAN_ACTION_INPUT_KEYS.length, 20)
   assert.deepStrictEqual(INTEGER_ACTION_INPUT_KEYS, expectedIntegerInputKeys)
   assert.deepStrictEqual(LITERAL_ACTION_INPUT_KEYS, expectedLiteralInputKeys)
   assert.deepStrictEqual(LITERAL_ACTION_INPUT_VALUES, {
