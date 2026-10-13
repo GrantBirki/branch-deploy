@@ -39386,6 +39386,10 @@ async function lock(request) {
 ;// CONCATENATED MODULE: ./src/functions/valid-permissions.ts
 
 
+// GitHub usernames ignore case. Reserve the two YAML 1.2 boolean names only.
+function isReservedActor(actor) {
+    return /^(?:true|false)$/i.test(actor);
+}
 // Helper function to check if an actor has permissions to use this Action in a given repository
 // :param octokit: The octokit client
 // :param context: The GitHub Actions event context
@@ -39394,6 +39398,9 @@ async function lock(request) {
 async function validPermissions(octokit, context, validPermissionsArray) {
     // fetch the defined permissions from the Action input
     setActionOutput('actor', context.actor);
+    if (isReservedActor(context.actor)) {
+        return 'GitHub usernames `true` and `false` are reserved by Branch Deploy and cannot issue commands.';
+    }
     // Get the permissions of the user who made the comment
     const permissionRes = await octokit.rest.repos.getCollaboratorPermissionLevel({
         ...context.repo,
@@ -39414,6 +39421,7 @@ async function validPermissions(octokit, context, validPermissionsArray) {
 }
 
 ;// CONCATENATED MODULE: ./src/functions/admin.ts
+
 
 
 
@@ -39487,13 +39495,17 @@ async function orgTeamCheck(actor, orgTeams, createClient) {
 // :param context: The GitHub Actions event context
 // :returns: true if the user is an admin, false otherwise (Boolean)
 async function isAdmin(context, createClient = defaultAdminOctokitFactory) {
+    if (isReservedActor(context.actor)) {
+        return false;
+    }
     // Get the admins string from the action inputs
     const admins = getActionInput('admins');
     debug(`raw admins value: ${admins}`);
     // Sanitized the input to remove any whitespace and split into an array
     const adminsSanitized = admins
         .split(',')
-        .map(admin => admin.trim().toLowerCase());
+        .map(admin => admin.trim().toLowerCase())
+        .filter(admin => !isReservedActor(admin));
     // loop through admins
     const handles = [];
     const orgTeams = [];
