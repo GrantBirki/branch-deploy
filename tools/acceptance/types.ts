@@ -147,6 +147,7 @@ export interface MockPullRequestStack {
 
 export interface MockGitHubState extends MockPullRequestChecks {
   blobs: Map<string, string>
+  checkRuns: Map<number, unknown>
   branchRules: readonly unknown[]
   branches: Map<string, MockBranch>
   comments: MockComment[]
