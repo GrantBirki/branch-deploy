@@ -2314,6 +2314,37 @@ const scenarios = [
       })
   },
   {
+    name: 'rejected confirmation preserves an existing sticky lock',
+    run: () =>
+      withMockGitHub(
+        'rejected confirmation preserves an existing sticky lock',
+        async context => {
+          setTriggerComment(context.state, '.lock production')
+          const claimed = await runMain(context)
+          assertExit(context, claimed, 0)
+          assertReason(context, claimed, 'lock_acquired')
+          const branch = lockBranch('production')
+          const original = requireMockLock(context, branch)
+          const originalSha = context.state.branches.get(branch)?.sha
+          assert.equal(original['sticky'], true)
+          assert.ok(originalSha !== undefined)
+
+          context.state.comments.push({body: '.deploy', id: 1001})
+          context.state.confirmationReaction = '-1'
+          const inputs = {
+            deployment_confirmation: 'true',
+            deployment_confirmation_timeout: '1'
+          }
+          const result = await runMain(context, inputs, 'octocat', 1001)
+          assertExit(context, result, 1)
+          assertReason(context, result, 'confirmation_rejected')
+          assertNoDeployment(context, result)
+          assert.equal(context.state.branches.get(branch)?.sha, originalSha)
+          assert.deepEqual(requireMockLock(context, branch), original)
+        }
+      )
+  },
+  {
     name: 'confirmation timeout',
     run: () =>
       withMockGitHub('confirmation timeout', async context => {
