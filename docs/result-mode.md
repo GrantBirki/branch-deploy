@@ -134,4 +134,4 @@ The structured `result` output keeps schema version 1 and uses operation `result
 
 If you prefer to manage completion yourself, you can still use `skip_completing: true` without a result-mode step. Your workflow is then responsible for final statuses, comments, reactions, labels, and safe non-sticky lock cleanup.
 
-See [manual deployment control](../README.md#manual-deployment-control) and the [manual multi-job examples](examples.md#multiple-jobs-with-github-pages-and-hugo) for that approach.
+See [manual deployment control](../README.md#manual-deployment-control) and the [GitHub Environments example](examples.md#multiple-jobs-with-github-environments) for that approach.

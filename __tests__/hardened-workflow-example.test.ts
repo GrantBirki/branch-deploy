@@ -107,7 +107,7 @@ test('the hardened starting point keeps admission, validation, deployment, and r
   )
 
   assert.match(deploy, /needs: \[branch-deploy, validate\]/u)
-  assert.match(deploy, /needs\.branch-deploy\.outputs\.noop != 'true'/u)
+  assert.match(deploy, /needs\.branch-deploy\.outputs\.noop == 'false'/u)
   assert.match(deploy, /needs\.validate\.result == 'success'/u)
   assert.match(deploy, /\.run_attempt == github\.run_attempt/u)
   assert.match(deploy, /environment: production/u)
