@@ -26,6 +26,7 @@ const context = createContext({
 })
 const request = {
   exactSha: false,
+  expectedBaseRef: 'main',
   expectedSha: 'expected',
   isFork: false,
   stableBranch: 'main',
@@ -39,9 +40,7 @@ beforeEach(() => {
 
 for (const immutable of [
   {...request, exactSha: true},
-  {...request, isFork: true},
   {...request, exactSha: true, expectNoStack: true},
-  {...request, isFork: true, expectNoStack: false},
   {...request, exactSha: true, isFork: true, expectNoStack: true}
 ] as const) {
   test(`does not re-fetch immutable ref ${JSON.stringify(immutable)}`, async () => {
@@ -58,6 +57,7 @@ test('rechecks stack membership for a same-repository PR hosted in a fork', asyn
   getPullMock.mock.mockImplementation(() =>
     Promise.resolve({
       data: {
+        base: {ref: 'main'},
         head: {sha: 'expected'},
         stack: {number: 7, position: 2, base: {ref: 'main'}}
       }
@@ -78,7 +78,7 @@ test('rechecks stack membership for a same-repository PR hosted in a fork', asyn
 
 test('re-fetches and accepts an unchanged pull request head', async () => {
   getPullMock.mock.mockImplementation(() =>
-    Promise.resolve({data: {head: {sha: 'expected'}}})
+    Promise.resolve({data: {base: {ref: 'main'}, head: {sha: 'expected'}}})
   )
 
   assert.strictEqual(await selectedRefMatches(octokit, context, request), true)
@@ -92,11 +92,31 @@ test('re-fetches and accepts an unchanged pull request head', async () => {
 
 test('rejects a changed pull request head', async () => {
   getPullMock.mock.mockImplementation(() =>
-    Promise.resolve({data: {head: {sha: 'changed'}}})
+    Promise.resolve({data: {base: {ref: 'main'}, head: {sha: 'changed'}}})
   )
 
   assert.strictEqual(await selectedRefMatches(octokit, context, request), false)
 })
+
+for (const base of [{ref: 'scratch'}, {}, undefined]) {
+  for (const isFork of [false, true]) {
+    test(`rejects changed or unavailable base ${JSON.stringify(base)} with an unchanged head, fork ${String(isFork)}`, async () => {
+      getPullMock.mock.mockImplementation(() =>
+        Promise.resolve({
+          data: {
+            ...(base === undefined ? {} : {base}),
+            head: {sha: request.expectedSha}
+          }
+        })
+      )
+
+      assert.equal(
+        await selectedRefMatches(octokit, context, {...request, isFork}),
+        false
+      )
+    })
+  }
+}
 
 for (const [description, marker] of [
   ['absent', {}],
@@ -105,7 +125,9 @@ for (const [description, marker] of [
 ] as const) {
   test(`accepts unchanged ordinary PR stack metadata: ${description}`, async () => {
     getPullMock.mock.mockImplementation(() =>
-      Promise.resolve({data: {head: {sha: 'expected'}, ...marker}})
+      Promise.resolve({
+        data: {base: {ref: 'main'}, head: {sha: 'expected'}, ...marker}
+      })
     )
 
     assert.strictEqual(
@@ -122,7 +144,9 @@ for (const [description, marker] of [
   for (const headSha of ['expected', 'changed']) {
     test(`preserves the checked fork SHA with ${description} membership and head ${headSha}`, async () => {
       getPullMock.mock.mockImplementation(() =>
-        Promise.resolve({data: {head: {sha: headSha}, ...marker}})
+        Promise.resolve({
+          data: {base: {ref: 'main'}, head: {sha: headSha}, ...marker}
+        })
       )
 
       assert.strictEqual(
@@ -153,7 +177,9 @@ for (const [description, stack] of [
         (isFork ? ' in a fork repository' : ''),
       async () => {
         getPullMock.mock.mockImplementation(() =>
-          Promise.resolve({data: {head: {sha: 'expected'}, stack}})
+          Promise.resolve({
+            data: {base: {ref: 'main'}, head: {sha: 'expected'}, stack}
+          })
         )
 
         assert.strictEqual(
@@ -190,7 +216,9 @@ test('does not accept a fork membership recheck when the pull lookup fails', asy
 for (const ordinaryRequest of [request, {...request, expectNoStack: false}]) {
   test(`ignores stack membership without an opt-in ${JSON.stringify(ordinaryRequest)}`, async () => {
     getPullMock.mock.mockImplementation(() =>
-      Promise.resolve({data: {head: {sha: 'expected'}, stack: {id: 7}}})
+      Promise.resolve({
+        data: {base: {ref: 'main'}, head: {sha: 'expected'}, stack: {id: 7}}
+      })
     )
 
     assert.strictEqual(

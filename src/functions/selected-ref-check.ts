@@ -11,6 +11,7 @@ export interface SelectedRefOctokit {
     readonly pulls: {
       readonly get: (parameters?: GetPullParameters) => Promise<{
         readonly data: {
+          readonly base?: {readonly ref?: string}
           readonly head: {readonly sha: string}
           readonly stack?: unknown
         }
@@ -27,6 +28,7 @@ export interface SelectedRefOctokit {
 export interface SelectedRefRequest {
   readonly exactSha: boolean
   readonly expectNoStack?: boolean
+  readonly expectedBaseRef: string
   readonly expectedSha: string
   readonly isFork: boolean
   readonly stableBranch: string
@@ -38,14 +40,7 @@ export async function selectedRefMatches(
   context: BranchDeployContext,
   request: SelectedRefRequest
 ): Promise<boolean> {
-  if (
-    request.exactSha ||
-    (request.isFork &&
-      !request.stableBranchUsed &&
-      request.expectNoStack !== true)
-  ) {
-    return true
-  }
+  if (request.exactSha) return true
 
   if (request.stableBranchUsed) {
     const branch = await octokit.rest.repos.getBranch({
@@ -68,6 +63,9 @@ export async function selectedRefMatches(
   ) {
     return false
   }
-  // Fork deployments keep their checked SHA even if the head branch moves.
-  return request.isFork || pull.data.head.sha === request.expectedSha
+  // Fork deployments keep their checked SHA if the head advances, but their base still determines review policy.
+  return (
+    pull.data.base?.ref === request.expectedBaseRef &&
+    (request.isFork || pull.data.head.sha === request.expectedSha)
+  )
 }

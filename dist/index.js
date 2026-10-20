@@ -40373,7 +40373,7 @@ async function prechecks(context, octokit, data) {
     // save sha
     let sha = prData.head.sha;
     // set an output which is the branch name this PR is targeting to merge into
-    const baseRef = pr.data?.base?.ref;
+    const baseRef = pr.data?.base?.ref ?? '';
     setActionOutput('base_ref', baseRef);
     debug(`base_ref: ${String(baseRef)}`);
     // Setup the skipCi, skipReview, and draft_permitted_targets variables
@@ -40410,14 +40410,20 @@ async function prechecks(context, octokit, data) {
     }
     const nonDefaultTargetBranchUsed = data.inputs.stable_branch !== baseRef;
     const isNotStableBranchDeploy = !data.environmentObj.stable_branch_used;
+    const isPullRequestDeployment = isNotStableBranchDeploy && data.environmentObj.sha === null;
     const nonDefaultDeploysAllowed = data.inputs.allow_non_default_target_branch_deployments;
     const securityWarningsEnabled = data.inputs.use_security_warnings;
+    if (isPullRequestDeployment &&
+        (typeof baseRef !== 'string' || baseRef === '')) {
+        return {
+            message: '### ⚠️ Cannot proceed with deployment\n\nThe Action could not determine the base branch of this pull request. Retry the command after its base branch is available.',
+            status: false
+        };
+    }
     let stack = null;
     let stackRequiredChecks = null;
     let expectNoStack = false;
-    if (data.inputs.enable_pr_stacks &&
-        isNotStableBranchDeploy &&
-        data.environmentObj.sha === null) {
+    if (data.inputs.enable_pr_stacks && isPullRequestDeployment) {
         try {
             // Ordinary PRs must not depend on the preview stack APIs.
             const membership = parsePrStackMembership(prData.stack);
@@ -40529,16 +40535,12 @@ async function prechecks(context, octokit, data) {
         saveActionState('fork', 'false');
     }
     if (stack === null &&
-        isNotStableBranchDeploy &&
-        data.environmentObj.sha === null &&
+        isPullRequestDeployment &&
         !skipCi &&
         (typeof checks === 'string' || checks.length === 0)) {
         try {
             // Only named CI requirements block admission, not deploy-before-merge
             // rules. An allowed non-default base must use its own policy.
-            if (typeof baseRef !== 'string' || baseRef === '') {
-                throw new Error('Pull request base branch is unavailable');
-            }
             const baseBranch = nonDefaultTargetBranchUsed
                 ? await octokit.rest.repos.getBranch({
                     ...context.repo,
@@ -40566,6 +40568,7 @@ async function prechecks(context, octokit, data) {
     const query = `query($owner:String!, $name:String!, $number:Int!) {
                   repository(owner:$owner, name:$name) {
                     pullRequest(number:$number) {
+                      baseRefName
                       reviewDecision
                       mergeStateStatus
                       reviews(states: APPROVED) {
@@ -40627,7 +40630,15 @@ async function prechecks(context, octokit, data) {
     try {
         result = prechecksGraphqlResult(await graphqlAllowingInaccessibleApps(octokit, query, variables));
         if (stack !== null) {
-            requireStackPolicyData(result, stack.selectedHeadSha);
+            requireStackPolicyData(result, stack.selectedHeadSha, baseRef);
+        }
+        else if (isPullRequestDeployment &&
+            result.repository.pullRequest.baseRefName !== baseRef) {
+            // Retargeting a pull request can change its review policy without moving its head.
+            return {
+                message: '### ⚠️ Cannot proceed with deployment\n\nThe pull request base branch changed or could not be verified while reading its review and CI requirements. Check the base branch and run the command again.',
+                status: false
+            };
         }
     }
     catch (error) {
@@ -40715,11 +40726,11 @@ async function prechecks(context, octokit, data) {
             return stackFailure;
     }
     // Make an API call to get the base branch that the pull request is targeting
-    const baseBranch = prData.base.ref === data.inputs.stable_branch
+    const baseBranch = baseRef === data.inputs.stable_branch
         ? stableBaseBranch
         : await octokit.rest.repos.getBranch({
             ...context.repo,
-            branch: prData.base.ref,
+            branch: baseRef,
             headers: API_HEADERS
         });
     // Check to see if the branch is outdated or not based on the Action's configuration
@@ -40759,9 +40770,7 @@ async function prechecks(context, octokit, data) {
     // 1. We're deploying to the stable branch (e.g., `.deploy main`)
     // 2. We're deploying an exact SHA (allow_sha_deployments is enabled and a SHA was provided)
     // 3. The PR is from a fork (we use SHA for forks, not branch names)
-    if (!data.environmentObj.stable_branch_used &&
-        data.environmentObj.sha === null &&
-        !isFork) {
+    if (isPullRequestDeployment && !isFork) {
         debug(`checking if branch exists: ${ref}`);
         try {
             await octokit.rest.repos.getBranch({
@@ -40861,6 +40870,7 @@ async function prechecks(context, octokit, data) {
         ref: ref,
         noopMode: noopMode,
         sha: sha,
+        baseRef,
         isFork: isFork,
         ...(expectNoStack ? { expectNoStack: true } : {}),
         ...(stack === null ? {} : { stack })
@@ -40873,7 +40883,7 @@ function stackPrecheckUnavailable(error) {
         status: false
     };
 }
-function requireStackPolicyData(result, expectedSha) {
+function requireStackPolicyData(result, expectedSha, expectedBaseRef) {
     const pull = result.repository.pullRequest;
     const reviewDecisions = [
         null,
@@ -40891,6 +40901,7 @@ function requireStackPolicyData(result, expectedSha) {
         'UNSTABLE'
     ];
     if (legacyPrechecksCommitOid(result) !== expectedSha ||
+        pull.baseRefName !== expectedBaseRef ||
         !reviewDecisions.some(value => value === pull.reviewDecision) ||
         !mergeStates.some(value => value === pull.mergeStateStatus)) {
         throw new Error('The stack pull request policy data is incomplete or stale');
@@ -40907,7 +40918,7 @@ async function checkStackPrerequisites({ context, data, octokit, query, stack, a
                 number: pull.number,
                 headers: { Accept: 'application/vnd.github.merge-info-preview+json' }
             }));
-            requireStackPolicyData(result, pull.headSha);
+            requireStackPolicyData(result, pull.headSha, pull.baseRef);
             const check = await evaluateCommitChecks({
                 checks: data.inputs.checks,
                 environment: data.environment,
@@ -40992,7 +41003,14 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
             throw new Error('The GraphQL response did not include a check rollup');
         }
         const checkResults = [
-            ...(await loadAllCheckResults(octokit, pullRequestNumber, commit, statusCheckRollup))
+            ...(await loadAllCheckResults({
+                octokit,
+                pullRequestNumber,
+                repo,
+                baseRefName: result.repository.pullRequest.baseRefName,
+                commit,
+                statusCheckRollup
+            }))
         ];
         // Resolve identities before grouping reruns, or a newer hidden result could
         // escape the earlier known App's group. Never resolve from display URLs.
@@ -41137,7 +41155,7 @@ function missingRequiredStackChecks({ checks, checkResults, ignoredChecks, requi
         kind: 'missing'
     };
 }
-async function loadAllCheckResults(octokit, pullRequestNumber, commit, statusCheckRollup) {
+async function loadAllCheckResults({ octokit, pullRequestNumber, repo, baseRefName, commit, statusCheckRollup }) {
     const checkResults = [...statusCheckRollup.contexts.nodes];
     let pageInfo = statusCheckRollup.contexts.pageInfo;
     if (!pageInfo) {
@@ -41149,7 +41167,11 @@ async function loadAllCheckResults(octokit, pullRequestNumber, commit, statusChe
     if (commit.id === undefined || commit.id === '') {
         throw new Error('The GraphQL response did not include a commit node ID');
     }
-    const query = `query($commitId:ID!, $cursor:String!, $number:Int!) {
+    // isRequired is relative to the pull request's current base, even on a pinned commit.
+    const query = `query($commitId:ID!, $cursor:String!, $owner:String!, $name:String!, $number:Int!) {
+                  repository(owner:$owner, name:$name) {
+                    pullRequest(number:$number) { baseRefName }
+                  }
                   node(id:$commitId) {
                     ... on Commit {
                       id
@@ -41201,6 +41223,8 @@ async function loadAllCheckResults(octokit, pullRequestNumber, commit, statusChe
         const page = prechecksGraphqlContextsPageResult(await graphqlAllowingInaccessibleApps(octokit, query, {
             commitId: commit.id,
             cursor,
+            owner: repo.owner,
+            name: repo.repo,
             number: pullRequestNumber
         }));
         if (!page.node) {
@@ -41208,6 +41232,9 @@ async function loadAllCheckResults(octokit, pullRequestNumber, commit, statusChe
         }
         if (page.node.id !== commit.id || page.node.oid !== commit.oid) {
             throw new Error('The paginated check data belongs to another commit');
+        }
+        if (page.repository?.pullRequest?.baseRefName !== baseRefName) {
+            throw new Error('The pull request base branch changed or could not be verified while reading its CI checks');
         }
         if (page.node.statusCheckRollup === null) {
             throw new Error('The paginated check rollup is unavailable');
@@ -41440,12 +41467,8 @@ function checkStatus(check) {
 ;// CONCATENATED MODULE: ./src/functions/selected-ref-check.ts
 
 async function selectedRefMatches(octokit, context, request) {
-    if (request.exactSha ||
-        (request.isFork &&
-            !request.stableBranchUsed &&
-            request.expectNoStack !== true)) {
+    if (request.exactSha)
         return true;
-    }
     if (request.stableBranchUsed) {
         const branch = await octokit.rest.repos.getBranch({
             ...context.repo,
@@ -41464,8 +41487,9 @@ async function selectedRefMatches(octokit, context, request) {
         pull.data.stack !== undefined) {
         return false;
     }
-    // Fork deployments keep their checked SHA even if the head branch moves.
-    return request.isFork || pull.data.head.sha === request.expectedSha;
+    // Fork deployments keep their checked SHA if the head advances, but their base still determines review policy.
+    return (pull.data.base?.ref === request.expectedBaseRef &&
+        (request.isFork || pull.data.head.sha === request.expectedSha));
 }
 
 ;// CONCATENATED MODULE: ./src/functions/unlock-if-unchanged.ts
@@ -41850,6 +41874,7 @@ async function changedRefOutcome(request, ready, lease, deploymentType) {
         unchanged = await selectedRefMatches(octokit, context, {
             exactSha: ready.environmentResult.environmentObj.sha !== null,
             ...(ready.precheck.expectNoStack === true ? { expectNoStack: true } : {}),
+            expectedBaseRef: ready.precheck.baseRef,
             expectedSha: ready.precheck.sha,
             isFork: ready.precheck.isFork,
             stableBranch: inputs.stable_branch,
@@ -41870,7 +41895,7 @@ async function changedRefOutcome(request, ready, lease, deploymentType) {
     const message = dedent(`
     ### Deployment Ref Changed
 
-    ${ready.precheck.stack === undefined ? 'The selected branch moved' : 'The pull request stack changed or could not be verified'} after deployment checks completed. Run the command again so the new commit can be reviewed and checked.
+    ${ready.precheck.stack === undefined ? 'The selected branch or pull request base changed or could not be verified' : 'The pull request stack changed or could not be verified'} after deployment checks completed. Check the deployment target and run the command again.
   `);
     saveActionState('bypass', 'true');
     await lease.cleanup('after the selected ref changed');
