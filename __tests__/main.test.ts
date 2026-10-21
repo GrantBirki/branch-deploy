@@ -1675,6 +1675,34 @@ test('retains a sticky lock when deployment confirmation is rejected', async () 
   assertNotCalled(unlockIfUnchangedMock)
 })
 
+test('retains an existing sticky lock when its owner rejects deployment confirmation', async () => {
+  setEnv('INPUT_DEPLOYMENT_CONFIRMATION', 'true')
+  deploymentConfirmationMock.mock.mockImplementation(() =>
+    Promise.resolve('rejected')
+  )
+  setLockResult({
+    status: 'owner',
+    lockData: {
+      branch: 'test-ref',
+      created_at: '2025-01-01T00:00:00.000Z',
+      created_by: 'monalisa',
+      environment: 'production',
+      global: false,
+      link: 'https://github.com/corp/test/pull/123',
+      reason: 'release freeze',
+      sticky: true,
+      unlock_command: '.unlock production'
+    },
+    environment: 'production',
+    global: false,
+    globalFlag: '',
+    lockRefSha: 'lock-commit-sha'
+  })
+
+  assert.strictEqual(await run(), 'failure')
+  assertNotCalled(unlockIfUnchangedMock)
+})
+
 test('cleans a non-sticky lock before propagating a confirmation error', async () => {
   setEnv('INPUT_DEPLOYMENT_CONFIRMATION', 'true')
   deploymentConfirmationMock.mock.mockImplementation(() =>

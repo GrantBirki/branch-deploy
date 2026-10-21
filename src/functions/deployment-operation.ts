@@ -340,10 +340,12 @@ async function acquireDeploymentLock(
 
   let cleanupAttempted = false
   const lockRefSha = lockResponse.lockRefSha
+  // The owner can deploy under a sticky lock from an earlier .lock command.
+  const retainLock = sticky || lockResponse.lockData?.sticky === true
   return {
     lockRefSha,
     cleanup: async (reason: string): Promise<void> => {
-      if (sticky || cleanupAttempted) return
+      if (retainLock || cleanupAttempted) return
       cleanupAttempted = true
       if (lockRefSha === undefined) {
         core.warning(

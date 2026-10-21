@@ -41845,10 +41845,12 @@ async function acquireDeploymentLock(request, ready) {
     }
     let cleanupAttempted = false;
     const lockRefSha = lockResponse.lockRefSha;
+    // The owner can deploy under a sticky lock from an earlier .lock command.
+    const retainLock = sticky || lockResponse.lockData?.sticky === true;
     return {
         lockRefSha,
         cleanup: async (reason) => {
-            if (sticky || cleanupAttempted)
+            if (retainLock || cleanupAttempted)
                 return;
             cleanupAttempted = true;
             if (lockRefSha === undefined) {
