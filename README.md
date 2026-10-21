@@ -259,7 +259,9 @@ The core of this Action takes place here. This block of code will trigger the br
         run: echo "I am doing a fake regular deploy"
 ```
 
-The checkout uses the exact commit Branch Deploy selected. An accepted `.noop` sets both `continue` and `noop` to `true`, so it runs only the noop step. Publish only when `continue == 'true'` and `noop == 'false'`. If you copied an example that publishes on `continue` alone, update that condition in your workflow. Upgrading the Action cannot change YAML you already copied.
+The checkout uses the exact commit Branch Deploy selected. For comment-triggered deployments, publish only when `continue == 'true'` and `noop == 'false'`. An accepted `.noop` sets both outputs to `true`. If your publish step checks only `continue`, update that condition in your workflow; upgrading Branch Deploy won't change it for you.
+
+For [deploy-on-merge](docs/merge-commit-strategy.md), keep checking `continue == 'true'` alone. That mode doesn't set `noop`.
 
 > A Terraform noop can run `terraform init` and `terraform plan`. Initialization can install candidate-selected providers, and planning can execute them with any credentials available to the job. Review the [Terraform plan hardening guide](docs/security_hardening_guides/terraform-plans.md) before adding deployment credentials to that job.
 
@@ -346,7 +348,7 @@ The checkout uses the exact commit Branch Deploy selected. An accepted `.noop` s
 | `environment` | The environment that has been selected for a deployment |
 | `params` | The raw parameters that were passed into the deployment command (see param_separator) - Further [documentation](docs/parameters.md) |
 | `parsed_params` | A stringified JSON object of the parsed parameters that were passed into the deployment command - Further [documentation](docs/parameters.md) |
-| `noop` | The string `true` if the noop trigger was found, otherwise `false`. Use it to decide which deployment steps run. |
+| `noop` | For comment-triggered deployments, `true` for an accepted noop or `false` for a regular deployment. Not set in `merge_deploy_mode`; check `continue` instead. |
 | `sha` | The sha of the branch to be deployed |
 | `default_branch_tree_sha` | The sha of the default branch tree (useful for subsequent workflow steps if they need to do commit comparisons) |
 | `ref` | The ref (branch or sha) to use with deployment |

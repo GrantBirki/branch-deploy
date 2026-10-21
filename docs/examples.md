@@ -6,7 +6,9 @@ This section contains real world and common examples of how you could use this A
 
 > **Start here for a new credentialed workflow:** Use the [Hardened Workflow Starting Point](#hardened-workflow-starting-point). The remaining examples explain specific integrations and migration paths. Unless noted otherwise, they may combine admission, pull request code, deployment tooling, and credentials in one job. Treat them as references, not security baselines.
 
-> An accepted `.noop` also sets `continue` to `true`. If you copied an example that publishes on `continue` alone, update your workflow to require `noop == 'false'` too. Updating Branch Deploy cannot change a workflow you already copied.
+> For comment-triggered deployments, publish only when `continue == 'true'` and `noop == 'false'`. An accepted `.noop` sets both outputs to `true`. If your publish step checks only `continue`, update that condition in your workflow; upgrading Branch Deploy won't change it for you.
+>
+> For [deploy-on-merge](merge-commit-strategy.md), keep checking `continue == 'true'` alone. That mode doesn't set `noop`.
 
 ## Table of Contents
 
