@@ -116,6 +116,7 @@ jobs:
       # Checkout your project's repository based on the commit SHA provided by the branch-deploy step
       # It is important to only ever operate on the commit SHA (where possible) as commit SHA's are immutable and you know exactly what you are deploying
       - uses: actions/checkout@v7.0.0
+        if: steps.branch-deploy.outputs.continue == 'true'
         with:
           ref: ${{ steps.branch-deploy.outputs.sha }}
           persist-credentials: false
@@ -129,7 +130,7 @@ jobs:
       # Do some fake "regular" deployment logic here
       # conditionally run a regular deployment
       - name: fake regular deploy
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' && steps.branch-deploy.outputs.noop != 'true' }}
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' && steps.branch-deploy.outputs.noop == 'false' }}
         run: echo "I am doing a fake regular deploy"
 ```
 
@@ -215,15 +216,9 @@ jobs:
     if: ${{ github.event.issue.pull_request }} # only run on pull request comments
     runs-on: ubuntu-latest
     steps:
-      # Checkout your projects repository
-      - uses: actions/checkout@v7.0.0
-        with:
-          persist-credentials: false
 ```
 
-Sets up your `demo` job, uses an ubuntu runner, and checks out your repo - Just some standard setup for a general Action. We also add an `if:` statement here to only run this workflow on pull request comments to make it a little cleaner
-
-> Note: The Action will check the context for us anyways but this can save us a bit of CI time by using the `if:` condition
+This starts the job on an Ubuntu runner when someone comments on a pull request. Branch Deploy runs before checkout so it can tell the workflow which commit to use.
 
 ```yaml
       # Execute IssueOps branch deployment logic, hooray!
@@ -233,7 +228,7 @@ Sets up your `demo` job, uses an ubuntu runner, and checks out your repo - Just 
           trigger: ".deploy"
 ```
 
-> Note: It is important to set an `id:` for this job so we can reference its outputs in subsequent steps
+Set an `id` on this step so the checkout and deployment steps can read its outputs.
 
 The core of this Action takes place here. This block of code will trigger the branch deploy action to run. It will do the following:
 
@@ -242,9 +237,15 @@ The core of this Action takes place here. This block of code will trigger the br
 1. It will start by reacting to your message to let you know it is running
 1. The Action will post a comment with a link to the running Actions workflow for you to follow its progress
 1. A deployment will be started and attached to your pull request - You'll get a nice little yellow rocket which tells you a deployment is in progress
-1. Outputs will be exported by this job for later reference in other jobs as well
+1. The Action sets outputs that tell the following steps whether to continue, whether this is a noop, and which commit to check out
 
 ```yaml
+      - uses: actions/checkout@v7.0.0
+        if: steps.branch-deploy.outputs.continue == 'true'
+        with:
+          ref: ${{ steps.branch-deploy.outputs.sha }}
+          persist-credentials: false
+
       # Do some fake "noop" deployment logic here
       # conditionally run a noop deployment
       - name: fake noop deploy
@@ -254,18 +255,13 @@ The core of this Action takes place here. This block of code will trigger the br
       # Do some fake "regular" deployment logic here
       # conditionally run a regular deployment
       - name: fake regular deploy
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' && steps.branch-deploy.outputs.noop != 'true' }}
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' && steps.branch-deploy.outputs.noop == 'false' }}
         run: echo "I am doing a fake regular deploy"
 ```
 
-As seen above, we have two steps. One for a noop deploy, and one for a regular deploy. For example, the noop deploy could trigger a `terraform plan` and the regular deploy could be a `terraform apply`. These steps are conditionally gated by two variables:
+The checkout uses the exact commit Branch Deploy selected. An accepted `.noop` sets both `continue` and `noop` to `true`, so it runs only the noop step. Publish only when `continue == 'true'` and `noop == 'false'`. If you copied an example that publishes on `continue` alone, update that condition in your workflow. Upgrading the Action cannot change YAML you already copied.
 
 > A Terraform noop can run `terraform init` and `terraform plan`. Initialization can install candidate-selected providers, and planning can execute them with any credentials available to the job. Review the [Terraform plan hardening guide](docs/security_hardening_guides/terraform-plans.md) before adding deployment credentials to that job.
-
-- `steps.branch-deploy.outputs.continue == 'true'` - The `continue` variable is only set to true when a deployment should continue
-- `steps.branch-deploy.outputs.noop == 'true'` - The `noop` variable is only set to true when a noop deployment should be run
-
-> Example: You comment `.noop` on a pull request. A noop deployment is detected so this action outputs the `noop` variable to `true`. You also have the correct permissions to execute the IssueOps command so the action also outputs the `continue` variable to `true`. This will allow the "fake noop deploy" step seen above to run and the "fake regular deploy" step will be skipped
 
 ## Inputs 📥
 
@@ -616,8 +612,6 @@ Checkout the [merge commit workflow strategy](docs/merge-commit-strategy.md) for
 For deployments that span jobs, set `skip_completing: true` on the initial invocation and use [result mode](docs/result-mode.md) in a final job. It handles deployment and noop completion using the original context. See the [multiple-jobs example](docs/examples.md#multiple-jobs).
 
 If you need full manual control, `skip_completing: true` without a result invocation still bypasses completion. Your workflow is then responsible for final deployment statuses, comments, reactions, labels, and safe non-sticky lock cleanup. Existing single-job workflows keep their normal post-action completion when this option is `false`.
-
-The [manual multi-job examples](docs/examples.md#multiple-jobs-with-github-pages-and-hugo) remain available for that case.
 
 ## Saving on Actions Compute
 
