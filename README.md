@@ -613,8 +613,6 @@ For deployments that span jobs, set `skip_completing: true` on the initial invoc
 
 If you need full manual control, `skip_completing: true` without a result invocation still bypasses completion. Your workflow is then responsible for final deployment statuses, comments, reactions, labels, and safe non-sticky lock cleanup. Existing single-job workflows keep their normal post-action completion when this option is `false`.
 
-The [GitHub Environments example](docs/examples.md#multiple-jobs-with-github-environments) shows that manual approach.
-
 ## Saving on Actions Compute
 
 If you are looking to save on Actions compute time, here is a helpful tip! You can use the `if` conditional to only run this Action when a specific comment is made on a pull request. This can help you save on Actions compute time by only running this Action when it should truly be invoked.

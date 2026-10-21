@@ -1015,7 +1015,7 @@ jobs:
 
 Use [result mode](result-mode.md) to complete a deployment or noop after work in other jobs. The initial job passes its context directly to the result job; the deployment job checks `run_attempt` before doing any work. Pin both Branch Deploy invocations to the same full immutable commit SHA in real workflows.
 
-This example runs the downstream job for both noops and deployments, so `job_results` contains no intentionally skipped jobs. Keep provider calls inside the non-noop step. The [GitHub Environments example](#multiple-jobs-with-github-environments) shows manual completion for workflows that need it.
+This example runs the downstream job for both noops and deployments, so `job_results` contains no intentionally skipped jobs. Keep provider calls inside the non-noop step.
 
 ```yaml
 name: deploy
