@@ -6,6 +6,10 @@ This section contains real world and common examples of how you could use this A
 
 > **Start here for a new credentialed workflow:** Use the [Hardened Workflow Starting Point](#hardened-workflow-starting-point). The remaining examples explain specific integrations and migration paths. Unless noted otherwise, they may combine admission, pull request code, deployment tooling, and credentials in one job. Treat them as references, not security baselines.
 
+> For comment-triggered deployments, publish only when `continue == 'true'` and `noop == 'false'`. An accepted `.noop` sets both outputs to `true`. If your publish step checks only `continue`, update that condition in your workflow; upgrading Branch Deploy won't change it for you.
+>
+> For [deploy-on-merge](merge-commit-strategy.md), keep checking `continue == 'true'` alone. That mode doesn't set `noop`.
+
 ## Table of Contents
 
 Quick links below to jump to a specific branch-deploy example:
@@ -128,7 +132,7 @@ jobs:
     needs: [branch-deploy, validate]
     if: >-
       ${{ needs.branch-deploy.outputs.continue == 'true' &&
-          needs.branch-deploy.outputs.noop != 'true' &&
+          needs.branch-deploy.outputs.noop == 'false' &&
           needs.validate.result == 'success' &&
           fromJSON(needs.branch-deploy.outputs.context).run_attempt == github.run_attempt }}
     runs-on: ubuntu-latest
@@ -697,10 +701,8 @@ jobs:
 
 This example shows how you could use this Action with [Heroku](https://heroku.com)
 
-- `.noop` has no effect here (but you could change that)
-- `.deploy` takes your current branch and deploys it to Heroku
-
-> A live example can be found [here](https://github.com/the-hideout/stash/blob/aef5a5f16b4fa6946d2eba107e7b92c5f6583c0d/.github/workflows/branch-deploy.yml)
+- `.noop` skips checkout and does not publish to Heroku.
+- `.deploy` publishes the exact commit selected by Branch Deploy to Heroku.
 
 ```yaml
 name: branch-deploy
@@ -729,17 +731,15 @@ jobs:
         id: branch-deploy
         uses: grantbirki/branch-deploy@vX.X.X
 
-        # If the branch-deploy Action was triggered, checkout our branch
       - name: Checkout
-        if: steps.branch-deploy.outputs.continue == 'true'
+        if: steps.branch-deploy.outputs.continue == 'true' && steps.branch-deploy.outputs.noop == 'false'
         uses: actions/checkout@v7.0.0
         with:
           ref: ${{ steps.branch-deploy.outputs.sha }}
           persist-credentials: false
 
-        # Deploy our branch to Heroku
       - name: Deploy to Heroku
-        if: steps.branch-deploy.outputs.continue == 'true'
+        if: steps.branch-deploy.outputs.continue == 'true' && steps.branch-deploy.outputs.noop == 'false'
         uses: AkhileshNS/heroku-deploy@79ef2ae4ff9b897010907016b268fd0f88561820 # pin@v3.12.12
         with:
           heroku_app_name: <your-heroku-app-name-here>
@@ -751,10 +751,8 @@ jobs:
 
 This example shows how you could use this Action with [Railway](https://railway.app)
 
-- `.noop` has no effect here (but you could change that)
-- `.deploy` takes your current branch and deploys it to Railway
-
-> A live example can be found [here](https://github.com/the-hideout/stash/blob/ee8af01919f368f35dede3c93f703fd239dbac3c/.github/workflows/branch-deploy.yml) that has some slight modifications to the example below
+- `.noop` skips checkout and does not publish to Railway.
+- `.deploy` publishes the exact commit selected by Branch Deploy to Railway.
 
 ```yaml
 name: branch-deploy
@@ -783,21 +781,19 @@ jobs:
         id: branch-deploy
         uses: grantbirki/branch-deploy@vX.X.X
 
-        # If the branch-deploy Action was triggered, checkout our branch
       - name: Checkout
-        if: steps.branch-deploy.outputs.continue == 'true'
+        if: steps.branch-deploy.outputs.continue == 'true' && steps.branch-deploy.outputs.noop == 'false'
         uses: actions/checkout@v7.0.0
         with:
           ref: ${{ steps.branch-deploy.outputs.sha }}
           persist-credentials: false
 
-        # Install the Railway CLI through npm
       - name: Install Railway
+        if: steps.branch-deploy.outputs.continue == 'true' && steps.branch-deploy.outputs.noop == 'false'
         run: npm i -g @railway/cli
 
-        # Deploy our branch to Railway
       - name: Deploy to Railway
-        if: steps.branch-deploy.outputs.continue == 'true'
+        if: steps.branch-deploy.outputs.continue == 'true' && steps.branch-deploy.outputs.noop == 'false'
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: railway up
@@ -1021,7 +1017,7 @@ jobs:
 
 Use [result mode](result-mode.md) to complete a deployment or noop after work in other jobs. The initial job passes its context directly to the result job; the deployment job checks `run_attempt` before doing any work. Pin both Branch Deploy invocations to the same full immutable commit SHA in real workflows.
 
-This example runs the downstream job for both noops and deployments, so `job_results` contains no intentionally skipped jobs. Keep provider calls inside the non-noop step. The later examples retain [manual completion](../README.md#manual-deployment-control) for workflows that need it.
+This example runs the downstream job for both noops and deployments, so `job_results` contains no intentionally skipped jobs. Keep provider calls inside the non-noop step.
 
 ```yaml
 name: deploy
@@ -1094,29 +1090,20 @@ jobs:
 
 ## Multiple Jobs with GitHub Pages and Hugo
 
-A detailed example using multiple jobs, custom deployment status creation, non-sticky lock removal, and comments. This example showcases building a static site with [hugo](https://gohugo.io/) and deploying it to [GitHub Pages](https://pages.github.com/).
+`.noop` builds the [Hugo](https://gohugo.io/) site without uploading or publishing it. `.deploy` builds the site and publishes it to [GitHub Pages](https://pages.github.com/). Only the deploy job has permission to publish to Pages.
 
-> This live example can be found [here](https://github.com/grantbirki/blog/blob/559b9be5cc3eac923be5d7923ec9a0b50429ced2/.github/workflows/branch-deploy.yml)
+[Result mode](result-mode.md) reports the build result for a noop and both job results for a deployment. A failed, cancelled, or unexpectedly skipped job is reported as such. Use the same Branch Deploy commit for the trigger and result steps.
 
 ```yaml
 name: branch deploy
 
-# The workflow to execute on is comments that are newly created
+cache-mode: none
+
 on:
   issue_comment:
     types: [created]
 
-# Permissions needed for reacting and adding comments for IssueOps commands
-permissions:
-  pull-requests: write
-  deployments: write
-  contents: write
-  checks: read
-  statuses: read
-
-# set an environment variable for use in the jobs pointing to my blog
-env:
-  blog_url: https://test.example.com # <--- CHANGE THIS TO YOUR BLOG URL
+permissions: {}
 
 jobs:
   # branch-deploy trigger job
@@ -1130,48 +1117,35 @@ jobs:
       contains(github.event.comment.body, '.wcid') ||
       contains(github.event.comment.body, '.unlock')) }}
     runs-on: ubuntu-latest
-    outputs: # set outputs for use in downstream jobs
+    permissions:
+      checks: read
+      contents: write
+      deployments: write
+      pull-requests: write
+      statuses: read
+    outputs:
       continue: ${{ steps.branch-deploy.outputs.continue }}
+      context: ${{ steps.branch-deploy.outputs.context }}
       noop: ${{ steps.branch-deploy.outputs.noop }}
-      deployment_id: ${{ steps.branch-deploy.outputs.deployment_id }}
-      environment: ${{ steps.branch-deploy.outputs.environment }}
-      lock_ref_sha: ${{ steps.capture-lock.outputs.sha }}
       sha: ${{ steps.branch-deploy.outputs.sha }}
-      comment_id: ${{ steps.branch-deploy.outputs.comment_id }}
-      initial_reaction_id: ${{ steps.branch-deploy.outputs.initial_reaction_id }}
-      actor_handle: ${{ steps.branch-deploy.outputs.actor_handle }}
-
     steps:
-      # execute the branch-deploy action
-      - uses: grantbirki/branch-deploy@vX.X.X
+      - uses: grantbirki/branch-deploy@7a6af23b802f1284c5bb2f2e42edf79c667c067d # v12.2.0
         id: branch-deploy
         with:
-          trigger: '.deploy'
-          environment: 'github-pages'
-          production_environments: 'github-pages'
-          skip_completing: true # we will complete the deployment manually in the 'result' job
-          admins: 'false' # <--- add your GitHub username here (if you want to use the admins feature)
+          environment: github-pages
+          environment_targets: github-pages
+          production_environments: github-pages
+          skip_completing: true
 
-      - name: Capture deployment lock
-        id: capture-lock
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        env:
-          ENVIRONMENT: ${{ steps.branch-deploy.outputs.environment }}
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          lock_branch="$(printf '%s' "$ENVIRONMENT" | jq -Rsr 'gsub("\\s"; "-")')-branch-deploy-lock"
-          if lock_ref_sha="$(gh api --method GET "repos/{owner}/{repo}/git/ref/heads/${lock_branch}" --jq '.object.sha' 2>/dev/null)"; then
-            printf 'sha=%s\n' "$lock_ref_sha" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::Could not capture the original deployment lock; manual lock cleanup will be skipped"
-          fi
-
-  # build the github-pages site with hugo
   build:
     needs: trigger
-    if: ${{ needs.trigger.outputs.continue == 'true' }} # only run if the trigger job set continue to true
+    if: >-
+      ${{ needs.trigger.outputs.continue == 'true' &&
+          fromJSON(needs.trigger.outputs.context).run_attempt == github.run_attempt }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: read
 
     steps:
       # checkout the project's repository based on the commit SHA provided by the branch-deploy step
@@ -1199,7 +1173,7 @@ jobs:
       # configure the GitHub Pages action
       - name: setup pages
         id: pages
-        uses: actions/configure-pages@c5a3e1159e0cbdf0845eb8811bd39e39fc3099c2 # pin@v2.1.3
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       # build the site with hugo
       - name: build with hugo
@@ -1209,20 +1183,25 @@ jobs:
           hugo --gc --verbose \
             --baseURL "$BASE_URL"
 
-      # this step is custom to my blog and adds a 'commit' version to the site
-      - name: write build version
-        run: echo ${GITHUB_SHA} > ./public/version.txt
-
       # upload the built site as an artifact for the deploy step
       - name: upload artifact
-        uses: actions/upload-pages-artifact@253fd476ed429e83b7aae64a92a75b4ceb1a17cf # pin@v1.0.7
+        if: ${{ needs.trigger.outputs.noop == 'false' }}
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: ./public
 
   # deploy to GitHub Pages
   deploy:
     needs: [trigger, build]
-    if: ${{ needs.trigger.outputs.continue == 'true' }} # only run if the trigger job set continue to true
+    if: >-
+      ${{ needs.trigger.outputs.continue == 'true' &&
+          needs.trigger.outputs.noop == 'false' &&
+          fromJSON(needs.trigger.outputs.context).run_attempt == github.run_attempt }}
+    permissions:
+      pages: write
+      id-token: write
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -1232,167 +1211,45 @@ jobs:
       # deploy the site to GitHub Pages
       - name: deploy
         id: deployment
-        uses: actions/deploy-pages@20a4baa1095bad40ba7d6ca0d9abbc220b76603f # pin@v1.2.3
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
-  # update the deployment result - manually complete the deployment that was created by the branch-deploy action
   result:
     needs: [trigger, build, deploy]
-    runs-on: ubuntu-latest
-    # run even on failures but only if the trigger job set continue to true
     if: ${{ always() && needs.trigger.outputs.continue == 'true' }}
-
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      deployments: write
+      pull-requests: write
     steps:
-      # if a previous step failed, set a variable to use as the deployment status
-      - name: set deployment status
-        id: deploy-status
-        if:
-          ${{ needs.trigger.result == 'failure' || needs.build.result == 'failure' ||
-          needs.deploy.result == 'failure' }}
-        run: |
-          echo "DEPLOY_STATUS=failure" >> $GITHUB_OUTPUT
-
-      # use the GitHub CLI to update the deployment status that was initiated by the branch-deploy action
-      - name: Create a deployment status
-        env:
-          DEPLOYMENT_ID: ${{ needs.trigger.outputs.deployment_id }}
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          DEPLOY_STATUS: ${{ steps.deploy-status.outputs.DEPLOY_STATUS }}
-          ENVIRONMENT: ${{ needs.trigger.outputs.environment }}
-        run: |
-          if [ -z "${DEPLOY_STATUS}" ]; then
-            DEPLOY_STATUS="success"
-          fi
-
-          gh api \
-            --method POST \
-            "repos/{owner}/{repo}/deployments/${DEPLOYMENT_ID}/statuses" \
-            -f environment="${ENVIRONMENT}" \
-            -f state="${DEPLOY_STATUS}"
-
-      # use the GitHub CLI to remove the non-sticky lock that was created by the branch-deploy action
-      - name: Remove a non-sticky lock
-        env:
-          COMMENT_ID: ${{ needs.trigger.outputs.comment_id }}
-          ENVIRONMENT: ${{ needs.trigger.outputs.environment }}
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          LOCK_ACTOR: ${{ github.actor }}
-          LOCK_REF_SHA: ${{ needs.trigger.outputs.lock_ref_sha }}
-        run: |
-          if [ -z "${LOCK_REF_SHA}" ]; then
-            echo "No captured deployment lock remains"
-            exit 0
-          fi
-
-          lock_branch="$(printf '%s' "$ENVIRONMENT" | jq -Rsr 'gsub("\\s"; "-")')-branch-deploy-lock"
-          lock_contents="$(gh api --method GET "repos/{owner}/{repo}/contents/lock.json?ref=${LOCK_REF_SHA}" --jq '.content' | base64 --decode)"
-          lock_link="${GITHUB_SERVER_URL}/${GH_REPO}/pull/${ISSUE_NUMBER}#issuecomment-${COMMENT_ID}"
-
-          if ! printf '%s' "$lock_contents" | jq -e \
-            --arg actor "$LOCK_ACTOR" \
-            --arg environment "$ENVIRONMENT" \
-            --arg link "$lock_link" \
-            '.created_by == $actor and .environment == $environment and .global == false and .sticky == false and .link == $link' >/dev/null; then
-            echo "The captured deployment lock is sticky or belongs to another deployment"
-            exit 0
-          fi
-
-          repository_id="$(gh api --method GET 'repos/{owner}/{repo}' --jq '.node_id')"
-          if gh api graphql \
-            -f query='mutation($repository: ID!, $name: GitRefname!, $before: GitObjectID!) { updateRefs(input: {repositoryId: $repository, refUpdates: [{name: $name, beforeOid: $before, afterOid: "0000000000000000000000000000000000000000"}]}) { clientMutationId } }' \
-            -f repository="$repository_id" \
-            -f name="refs/heads/${lock_branch}" \
-            -f before="$LOCK_REF_SHA" >/dev/null; then
-            echo "Removed the original deployment lock"
-          else
-            echo "::warning::The original deployment lock changed; leaving the current lock in place"
-          fi
-
-      # remove the default 'eyes' reaction from the comment that triggered the deployment
-      # this reaction is added by the branch-deploy action by default
-      - name: remove eyes reaction
-        env:
-          COMMENT_ID: ${{ needs.trigger.outputs.comment_id }}
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          INITIAL_REACTION_ID: ${{ needs.trigger.outputs.initial_reaction_id }}
-        run: |
-          if [ -n "${INITIAL_REACTION_ID}" ]; then
-            gh api \
-              --method DELETE \
-              "repos/{owner}/{repo}/issues/comments/${COMMENT_ID}/reactions/${INITIAL_REACTION_ID}"
-          fi
-
-      # if the deployment was successful, add a 'rocket' reaction to the comment that triggered the deployment
-      - name: rocket reaction
-        if: ${{ steps.deploy-status.outputs.DEPLOY_STATUS != 'failure' }}
-        uses: grantbirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
+      - uses: grantbirki/branch-deploy@7a6af23b802f1284c5bb2f2e42edf79c667c067d # v12.2.0
         with:
-          comment-id: ${{ needs.trigger.outputs.comment_id }}
-          reactions: rocket
-
-      # if the deployment failed, add a '-1' (thumbs down) reaction to the comment that triggered the deployment
-      - name: failure reaction
-        if: ${{ steps.deploy-status.outputs.DEPLOY_STATUS == 'failure' }}
-        uses: grantbirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
-        with:
-          comment-id: ${{ needs.trigger.outputs.comment_id }}
-          reactions: '-1'
-
-      # if the deployment was successful, add a 'success' comment
-      - name: success comment
-        if: ${{ steps.deploy-status.outputs.DEPLOY_STATUS != 'failure' }}
-        uses: peter-evans/create-or-update-comment@67dcc547d311b736a8e6c5c236542148a47adc3d # pin@v2.1.1
-        with:
-          issue-number: ${{ github.event.issue.number }}
-          body: |
-            ### Deployment Results ✅
-
-            **${{ needs.trigger.outputs.actor_handle }}** successfully deployed `${{ needs.trigger.outputs.sha }}` to **${{ needs.trigger.outputs.environment }}**
-
-            > [View Live Deployment](${{ env.blog_url }}) :link:
-
-      # if the deployment was not successful, add a 'failure' comment
-      - name: failure comment
-        if: ${{ steps.deploy-status.outputs.DEPLOY_STATUS == 'failure' }}
-        uses: peter-evans/create-or-update-comment@67dcc547d311b736a8e6c5c236542148a47adc3d # pin@v2.1.1
-        with:
-          issue-number: ${{ github.event.issue.number }}
-          body: |
-            ### Deployment Results ❌
-
-            **${{ needs.trigger.outputs.actor_handle }}** had a failure when deploying `${{ needs.trigger.outputs.sha }}` to **${{ needs.trigger.outputs.environment }}**
+          result_mode: true
+          context: ${{ needs.trigger.outputs.context }}
+          # A noop requires only build. For a deploy, report both jobs even if one was skipped.
+          job_results: >-
+            ${{ needs.trigger.outputs.noop == 'true' &&
+                format('["{0}"]', needs.build.result) ||
+                format('["{0}","{1}"]', needs.build.result, needs.deploy.result) }}
+          result_url: ${{ needs.deploy.outputs.page_url }}
 ```
 
 ## Multiple Jobs with GitHub Pages and Astro
 
-A detailed example using multiple jobs, custom deployment status creation, non-sticky lock removal, and comments - Using [Astro](https://astro.build) to create a static site and deploying to [GitHub Pages](https://pages.github.com/)
+`.noop` builds the [Astro](https://astro.build/) site without uploading or publishing it. `.deploy` builds the site and publishes it to [GitHub Pages](https://pages.github.com/). This example assumes an npm project configured for its Pages URL, with a `build` script that writes the site to `dist/`.
 
-> A live example can be found [here](https://github.com/grantbirki/astrowind-hard-fork/blob/be29d05cc0f3fe04e37ade9d38c653ed55c6cf53/.github/workflows/branch-deploy.yml)
+[Result mode](result-mode.md) reports the build result for a noop and both job results for a deployment. A failed, cancelled, or unexpectedly skipped job is reported as such. Use the same Branch Deploy commit for the trigger and result steps.
 
 ```yaml
 name: branch deploy
 
-# The workflow to execute on is comments that are newly created
+cache-mode: none
+
 on:
   issue_comment:
     types: [created]
 
-# Permissions needed for reacting and adding comments for IssueOps commands
-permissions:
-  pull-requests: write
-  deployments: write
-  contents: write
-  checks: read
-  statuses: read
-  pages: write
-  id-token: write
-
-# set an environment variable for use in the jobs pointing the site_url
-env:
-  site_url: https://test.example.com # <--- change this to your site url
+permissions: {}
 
 jobs:
   # branch-deploy trigger job
@@ -1406,49 +1263,34 @@ jobs:
       contains(github.event.comment.body, '.wcid') ||
       contains(github.event.comment.body, '.unlock')) }}
     runs-on: ubuntu-latest
-    outputs: # set outputs for use in downstream jobs
+    permissions:
+      checks: read
+      contents: write
+      deployments: write
+      pull-requests: write
+      statuses: read
+    outputs:
       continue: ${{ steps.branch-deploy.outputs.continue }}
+      context: ${{ steps.branch-deploy.outputs.context }}
       noop: ${{ steps.branch-deploy.outputs.noop }}
-      deployment_id: ${{ steps.branch-deploy.outputs.deployment_id }}
-      environment: ${{ steps.branch-deploy.outputs.environment }}
-      lock_ref_sha: ${{ steps.capture-lock.outputs.sha }}
       sha: ${{ steps.branch-deploy.outputs.sha }}
-      comment_id: ${{ steps.branch-deploy.outputs.comment_id }}
-      initial_reaction_id: ${{ steps.branch-deploy.outputs.initial_reaction_id }}
-      actor_handle: ${{ steps.branch-deploy.outputs.actor_handle }}
-
     steps:
-      # execute the branch-deploy action
-      - uses: grantbirki/branch-deploy@vX.X.X
+      - uses: grantbirki/branch-deploy@7a6af23b802f1284c5bb2f2e42edf79c667c067d # v12.2.0
         id: branch-deploy
         with:
-          trigger: '.deploy'
-          environment: 'github-pages'
-          production_environments: 'github-pages'
-          environment_targets: 'github-pages'
-          skip_completing: true # we will complete the deployment manually in the 'result' job
-          admins: 'false' # <--- add your GitHub username here (if you want to use the admins feature)
+          environment: github-pages
+          environment_targets: github-pages
+          production_environments: github-pages
+          skip_completing: true
 
-      - name: Capture deployment lock
-        id: capture-lock
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        env:
-          ENVIRONMENT: ${{ steps.branch-deploy.outputs.environment }}
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          lock_branch="$(printf '%s' "$ENVIRONMENT" | jq -Rsr 'gsub("\\s"; "-")')-branch-deploy-lock"
-          if lock_ref_sha="$(gh api --method GET "repos/{owner}/{repo}/git/ref/heads/${lock_branch}" --jq '.object.sha' 2>/dev/null)"; then
-            printf 'sha=%s\n' "$lock_ref_sha" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::Could not capture the original deployment lock; manual lock cleanup will be skipped"
-          fi
-
-  # build the github-pages site with Astro
   build:
     needs: trigger
-    if: ${{ needs.trigger.outputs.continue == 'true' }} # only run if the trigger job set continue to true
+    if: >-
+      ${{ needs.trigger.outputs.continue == 'true' &&
+          fromJSON(needs.trigger.outputs.context).run_attempt == github.run_attempt }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: checkout
@@ -1458,12 +1300,28 @@ jobs:
           persist-credentials: false
 
       - name: build with astro
-        uses: withastro/action@e3193ac80e18917ceaeb9f2d47019ad3b2c0416a # pin@v0.3.0
+        run: |
+          npm ci
+          npm run build
+
+      - name: upload artifact
+        if: ${{ needs.trigger.outputs.noop == 'false' }}
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ./dist
 
   # deploy to GitHub Pages
   deploy:
     needs: [trigger, build]
-    if: ${{ needs.trigger.outputs.continue == 'true' }} # only run if the trigger job set continue to true
+    if: >-
+      ${{ needs.trigger.outputs.continue == 'true' &&
+          needs.trigger.outputs.noop == 'false' &&
+          fromJSON(needs.trigger.outputs.context).run_attempt == github.run_attempt }}
+    permissions:
+      pages: write
+      id-token: write
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -1473,138 +1331,27 @@ jobs:
       # deploy the site to GitHub Pages
       - name: deploy
         id: deployment
-        uses: actions/deploy-pages@497da40f5225e762159b457c9ae5d6f75a136f5c # pin@v1.2.5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
-  # update the deployment result - manually complete the deployment that was created by the branch-deploy action
   result:
     needs: [trigger, build, deploy]
-    runs-on: ubuntu-latest
-    # run even on failures but only if the trigger job set continue to true
     if: ${{ always() && needs.trigger.outputs.continue == 'true' }}
-
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      deployments: write
+      pull-requests: write
     steps:
-      # if a previous step failed, set a variable to use as the deployment status
-      - name: set deployment status
-        id: deploy-status
-        if:
-          ${{ needs.trigger.result == 'failure' || needs.build.result == 'failure' ||
-          needs.deploy.result == 'failure' }}
-        run: |
-          echo "DEPLOY_STATUS=failure" >> $GITHUB_OUTPUT
-
-      # use the GitHub CLI to update the deployment status that was initiated by the branch-deploy action
-      - name: Create a deployment status
-        env:
-          DEPLOYMENT_ID: ${{ needs.trigger.outputs.deployment_id }}
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          DEPLOY_STATUS: ${{ steps.deploy-status.outputs.DEPLOY_STATUS }}
-          ENVIRONMENT: ${{ needs.trigger.outputs.environment }}
-        run: |
-          if [ -z "${DEPLOY_STATUS}" ]; then
-            DEPLOY_STATUS="success"
-          fi
-
-          gh api \
-            --method POST \
-            "repos/{owner}/{repo}/deployments/${DEPLOYMENT_ID}/statuses" \
-            -f environment="${ENVIRONMENT}" \
-            -f state="${DEPLOY_STATUS}"
-
-      # use the GitHub CLI to remove the non-sticky lock that was created by the branch-deploy action
-      - name: Remove a non-sticky lock
-        env:
-          COMMENT_ID: ${{ needs.trigger.outputs.comment_id }}
-          ENVIRONMENT: ${{ needs.trigger.outputs.environment }}
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          LOCK_ACTOR: ${{ github.actor }}
-          LOCK_REF_SHA: ${{ needs.trigger.outputs.lock_ref_sha }}
-        run: |
-          if [ -z "${LOCK_REF_SHA}" ]; then
-            echo "No captured deployment lock remains"
-            exit 0
-          fi
-
-          lock_branch="$(printf '%s' "$ENVIRONMENT" | jq -Rsr 'gsub("\\s"; "-")')-branch-deploy-lock"
-          lock_contents="$(gh api --method GET "repos/{owner}/{repo}/contents/lock.json?ref=${LOCK_REF_SHA}" --jq '.content' | base64 --decode)"
-          lock_link="${GITHUB_SERVER_URL}/${GH_REPO}/pull/${ISSUE_NUMBER}#issuecomment-${COMMENT_ID}"
-
-          if ! printf '%s' "$lock_contents" | jq -e \
-            --arg actor "$LOCK_ACTOR" \
-            --arg environment "$ENVIRONMENT" \
-            --arg link "$lock_link" \
-            '.created_by == $actor and .environment == $environment and .global == false and .sticky == false and .link == $link' >/dev/null; then
-            echo "The captured deployment lock is sticky or belongs to another deployment"
-            exit 0
-          fi
-
-          repository_id="$(gh api --method GET 'repos/{owner}/{repo}' --jq '.node_id')"
-          if gh api graphql \
-            -f query='mutation($repository: ID!, $name: GitRefname!, $before: GitObjectID!) { updateRefs(input: {repositoryId: $repository, refUpdates: [{name: $name, beforeOid: $before, afterOid: "0000000000000000000000000000000000000000"}]}) { clientMutationId } }' \
-            -f repository="$repository_id" \
-            -f name="refs/heads/${lock_branch}" \
-            -f before="$LOCK_REF_SHA" >/dev/null; then
-            echo "Removed the original deployment lock"
-          else
-            echo "::warning::The original deployment lock changed; leaving the current lock in place"
-          fi
-
-      # remove the default 'eyes' reaction from the comment that triggered the deployment
-      # this reaction is added by the branch-deploy action by default
-      - name: remove eyes reaction
-        env:
-          COMMENT_ID: ${{ needs.trigger.outputs.comment_id }}
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          INITIAL_REACTION_ID: ${{ needs.trigger.outputs.initial_reaction_id }}
-        run: |
-          if [ -n "${INITIAL_REACTION_ID}" ]; then
-            gh api \
-              --method DELETE \
-              "repos/{owner}/{repo}/issues/comments/${COMMENT_ID}/reactions/${INITIAL_REACTION_ID}"
-          fi
-
-      # if the deployment was successful, add a 'rocket' reaction to the comment that triggered the deployment
-      - name: rocket reaction
-        if: ${{ steps.deploy-status.outputs.DEPLOY_STATUS != 'failure' }}
-        uses: grantbirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
+      - uses: grantbirki/branch-deploy@7a6af23b802f1284c5bb2f2e42edf79c667c067d # v12.2.0
         with:
-          comment-id: ${{ needs.trigger.outputs.comment_id }}
-          reactions: rocket
-
-      # if the deployment failed, add a '-1' (thumbs down) reaction to the comment that triggered the deployment
-      - name: failure reaction
-        if: ${{ steps.deploy-status.outputs.DEPLOY_STATUS == 'failure' }}
-        uses: grantbirki/comment@e6bf4bc177996c9572b4ddb98b25eb1a80f9abc9 # pin@v2.0.7
-        with:
-          comment-id: ${{ needs.trigger.outputs.comment_id }}
-          reactions: '-1'
-
-      # if the deployment was successful, add a 'success' comment
-      - name: success comment
-        if: ${{ steps.deploy-status.outputs.DEPLOY_STATUS != 'failure' }}
-        uses: peter-evans/create-or-update-comment@67dcc547d311b736a8e6c5c236542148a47adc3d # pin@v2.1.1
-        with:
-          issue-number: ${{ github.event.issue.number }}
-          body: |
-            ### Deployment Results ✅
-
-            **${{ needs.trigger.outputs.actor_handle }}** successfully deployed `${{ needs.trigger.outputs.sha }}` to **${{ needs.trigger.outputs.environment }}**
-
-            > [View Live Deployment](${{ env.site_url }}) :link:
-
-      # if the deployment was not successful, add a 'failure' comment
-      - name: failure comment
-        if: ${{ steps.deploy-status.outputs.DEPLOY_STATUS == 'failure' }}
-        uses: peter-evans/create-or-update-comment@67dcc547d311b736a8e6c5c236542148a47adc3d # pin@v2.1.1
-        with:
-          issue-number: ${{ github.event.issue.number }}
-          body: |
-            ### Deployment Results ❌
-
-            **${{ needs.trigger.outputs.actor_handle }}** had a failure when deploying `${{ needs.trigger.outputs.sha }}` to **${{ needs.trigger.outputs.environment }}**
+          result_mode: true
+          context: ${{ needs.trigger.outputs.context }}
+          # A noop requires only build. For a deploy, report both jobs even if one was skipped.
+          job_results: >-
+            ${{ needs.trigger.outputs.noop == 'true' &&
+                format('["{0}"]', needs.build.result) ||
+                format('["{0}","{1}"]', needs.build.result, needs.deploy.result) }}
+          result_url: ${{ needs.deploy.outputs.page_url }}
 ```
 
 ## Multiple Jobs with GitHub Environments

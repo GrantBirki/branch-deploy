@@ -182,9 +182,9 @@ test('manual deployment examples release only their original non-sticky locks', 
     match => match[0]
   )
 
-  assert.strictEqual(captureSteps.length, 3)
-  assert.strictEqual(capturedOutputs.length, 3)
-  assert.strictEqual(releaseSteps.length, 3)
+  assert.strictEqual(captureSteps.length, 1)
+  assert.strictEqual(capturedOutputs.length, 1)
+  assert.strictEqual(releaseSteps.length, 1)
 
   for (const step of releaseSteps) {
     assert.match(step, /lock\.json\?ref=\$\{LOCK_REF_SHA\}/u)
