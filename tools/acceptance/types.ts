@@ -126,6 +126,7 @@ export type MockRollupContext =
     }
 
 export interface MockPullRequestChecks {
+  baseRefResponses: string[]
   graphqlCommitOid: string | null
   mergeStateStatus: string
   reviewDecision: string | null

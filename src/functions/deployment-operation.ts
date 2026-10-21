@@ -386,6 +386,7 @@ async function changedRefOutcome(
     unchanged = await selectedRefMatches(octokit, context, {
       exactSha: ready.environmentResult.environmentObj.sha !== null,
       ...(ready.precheck.expectNoStack === true ? {expectNoStack: true} : {}),
+      expectedBaseRef: ready.precheck.baseRef,
       expectedSha: ready.precheck.sha,
       isFork: ready.precheck.isFork,
       stableBranch: inputs.stable_branch,
@@ -405,7 +406,7 @@ async function changedRefOutcome(
   const message = dedent(`
     ### Deployment Ref Changed
 
-    ${ready.precheck.stack === undefined ? 'The selected branch moved' : 'The pull request stack changed or could not be verified'} after deployment checks completed. Run the command again so the new commit can be reviewed and checked.
+    No deployment was started. ${ready.precheck.stack === undefined ? 'The selected branch or pull request base changed or could not be verified' : 'The pull request stack changed or could not be verified'} after deployment checks completed. Check the deployment target and run the command again.
   `)
   saveActionState('bypass', 'true')
   await lease.cleanup('after the selected ref changed')

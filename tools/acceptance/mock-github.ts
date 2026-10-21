@@ -206,6 +206,7 @@ export function createMockState(): MockGitHubState {
     failInitialReaction: false,
     faults: [],
     checkRuns: new Map(),
+    baseRefResponses: [],
     graphqlCommitOid: null,
     labels: new Set(),
     lockFiles: new Map(),
@@ -383,7 +384,7 @@ function pullResponse(state: MockGitHubState): unknown {
               }
             },
     base: {
-      ref: pr.baseRef
+      ref: prechecksBaseRef(state)
     },
     head: {
       label: pr.headLabel,
@@ -466,6 +467,10 @@ function prechecksPull(
       )
 }
 
+function prechecksBaseRef(pull: MockPrechecksPull): string {
+  return pull.baseRefResponses.shift() ?? pull.pullRequest.baseRef
+}
+
 function prechecksCommitId(state: MockGitHubState, number: number): string {
   return number === state.pullRequest.number
     ? 'C_acceptance'
@@ -477,6 +482,7 @@ function prechecksGraphql(state: MockPrechecksPull, commitId: string): unknown {
     data: {
       repository: {
         pullRequest: {
+          baseRefName: prechecksBaseRef(state),
           reviewDecision: state.reviewDecision,
           mergeStateStatus: state.mergeStateStatus,
           reviews: {
@@ -713,7 +719,7 @@ function routeGraphql(
     }
   }
   if (
-    normalizedQuery.includes('pullRequest(number:$number)') &&
+    normalizedQuery.includes('commits(last:') &&
     normalizedQuery.includes('statusCheckRollup')
   ) {
     const number = requireNumber(variables, 'number')
@@ -747,6 +753,7 @@ function routeGraphql(
       status: 200,
       value: {
         data: {
+          repository: {pullRequest: {baseRefName: prechecksBaseRef(pull)}},
           node: {
             id: prechecksCommitId(state, number),
             oid: pull.graphqlCommitOid ?? pull.pullRequest.headSha,

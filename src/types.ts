@@ -261,6 +261,7 @@ export interface PrecheckFailure {
 }
 
 export interface PrecheckSuccess {
+  readonly baseRef: string
   readonly expectNoStack?: boolean
   readonly approved_reviews_count?: number | undefined
   readonly review_decision?: string | null | undefined
@@ -335,6 +336,7 @@ export interface StatusCheckRollup {
 export interface PrechecksGraphqlResult {
   readonly repository: {
     readonly pullRequest: {
+      readonly baseRefName?: string
       readonly commits?: {
         readonly nodes?: readonly {
           readonly commit: {
@@ -354,6 +356,9 @@ export interface PrechecksGraphqlResult {
 }
 
 export interface PrechecksGraphqlContextsPageResult {
+  readonly repository?: {
+    readonly pullRequest?: {readonly baseRefName?: string}
+  }
   readonly node: null | {
     readonly id: string
     readonly oid: string

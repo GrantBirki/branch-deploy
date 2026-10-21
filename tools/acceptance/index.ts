@@ -351,6 +351,7 @@ function seedPrStack(
     }
     members.push({
       baseSha,
+      baseRefResponses: [],
       graphqlCommitOid: null,
       mergeStateStatus: 'CLEAN',
       pullRequest,
@@ -2443,7 +2444,7 @@ const scenarios = [
             route =>
               `${route.method} ${route.path}` === `GET ${apiPath('/pulls/1')}`
           ).length,
-          1,
+          3,
           diagnostics(context, result)
         )
       })
@@ -3405,11 +3406,8 @@ const scenarios = [
                   deployment_confirmation_timeout: '1'
                 }
                 const rejected = variant.rechecks && phase !== 'unchanged'
-                const expectedReads = variant.rechecks
-                  ? phase === 'after confirmation'
-                    ? 2
-                    : 3
-                  : 1
+                const expectedReads =
+                  rejected && phase === 'after confirmation' ? 2 : 3
 
                 const result = await runMain(context, inputs)
 
@@ -5094,6 +5092,74 @@ const scenarios = [
       })
   },
   {
+    name: 'binds pull request review, check pages and final checks to the original base',
+    run: async () => {
+      for (const [phase, observedBases] of [
+        ['review', ['main', 'scratch']],
+        ['second check page', ['main', 'main', 'scratch']],
+        ['last pull request read', ['main', 'main', 'main', 'scratch']],
+        ['last fork read', ['main', 'main', 'main', 'scratch']],
+        ['unchanged', []]
+      ] as const) {
+        await withMockGitHub(
+          `pull request base during ${phase}`,
+          async context => {
+            const state = context.state
+            if (phase === 'last fork read') setForkPullRequest(state)
+            state.pullRequest = {...state.pullRequest, merged: false}
+            // Only one response observes the retarget. A later read of main cannot validate it retroactively.
+            state.baseRefResponses.push(...observedBases)
+            state.reviewDecision = null
+            if (phase === 'second check page') {
+              state.rollupContexts = Array.from({length: 101}, (_, index) => ({
+                name: `check-${String(index)}`,
+                type: 'check-run',
+                conclusion: 'SUCCESS',
+                isRequired: true
+              }))
+            } else {
+              state.rollupState = null
+            }
+
+            const inputs = {allow_forks: 'true'}
+            const result = await runMain(context, inputs)
+            if (phase === 'unchanged') {
+              assertExit(context, result, 0)
+              assertReason(context, result, 'deployment_ready')
+              assert.equal(
+                requireDeployment(context).sha,
+                state.pullRequest.headSha
+              )
+              return
+            }
+            assertExit(context, result, 1)
+            const late = phase.startsWith('last')
+            assertReason(
+              context,
+              result,
+              late ? 'ref_changed' : 'prechecks_failed'
+            )
+            assertNoDeployment(context, result)
+            if (late) {
+              assertCommentIncludes(context, 'No deployment was started.')
+            } else {
+              assertNoLockRoutes(context)
+              assertCommentIncludes(
+                context,
+                'Confirm the target branch, then post a new deployment command.'
+              )
+            }
+            assert.deepEqual(state.baseRefResponses, [])
+            const post = await runPost(context, result, inputs, 'failure')
+            assertExit(context, post, 0)
+            assertNoDeployment(context, post)
+            assert.equal(state.branches.has(lockBranch('production')), false)
+          }
+        )
+      }
+    }
+  },
+  {
     name: 'deployment SHA mismatch rejection',
     run: () =>
       withMockGitHub('deployment SHA mismatch rejection', async context => {
@@ -5360,6 +5426,10 @@ const scenarios = [
           assert.equal(
             routeVariables(context, 'POST', '/graphql', 1)['cursor'],
             '100'
+          )
+          assert.match(
+            requireRoute(context, 'POST', '/graphql', 1).body,
+            /pullRequest\(number:\$number\) \{ baseRefName \}/u
           )
         }
       )

@@ -394,6 +394,7 @@ function setStackPrechecksResult(noopMode = false): void {
     message: 'Stack checks passed',
     noopMode,
     sha: stackSnapshot.selectedHeadSha,
+    baseRef: 'main',
     isFork: false,
     stack: stackSnapshot
   })
@@ -565,6 +566,7 @@ beforeEach(() => {
     } else if (options.url.endsWith('/pulls/{pull_number}')) {
       pullRefReads += 1
       data = {
+        base: {ref: 'main'},
         head: {
           ref: 'test-ref',
           sha:
@@ -620,6 +622,7 @@ beforeEach(() => {
       message: '✔️ PR is approved and all CI checks passed - OK',
       noopMode: false,
       sha: mock_sha,
+      baseRef: 'main',
       isFork: false,
       ...(process.env['INPUT_ENABLE_PR_STACKS'] === 'true'
         ? {expectNoStack: true}
@@ -865,6 +868,7 @@ for (const phase of [
           message: 'Fork checks passed',
           noopMode: noop,
           sha: mock_sha,
+          baseRef: 'main',
           isFork: true,
           expectNoStack: true
         })
@@ -895,7 +899,7 @@ for (const phase of [
 }
 
 for (const enabled of [false, true]) {
-  test(`keeps ineligible fork deployments on the immutable shortcut with stacks ${String(enabled)}`, async () => {
+  test(`rechecks the base for a fork ineligible for stack checks with stacks ${String(enabled)}`, async () => {
     setEnv('INPUT_ENABLE_PR_STACKS', String(enabled))
     setEnv('INPUT_ALLOW_FORKS', 'true')
     setPrechecksResult({
@@ -904,6 +908,7 @@ for (const enabled of [false, true]) {
       message: 'Fork checks passed',
       noopMode: false,
       sha: mock_sha,
+      baseRef: 'main',
       isFork: true
     })
     stackOnRefRead = 1
@@ -919,7 +924,7 @@ for (const enabled of [false, true]) {
       sha: mock_sha,
       deployment_id: 123
     })
-    assert.strictEqual(pullRefReads, 0)
+    assert.strictEqual(pullRefReads, 2)
     assertNotCalled(prStackSnapshotMatchesMock)
     const request = createDeploymentMock.mock.calls.at(-1)?.arguments[0]
     assert.ok(request !== undefined)
@@ -936,6 +941,7 @@ test('keeps the checked fork SHA when only its branch head moves', async () => {
     message: 'Fork checks passed',
     noopMode: false,
     sha: mock_sha,
+    baseRef: 'main',
     isFork: true,
     expectNoStack: true
   })
@@ -1119,6 +1125,7 @@ function prepareDeferredDeployment(noop: boolean): void {
     sha: '3'.repeat(40),
     message: 'ready',
     noopMode: noop,
+    baseRef: 'main',
     isFork: false,
     ...(noop ? {} : {approved_reviews_count: 2, review_decision: 'APPROVED'})
   })
@@ -1751,6 +1758,7 @@ test('successfully runs the action in noop mode', async () => {
     message: '✔️ PR is approved and all CI checks passed - OK',
     noopMode: true,
     sha: 'deadbeef',
+    baseRef: 'main',
     isFork: false
   })
 
@@ -1797,6 +1805,7 @@ test('successfully runs a noop without acquiring a lock when locking is disabled
     message: 'approved',
     noopMode: true,
     sha: 'deadbeef',
+    baseRef: 'main',
     isFork: false
   })
   setCommentBody('.noop')
@@ -1825,6 +1834,7 @@ test('successfully runs the action in noop mode when using sticky_locks_for_noop
       message: '✔️ PR is approved and all CI checks passed - OK',
       noopMode: true,
       sha: mock_sha,
+      baseRef: 'main',
       isFork: false
     })
   )
@@ -1904,6 +1914,7 @@ test('runs the action and fails due to invalid environment deployment order', as
       message: '✔️ PR is approved and all CI checks passed - OK',
       noopMode: false,
       sha: 'deadbeef',
+      baseRef: 'main',
       isFork: false
     })
   )
@@ -2549,6 +2560,7 @@ test('successfully runs the action on a deployment to an exact sha in developmen
     message: '✔️ PR is approved and all CI checks passed - OK',
     noopMode: false,
     sha: '82c238c277ca3df56fe9418a5913d9188eafe3bc',
+    baseRef: 'main',
     isFork: false
   })
 
@@ -2587,6 +2599,7 @@ test('successfully runs the action on a deployment and parse the given parameter
     message: '✔️ PR is approved and all CI checks passed - OK',
     noopMode: false,
     sha: '82c238c277ca3df56fe9418a5913d9188eafe3bc',
+    baseRef: 'main',
     isFork: false
   })
 
@@ -2619,6 +2632,7 @@ test('successfully runs the action after trimming the body', async () => {
     message: '✔️ PR is approved and all CI checks passed - OK',
     noopMode: true,
     sha: 'deadbeef',
+    baseRef: 'main',
     isFork: false
   })
   setCommentBody('.noop    \n\t\n   ')
@@ -2980,6 +2994,7 @@ test('stores params and parsed params into context with complex params', async (
     message: '✔️ PR is approved and all CI checks passed - OK',
     noopMode: false,
     sha: 'deadbeef',
+    baseRef: 'main',
     isFork: false
   })
 

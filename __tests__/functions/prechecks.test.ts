@@ -276,6 +276,7 @@ beforeEach(testContext => {
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'CLEAN',
           reviews: {
@@ -375,6 +376,7 @@ function mockApprovedCi(
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'CLEAN',
           reviews: {totalCount: 1},
@@ -393,6 +395,7 @@ function initialCheckPage(
   return {
     repository: {
       pullRequest: {
+        baseRefName: 'main',
         commits: {
           nodes: [
             {
@@ -416,11 +419,13 @@ function additionalCheckPage(
   nodes: readonly RawCheckResult[],
   pageInfo: {readonly endCursor: string | null; readonly hasNextPage: boolean},
   overrides: {
+    readonly baseRefName?: string
     readonly id?: string
     readonly oid?: string
   } = {}
 ): PrechecksGraphqlContextsPageResult {
   return {
+    repository: {pullRequest: {baseRefName: overrides.baseRefName ?? 'main'}},
     node: {
       id: overrides.id ?? 'commit-node',
       oid: overrides.oid ?? 'abc123',
@@ -447,10 +452,14 @@ function mockCheckPages(
   )
 }
 
-async function assertChecksUnavailable(): Promise<void> {
+const UNVERIFIED_BASE_MESSAGE =
+  '### ⚠️ Cannot proceed with deployment\n\nThe pull request base branch changed or could not be verified while checking reviews and CI. Confirm the target branch, then post a new deployment command.'
+
+async function assertChecksUnavailable(
+  message = "### ⚠️ Cannot proceed with deployment\n\n- commitStatus: `UNAVAILABLE`\n\n> The Action could not verify all CI checks for this pull request, so no deployment was started. Retry the command after GitHub's check data is available, or explicitly configure `skip_ci` for this environment."
+): Promise<void> {
   assert.deepStrictEqual(await prechecks(context, octokit, data), {
-    message:
-      "### ⚠️ Cannot proceed with deployment\n\n- commitStatus: `UNAVAILABLE`\n\n> The Action could not verify all CI checks for this pull request, so no deployment was started. Retry the command after GitHub's check data is available, or explicitly configure `skip_ci` for this environment.",
+    message,
     status: false
   })
   assertCalledWith(setOutputMock, 'commit_status', 'UNAVAILABLE')
@@ -509,12 +518,15 @@ const NATIVE_STACK = {
 
 function stackPolicy({
   headSha,
+  baseRefName = NATIVE_STACK.pullRequests.find(pull => pull.headSha === headSha)
+    ?.baseRef ?? 'main',
   reviewDecision = 'APPROVED',
   mergeStateStatus = 'CLEAN',
   rollup = checkRollup('SUCCESS'),
   approvedReviewsCount = 1
 }: {
   readonly headSha: string
+  readonly baseRefName?: string
   readonly reviewDecision?: string | null
   readonly mergeStateStatus?: string
   readonly rollup?: TestStatusCheckRollup
@@ -523,6 +535,7 @@ function stackPolicy({
   return {
     repository: {
       pullRequest: {
+        baseRefName,
         reviewDecision,
         mergeStateStatus,
         reviews: {totalCount: approvedReviewsCount},
@@ -789,6 +802,7 @@ for (const membership of [undefined, null]) {
           ref: 'test-ref',
           status: true,
           sha: 'abc123',
+          baseRef: 'main',
           isFork: false,
           expectNoStack: true
         })
@@ -851,6 +865,7 @@ for (const [description, fullName, requiresRecheck] of [
         ref: 'abc123',
         status: true,
         sha: 'abc123',
+        baseRef: 'main',
         isFork: true,
         ...(enabled && requiresRecheck ? {expectNoStack: true} : {})
       })
@@ -991,6 +1006,7 @@ test('checks only the selected native stack prefix', async () => {
     ref: 'feature-3',
     status: true,
     sha: STACK_SELECTED_SHA,
+    baseRef: 'feature-2',
     isFork: false,
     stack: NATIVE_STACK
   })
@@ -1049,6 +1065,7 @@ for (const [description, position] of [
               123,
               stackPolicy({
                 headSha: STACK_SELECTED_SHA,
+                baseRefName: 'main',
                 rollup: checkRollup(state)
               })
             ]
@@ -1179,6 +1196,7 @@ for (const [description, policy] of [
     {
       repository: {
         pullRequest: {
+          baseRefName: 'feature-2',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'CLEAN'
         }
@@ -1627,6 +1645,7 @@ test('fails closed when a lower stack PR has incomplete CI data', async () => {
         {
           repository: {
             pullRequest: {
+              baseRefName: 'main',
               reviewDecision: 'APPROVED',
               mergeStateStatus: 'CLEAN',
               commits: {nodes: [{commit: {oid: STACK_LOWER_SHA}}]}
@@ -1640,7 +1659,7 @@ test('fails closed when a lower stack PR has incomplete CI data', async () => {
   await assertLowerStackFailure(/could not verify all CI checks/u)
 })
 
-test('paginates required checks using the lower stack PR number', async () => {
+function mockLowerStackCheckPages(baseRefName: string): void {
   mockNativeStack()
   data.inputs.checks = 'required'
   queueMockImplementation(
@@ -1669,9 +1688,12 @@ test('paginates required checks using the lower stack PR number', async () => {
       assert.deepStrictEqual(variables, {
         commitId: 'stack-commit-' + STACK_LOWER_SHA,
         cursor: 'next-check-page',
+        owner: 'corp',
+        name: 'test',
         number: 121
       })
       return Promise.resolve({
+        repository: {pullRequest: {baseRefName}},
         node: {
           id: 'stack-commit-' + STACK_LOWER_SHA,
           oid: STACK_LOWER_SHA,
@@ -1692,9 +1714,17 @@ test('paginates required checks using the lower stack PR number', async () => {
       })
     }
   )
+}
 
+test('paginates required checks using the lower stack PR number', async () => {
+  mockLowerStackCheckPages('main')
   await assertLowerStackFailure(/FAILURE/u)
   assertCalledTimes(graphQLOK, 3)
+})
+
+test('explains how to retry when a lower stack PR changes base during pagination', async () => {
+  mockLowerStackCheckPages('scratch')
+  await assertLowerStackFailure(/post a new deployment command/u)
 })
 
 test('applies required-only CI policy to lower stack PRs', async () => {
@@ -1807,6 +1837,7 @@ test('ordinary no-CI repository remains deployable with no required checks', asy
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: null,
           mergeStateStatus: 'BLOCKED',
           reviews: {totalCount: 0},
@@ -1820,11 +1851,37 @@ test('ordinary no-CI repository remains deployable with no required checks', asy
   assertCalledTimes(loadPrStackRequiredChecksMock, 1)
 })
 
+for (const [description, target] of [
+  ['different base branch', {baseRefName: 'scratch'}],
+  ['missing base branch', {}]
+] as const) {
+  test(`rejects a review decision for a ${description} even when the head is unchanged`, async () => {
+    graphQLOK.mock.mockImplementation(query => {
+      assert.match(query, /baseRefName\s+reviewDecision/u)
+      return Promise.resolve({
+        repository: {
+          pullRequest: {
+            ...target,
+            reviewDecision: null,
+            commits: baseCommitWithOid
+          }
+        }
+      })
+    })
+
+    const result = await prechecks(context, octokit, data)
+    assert.equal(result.status, false)
+    assert.equal(result.message, UNVERIFIED_BASE_MESSAGE)
+    assertNotCalledWith(setOutputMock, 'review_decision', null)
+  })
+}
+
 test('ordinary deploy-before-merge ignores BLOCKED when named CI passes', async () => {
   graphQLOK.mock.mockImplementation(() =>
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: null,
           mergeStateStatus: 'BLOCKED',
           reviews: {totalCount: 0},
@@ -1879,7 +1936,7 @@ for (const base of [undefined, '']) {
     assert.partialDeepStrictEqual(await prechecks(context, octokit, data), {
       status: false,
       message:
-        '### ⚠️ Cannot proceed with deployment\n\nThe Action could not read the required CI checks for this pull request. Make sure its base-branch rules are readable.'
+        '### ⚠️ Cannot proceed with deployment\n\nThe Action could not determine the base branch of this pull request. Retry the command after its base branch is available.'
     })
     assertCalledTimes(loadPrStackRequiredChecksMock, 0)
   })
@@ -2446,6 +2503,7 @@ test('keeps stable-branch rollbacks outside stack resolution', async () => {
     ref: 'main',
     status: true,
     sha: 'deadbeef',
+    baseRef: 'main',
     isFork: false
   })
   assertCalledTimes(parsePrStackMembershipMock, 0)
@@ -3166,6 +3224,7 @@ test('fails closed for a malformed GraphQL commit node', async () => {
       unsafeInvalidValue<PrechecksGraphqlResult>({
         repository: {
           pullRequest: {
+            baseRefName: 'main',
             commits: {nodes: [{}]},
             mergeStateStatus: 'CLEAN',
             reviewDecision: 'APPROVED',
@@ -3185,6 +3244,7 @@ test('fails closed when GraphQL commit nodes are missing', async () => {
       unsafeInvalidValue<PrechecksGraphqlResult>({
         repository: {
           pullRequest: {
+            baseRefName: 'main',
             commits: {},
             mergeStateStatus: 'CLEAN',
             reviewDecision: 'APPROVED',
@@ -3203,6 +3263,7 @@ test('fails closed when the GraphQL commit collection is missing', async () => {
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           mergeStateStatus: 'CLEAN',
           reviewDecision: 'APPROVED',
           reviews: {totalCount: 1}
@@ -3230,6 +3291,7 @@ test('preserves the fallback when raw GraphQL debug output throws', async () => 
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           mergeStateStatus: 'CLEAN',
           reviewDecision: 'APPROVED',
           reviews: {totalCount: 1}
@@ -3271,6 +3333,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -3283,6 +3346,7 @@ test('adds the review snapshot only for deferred completion', async testContext 
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false,
     approved_reviews_count: 1,
     review_decision: 'APPROVED'
@@ -3294,6 +3358,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'CLEAN',
           reviews: {
@@ -3344,6 +3409,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -3353,6 +3419,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'CLEAN',
           reviews: {
@@ -3409,6 +3476,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 
@@ -3423,6 +3491,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'CLEAN',
           reviews: {
@@ -3484,6 +3553,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 
@@ -3515,6 +3585,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'CLEAN',
           reviews: {
@@ -3608,6 +3679,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'CLEAN',
           reviews: {
@@ -3681,6 +3753,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 
@@ -3726,6 +3799,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'CLEAN',
           reviews: {
@@ -3787,6 +3861,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 
@@ -3802,6 +3877,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'CLEAN',
           reviews: {
@@ -3876,6 +3952,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'CLEAN',
           reviews: {
@@ -3949,6 +4026,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'CLEAN',
           reviews: {
@@ -4042,6 +4120,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a rollback
     ref: 'main',
     status: true,
     sha: 'deadbeef',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -4054,6 +4133,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a noop dep
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -4063,6 +4143,7 @@ test('runs prechecks and finds the commit fetched via the rest call does not mat
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           commits: {
             nodes: [
@@ -4090,6 +4171,7 @@ test('runs prechecks and finds that the IssueOps command is valid without define
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           commits: baseCommitWithOid
         }
@@ -4102,6 +4184,7 @@ test('runs prechecks and finds that the IssueOps command is valid without define
     noopMode: false,
     ref: 'test-ref',
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
   assertCalledWith(
@@ -4198,6 +4281,7 @@ test('accepts a requested healthy legacy status context without CheckSuites', as
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
   assertCalledWith(
@@ -4229,6 +4313,7 @@ test('allows checks=required when only an optional CI check is failing', async (
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
   assertCalledWith(
@@ -4263,6 +4348,8 @@ test('rejects a required failing check after the first 100 contexts', async () =
   assert.deepStrictEqual(graphQLOK.mock.calls[1]?.arguments[1], {
     commitId: 'commit-node',
     cursor: 'cursor-1',
+    owner: 'corp',
+    name: 'test',
     number: 123
   })
   assert.ok(
@@ -4376,6 +4463,7 @@ test('skip_ci bypasses malformed paginated check data', async () => {
       unsafeInvalidValue<PrechecksGraphqlResult>({
         repository: {
           pullRequest: {
+            baseRefName: 'main',
             commits: {nodes: [{commit: {oid: 'abc123'}}]},
             mergeStateStatus: 'CLEAN',
             reviewDecision: 'APPROVED',
@@ -4434,7 +4522,7 @@ test('fails closed when a later check page cannot be retrieved', async () => {
   await assertChecksUnavailable()
 })
 
-for (const [name, page] of [
+for (const [name, page, message] of [
   [
     'commit node ID changes',
     additionalCheckPage([], LAST_PAGE, {id: 'different-node'})
@@ -4443,14 +4531,28 @@ for (const [name, page] of [
     'commit OID changes',
     additionalCheckPage([], LAST_PAGE, {oid: 'different-oid'})
   ],
+  [
+    'the pull request base changes',
+    additionalCheckPage([], LAST_PAGE, {baseRefName: 'scratch'}),
+    UNVERIFIED_BASE_MESSAGE
+  ],
+  [
+    'the pull request base is unavailable',
+    {...additionalCheckPage([], LAST_PAGE), repository: {}},
+    UNVERIFIED_BASE_MESSAGE
+  ],
   ['the commit node is absent', {node: null}],
   [
     'the check rollup disappears',
-    {node: {id: 'commit-node', oid: 'abc123', statusCheckRollup: null}}
+    {
+      repository: {pullRequest: {baseRefName: 'main'}},
+      node: {id: 'commit-node', oid: 'abc123', statusCheckRollup: null}
+    }
   ]
 ] as const satisfies readonly (readonly [
   string,
-  PrechecksGraphqlContextsPageResult
+  PrechecksGraphqlContextsPageResult,
+  string?
 ])[]) {
   test(`fails closed when ${name}`, async () => {
     mockCheckPages(
@@ -4459,7 +4561,7 @@ for (const [name, page] of [
     )
     data.inputs.checks = 'required'
 
-    await assertChecksUnavailable()
+    await assertChecksUnavailable(message)
   })
 }
 
@@ -4576,6 +4678,7 @@ test('recovers check data when a check suite App is not viewable by the token', 
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
   assertCalledWith(
@@ -4845,6 +4948,7 @@ test('runs prechecks and finds that reviews and CI checks have not been defined'
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: null,
           commits: baseCommitWithOid
         }
@@ -4858,6 +4962,7 @@ test('runs prechecks and finds that reviews and CI checks have not been defined'
     noopMode: false,
     ref: 'test-ref',
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
   assertCalledWith(
@@ -4875,6 +4980,7 @@ test('runs prechecks and finds CI checks pass but reviews are not defined', asyn
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: null,
           reviews: {
             totalCount: 0
@@ -4900,6 +5006,7 @@ test('runs prechecks and finds CI checks pass but reviews are not defined', asyn
     noopMode: false,
     ref: 'test-ref',
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
   assertLastCalledWith(
@@ -4913,6 +5020,7 @@ test('fails closed for an unknown review decision', async () => {
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'UNKNOWN',
           reviews: {totalCount: 0},
           commits: {
@@ -4942,6 +5050,7 @@ test('runs prechecks and finds CI is passing and the PR has not been reviewed BU
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           reviews: {
             totalCount: 0
@@ -4969,6 +5078,7 @@ test('runs prechecks and finds CI is passing and the PR has not been reviewed BU
     noopMode: true,
     ref: 'test-ref',
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -4978,6 +5088,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -5020,6 +5131,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     noopMode: false,
     ref: 'abcde12345',
     sha: 'abcde12345',
+    baseRef: 'main',
     isFork: true
   })
 
@@ -5059,6 +5171,7 @@ test('runs prechecks and finds that the PR from a fork is targeting a non-defaul
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'some-other-branch',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -5108,6 +5221,7 @@ test('runs prechecks and finds that the PR from a fork is targeting a non-defaul
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'some-other-branch',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -5153,6 +5267,7 @@ test('runs prechecks and finds that the PR from a fork is targeting a non-defaul
     noopMode: false,
     ref: 'abcde12345',
     sha: 'abcde12345',
+    baseRef: 'some-other-branch',
     isFork: true
   })
 
@@ -5164,6 +5279,7 @@ test('runs prechecks and finds that the PR is targeting a non-default branch and
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'not-main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -5211,6 +5327,7 @@ test('runs prechecks and finds that the PR is targeting a non-default branch and
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'not-main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -5253,6 +5370,7 @@ test('runs prechecks and finds that the PR is targeting a non-default branch and
     noopMode: false,
     ref: 'test-ref',
     sha: 'abcde12345',
+    baseRef: 'not-main',
     isFork: false
   })
 
@@ -5269,6 +5387,7 @@ test('runs prechecks and finds that the IssueOps command is valid for a branch d
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 4
@@ -5320,6 +5439,7 @@ test('runs prechecks and finds that the IssueOps command is a fork and does not 
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: null,
           reviews: {
             totalCount: 0
@@ -5364,6 +5484,7 @@ test('runs prechecks and finds that the IssueOps command is a fork and does not 
     noopMode: false,
     ref: 'abcde12345',
     sha: 'abcde12345',
+    baseRef: 'main',
     isFork: true
   })
 
@@ -5378,6 +5499,7 @@ test('runs prechecks and rejects a pull request from a forked repository because
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           reviews: {
             totalCount: 0
@@ -5439,6 +5561,7 @@ test('runs prechecks and rejects a pull request from a forked repository because
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           reviews: {
             totalCount: 0
@@ -5501,6 +5624,7 @@ test('runs prechecks and rejects a pull request from a forked repository because
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'CHANGES_REQUESTED',
           reviews: {
             totalCount: 0
@@ -5563,6 +5687,7 @@ test('runs prechecks and rejects a forked pull request by default', async () => 
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 4
@@ -5612,6 +5737,7 @@ test('runs prechecks and finds CI is pending and the PR has not been reviewed BU
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           reviews: {
             totalCount: 0
@@ -5645,6 +5771,7 @@ test('runs prechecks and finds CI checks are pending, the PR has not been review
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           reviews: {
             totalCount: 0
@@ -5675,6 +5802,7 @@ test('runs prechecks and finds CI is pending and reviewers have not been defined
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: null,
           reviews: {
             totalCount: 0
@@ -5705,6 +5833,7 @@ test('runs prechecks and finds CI checked have not been defined, the PR has not 
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           reviews: {
             totalCount: 0
@@ -5723,6 +5852,7 @@ test('runs prechecks and finds CI checked have not been defined, the PR has not 
     noopMode: true,
     ref: 'test-ref',
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -5732,6 +5862,7 @@ test('runs prechecks and deploys to the stable branch', async () => {
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: null,
           reviews: {
             totalCount: 0
@@ -5755,6 +5886,7 @@ test('runs prechecks and deploys to the stable branch', async () => {
     noopMode: false,
     ref: 'main',
     sha: 'deadbeef',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -5764,6 +5896,7 @@ test('runs prechecks and finds the PR has been approved but CI checks are pendin
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -5794,6 +5927,7 @@ test('runs prechecks and finds CI is passing but the PR is missing an approval',
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           commits: {
             nodes: [
@@ -5821,6 +5955,7 @@ test('runs prechecks and finds CI is passing but the PR is in a CHANGES_REQUESTE
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'CHANGES_REQUESTED',
           commits: {
             nodes: [
@@ -5850,6 +5985,7 @@ test('runs prechecks and finds CI is passing but the PR is in a CHANGES_REQUESTE
     noopMode: true,
     ref: 'test-ref',
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -5859,6 +5995,7 @@ test('runs prechecks and finds the PR is approved but CI is failing', async () =
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -5889,6 +6026,7 @@ test('runs prechecks and finds the PR is in a changes requested state and CI is 
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'CHANGES_REQUESTED',
           reviews: {
             totalCount: 1
@@ -5919,6 +6057,7 @@ test('runs prechecks and finds the PR is in a REVIEW_REQUIRED state and CI is fa
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           reviews: {
             totalCount: 1
@@ -5949,6 +6088,7 @@ test('runs prechecks and finds the PR is in a changes requested state and has no
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'CHANGES_REQUESTED',
           reviews: {
             totalCount: 1
@@ -5979,6 +6119,7 @@ test('runs prechecks and finds the PR is approved but CI is failing', async () =
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6034,6 +6175,7 @@ test('runs prechecks and finds the PR does not require approval but CI is failin
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: null,
           commits: {
             nodes: [
@@ -6061,6 +6203,7 @@ test('runs prechecks and finds the PR is NOT reviewed and CI checks have NOT bee
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           commits: baseCommitWithOid
         }
@@ -6079,6 +6222,7 @@ test('runs prechecks and finds the PR is approved and CI checks have NOT been de
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6094,6 +6238,7 @@ test('runs prechecks and finds the PR is approved and CI checks have NOT been de
     noopMode: false,
     ref: 'test-ref',
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -6103,6 +6248,7 @@ test('runs prechecks and finds the PR is behind the stable branch and a noop dep
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6154,6 +6300,7 @@ test('runs prechecks and finds the PR is un-mergable and a noop deploy', async (
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6189,6 +6336,7 @@ test('runs prechecks and finds the PR is BEHIND and a noop deploy and it fails t
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6240,6 +6388,7 @@ test('runs prechecks and finds the PR is BEHIND and a noop deploy and it hits an
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6290,6 +6439,7 @@ test('runs prechecks and finds the PR is BEHIND and a noop deploy and update_bra
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6332,6 +6482,7 @@ test('runs prechecks and finds the PR is a DRAFT PR and a noop deploy', async ()
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6398,6 +6549,7 @@ test('runs prechecks and finds the PR is a DRAFT PR and from an allowed environm
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6443,6 +6595,7 @@ test('runs prechecks and finds the PR is a DRAFT PR and from an allowed environm
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -6476,6 +6629,7 @@ test('runs prechecks and finds the PR is BEHIND and a noop deploy and the commit
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6507,6 +6661,7 @@ test('runs prechecks and finds the PR is BEHIND and a full deploy and update_bra
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6548,6 +6703,7 @@ test('runs prechecks and finds the PR is behind the stable branch and a full dep
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6610,6 +6766,7 @@ test('runs prechecks and finds that the IssueOps commands are valid and from a d
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           commits: {
             nodes: [
@@ -6634,6 +6791,7 @@ test('runs prechecks and finds that the IssueOps commands are valid and from a d
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -6643,6 +6801,7 @@ test('runs prechecks and finds that the IssueOps commands are valid with paramet
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           commits: {
             nodes: [
@@ -6669,6 +6828,7 @@ test('runs prechecks and finds that the IssueOps commands are valid with paramet
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -6678,6 +6838,7 @@ test('runs prechecks and finds that the IssueOps commands are valid with paramet
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           commits: {
             nodes: [
@@ -6704,6 +6865,7 @@ test('runs prechecks and finds that the IssueOps commands are valid with paramet
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -6713,6 +6875,7 @@ test('fails closed for malformed CI data even when the actor is an admin', async
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           commits: {
             nodes: [
@@ -6741,6 +6904,7 @@ test('runs prechecks and finds that no CI checks exist and reviews are not defin
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: null,
           commits: {
             nodes: [
@@ -6764,6 +6928,7 @@ test('runs prechecks and finds that no CI checks exist and reviews are not defin
     noopMode: false,
     ref: 'test-ref',
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
   assertLastCalledWith(
@@ -6777,6 +6942,7 @@ test('runs prechecks and finds that no CI checks exist but reviews are defined a
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6805,6 +6971,7 @@ test('runs prechecks and finds that no CI checks exist but reviews are defined a
     noopMode: false,
     ref: 'test-ref',
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
   assertLastCalledWith(
@@ -6818,6 +6985,7 @@ test('runs prechecks and finds that no CI checks exist and the PR is not approve
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           commits: {
             nodes: [
@@ -6843,6 +7011,7 @@ test('runs prechecks and finds that no CI checks exist and the PR is not approve
     noopMode: false,
     ref: 'test-ref',
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
   assertLastCalledWith(
@@ -6856,6 +7025,7 @@ test('runs prechecks and finds that skip_ci is set and the PR has been approved'
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           reviews: {
             totalCount: 1
@@ -6885,6 +7055,7 @@ test('runs prechecks and finds that skip_ci is set and the PR has been approved'
     noopMode: false,
     ref: 'test-ref',
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
   assertCalledWith(
@@ -6898,6 +7069,7 @@ test('runs prechecks and finds that the commit status is success and skip_review
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           commits: {
             nodes: [
@@ -6926,6 +7098,7 @@ test('runs prechecks and finds that the commit status is success and skip_review
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 
@@ -6940,6 +7113,7 @@ test('runs prechecks and finds that no ci checks are defined and skip_reviews is
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           commits: {
             nodes: [
@@ -6969,6 +7143,7 @@ test('runs prechecks and finds that no ci checks are defined and skip_reviews is
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 
@@ -6997,6 +7172,7 @@ test('runs prechecks on a custom deploy comment with a custom variable at the en
       ref: 'test-ref',
       status: true,
       sha: 'abc123',
+      baseRef: 'main',
       isFork: false
     }
   )
@@ -7040,6 +7216,7 @@ test('runs prechecks when an exact sha is set, and the sha deployment feature is
       ref: data.environmentObj.sha,
       status: true,
       sha: data.environmentObj.sha,
+      baseRef: 'main',
       isFork: false
     }
   )
@@ -7062,6 +7239,7 @@ test('runs prechecks and finds that skip_ci is set and now reviews are defined',
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: null,
           commits: {
             nodes: [
@@ -7090,6 +7268,7 @@ test('runs prechecks and finds that skip_ci is set and now reviews are defined',
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 
@@ -7104,6 +7283,7 @@ test('runs prechecks and finds that skip_ci is set, reviews are required, and it
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           commits: {
             nodes: [
@@ -7132,6 +7312,7 @@ test('runs prechecks and finds that skip_ci is set, reviews are required, and it
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 
@@ -7146,6 +7327,7 @@ test('runs prechecks and finds that skip_ci is set and skip_reviews is set', asy
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           commits: {
             nodes: [
@@ -7174,6 +7356,7 @@ test('runs prechecks and finds that skip_ci is set and skip_reviews is set', asy
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 
@@ -7188,6 +7371,7 @@ test('runs prechecks and finds that skip_ci is set and the deployer is an admin'
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           commits: {
             nodes: [
@@ -7215,6 +7399,7 @@ test('runs prechecks and finds that skip_ci is set and the deployer is an admin'
     ref: 'test-ref',
     status: true,
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 
@@ -7229,6 +7414,7 @@ test('runs prechecks and finds that CI is pending and reviewers have not been de
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: null,
           commits: {
             nodes: [
@@ -7264,6 +7450,7 @@ test('runs prechecks and finds that the PR is NOT reviewed and CI checks have be
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'REVIEW_REQUIRED',
           commits: {
             nodes: [
@@ -7301,6 +7488,7 @@ test('runs prechecks and finds the PR is behind the stable branch (BLOCKED) and 
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'BLOCKED',
           commits: {
@@ -7364,6 +7552,7 @@ test('runs prechecks and finds the PR is NOT behind the stable branch (BLOCKED) 
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'BLOCKED',
           commits: {
@@ -7420,6 +7609,7 @@ test('runs prechecks and finds the PR is NOT behind the stable branch (BLOCKED) 
     noopMode: true,
     ref: 'test-ref',
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 })
@@ -7429,6 +7619,7 @@ test('runs prechecks and finds the PR is NOT behind the stable branch (HAS_HOOKS
     Promise.resolve({
       repository: {
         pullRequest: {
+          baseRefName: 'main',
           reviewDecision: 'APPROVED',
           mergeStateStatus: 'HAS_HOOKS',
           commits: {
@@ -7483,6 +7674,7 @@ test('runs prechecks and finds the PR is NOT behind the stable branch (HAS_HOOKS
     noopMode: true,
     ref: 'test-ref',
     sha: 'abc123',
+    baseRef: 'main',
     isFork: false
   })
 

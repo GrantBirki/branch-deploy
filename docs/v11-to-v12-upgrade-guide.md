@@ -189,7 +189,7 @@ Issue-comment workflows load their workflow definition from the default branch, 
 
 Phase 12: account for mutable-ref and deployment-SHA failures
 
-V12 revalidates a pull request or stable-branch SHA immediately before noop continuation or deployment creation.
+V12 rechecks the pull request or stable branch immediately before continuing a noop or creating a deployment. For a fork, it keeps the commit SHA that passed prechecks and verifies that the pull request still targets the same base branch.
 
 1. Ensure consumer logic treats `ref_changed` as a failed operation and does not run deployment steps.
 2. Ensure `deployment_sha_mismatch` is also terminal and does not run deployment or post-processing steps as if creation succeeded.
@@ -531,7 +531,7 @@ Ordinary variable interpolation may produce different bytes because runtime valu
 
 ### What changed
 
-Branch Deploy re-fetches the selected pull request or stable-branch SHA immediately before continuing a noop or creating a deployment. If the ref moved after prechecks, the action releases a non-sticky lock, bypasses post mode, and reports `ref_changed`. Exact-SHA and fork deployments already use immutable refs and do not need this extra lookup.
+Branch Deploy rechecks the pull request or stable branch immediately before continuing a noop or creating a deployment. Fork deployments keep the commit SHA that passed prechecks and verify the base branch, even if the fork's head has moved. An explicit SHA deployment skips this lookup. If the ref changed after prechecks, the action attempts to release its non-sticky lock, bypasses post mode, and reports `ref_changed`.
 
 GitHub deployment responses are also checked against the SHA that passed prechecks. A mismatch is marked `error`, a non-sticky lock is released, post mode is bypassed, and the result reports `deployment_sha_mismatch`.
 
