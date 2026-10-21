@@ -5140,7 +5140,9 @@ const scenarios = [
               late ? 'ref_changed' : 'prechecks_failed'
             )
             assertNoDeployment(context, result)
-            if (!late) {
+            if (late) {
+              assertCommentIncludes(context, 'No deployment was started.')
+            } else {
               assertNoLockRoutes(context)
               assertCommentIncludes(
                 context,

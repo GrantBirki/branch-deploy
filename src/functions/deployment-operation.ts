@@ -406,7 +406,7 @@ async function changedRefOutcome(
   const message = dedent(`
     ### Deployment Ref Changed
 
-    ${ready.precheck.stack === undefined ? 'The selected branch or pull request base changed or could not be verified' : 'The pull request stack changed or could not be verified'} after deployment checks completed. Check the deployment target and run the command again.
+    No deployment was started. ${ready.precheck.stack === undefined ? 'The selected branch or pull request base changed or could not be verified' : 'The pull request stack changed or could not be verified'} after deployment checks completed. Check the deployment target and run the command again.
   `)
   saveActionState('bypass', 'true')
   await lease.cleanup('after the selected ref changed')
