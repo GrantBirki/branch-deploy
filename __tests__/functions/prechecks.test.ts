@@ -452,10 +452,14 @@ function mockCheckPages(
   )
 }
 
-async function assertChecksUnavailable(): Promise<void> {
+const UNVERIFIED_BASE_MESSAGE =
+  '### ⚠️ Cannot proceed with deployment\n\nThe pull request base branch changed or could not be verified while checking reviews and CI. Confirm the target branch, then post a new deployment command.'
+
+async function assertChecksUnavailable(
+  message = "### ⚠️ Cannot proceed with deployment\n\n- commitStatus: `UNAVAILABLE`\n\n> The Action could not verify all CI checks for this pull request, so no deployment was started. Retry the command after GitHub's check data is available, or explicitly configure `skip_ci` for this environment."
+): Promise<void> {
   assert.deepStrictEqual(await prechecks(context, octokit, data), {
-    message:
-      "### ⚠️ Cannot proceed with deployment\n\n- commitStatus: `UNAVAILABLE`\n\n> The Action could not verify all CI checks for this pull request, so no deployment was started. Retry the command after GitHub's check data is available, or explicitly configure `skip_ci` for this environment.",
+    message,
     status: false
   })
   assertCalledWith(setOutputMock, 'commit_status', 'UNAVAILABLE')
@@ -1655,7 +1659,7 @@ test('fails closed when a lower stack PR has incomplete CI data', async () => {
   await assertLowerStackFailure(/could not verify all CI checks/u)
 })
 
-test('paginates required checks using the lower stack PR number', async () => {
+function mockLowerStackCheckPages(baseRefName: string): void {
   mockNativeStack()
   data.inputs.checks = 'required'
   queueMockImplementation(
@@ -1689,7 +1693,7 @@ test('paginates required checks using the lower stack PR number', async () => {
         number: 121
       })
       return Promise.resolve({
-        repository: {pullRequest: {baseRefName: 'main'}},
+        repository: {pullRequest: {baseRefName}},
         node: {
           id: 'stack-commit-' + STACK_LOWER_SHA,
           oid: STACK_LOWER_SHA,
@@ -1710,9 +1714,17 @@ test('paginates required checks using the lower stack PR number', async () => {
       })
     }
   )
+}
 
+test('paginates required checks using the lower stack PR number', async () => {
+  mockLowerStackCheckPages('main')
   await assertLowerStackFailure(/FAILURE/u)
   assertCalledTimes(graphQLOK, 3)
+})
+
+test('explains how to retry when a lower stack PR changes base during pagination', async () => {
+  mockLowerStackCheckPages('scratch')
+  await assertLowerStackFailure(/post a new deployment command/u)
 })
 
 test('applies required-only CI policy to lower stack PRs', async () => {
@@ -1859,10 +1871,7 @@ for (const [description, target] of [
 
     const result = await prechecks(context, octokit, data)
     assert.equal(result.status, false)
-    assert.match(
-      result.message,
-      /base branch changed or could not be verified/u
-    )
+    assert.equal(result.message, UNVERIFIED_BASE_MESSAGE)
     assertNotCalledWith(setOutputMock, 'review_decision', null)
   })
 }
@@ -4513,7 +4522,7 @@ test('fails closed when a later check page cannot be retrieved', async () => {
   await assertChecksUnavailable()
 })
 
-for (const [name, page] of [
+for (const [name, page, message] of [
   [
     'commit node ID changes',
     additionalCheckPage([], LAST_PAGE, {id: 'different-node'})
@@ -4524,11 +4533,13 @@ for (const [name, page] of [
   ],
   [
     'the pull request base changes',
-    additionalCheckPage([], LAST_PAGE, {baseRefName: 'scratch'})
+    additionalCheckPage([], LAST_PAGE, {baseRefName: 'scratch'}),
+    UNVERIFIED_BASE_MESSAGE
   ],
   [
     'the pull request base is unavailable',
-    {...additionalCheckPage([], LAST_PAGE), repository: {}}
+    {...additionalCheckPage([], LAST_PAGE), repository: {}},
+    UNVERIFIED_BASE_MESSAGE
   ],
   ['the commit node is absent', {node: null}],
   [
@@ -4540,7 +4551,8 @@ for (const [name, page] of [
   ]
 ] as const satisfies readonly (readonly [
   string,
-  PrechecksGraphqlContextsPageResult
+  PrechecksGraphqlContextsPageResult,
+  string?
 ])[]) {
   test(`fails closed when ${name}`, async () => {
     mockCheckPages(
@@ -4549,7 +4561,7 @@ for (const [name, page] of [
     )
     data.inputs.checks = 'required'
 
-    await assertChecksUnavailable()
+    await assertChecksUnavailable(message)
   })
 }
 

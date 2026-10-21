@@ -5140,7 +5140,13 @@ const scenarios = [
               late ? 'ref_changed' : 'prechecks_failed'
             )
             assertNoDeployment(context, result)
-            if (!late) assertNoLockRoutes(context)
+            if (!late) {
+              assertNoLockRoutes(context)
+              assertCommentIncludes(
+                context,
+                'Confirm the target branch, then post a new deployment command.'
+              )
+            }
             assert.deepEqual(state.baseRefResponses, [])
             const post = await runPost(context, result, inputs, 'failure')
             assertExit(context, post, 0)

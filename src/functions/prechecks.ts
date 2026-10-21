@@ -152,7 +152,15 @@ export interface PrechecksRequest {
 
 type FilterChecksResult = ReturnType<typeof filterChecks>
 
+const UNVERIFIED_BASE = {
+  commitStatus: 'UNAVAILABLE',
+  kind: 'base-unverified',
+  message:
+    '### ⚠️ Cannot proceed with deployment\n\nThe pull request base branch changed or could not be verified while checking reviews and CI. Confirm the target branch, then post a new deployment command.'
+} as const
+
 type CommitCheckEvaluation =
+  | typeof UNVERIFIED_BASE
   | {
       readonly commitStatus: string
       readonly filterChecksResult?: FilterChecksResult
@@ -528,8 +536,7 @@ export async function prechecks(
     ) {
       // Retargeting a pull request can change its review policy without moving its head.
       return {
-        message:
-          '### ⚠️ Cannot proceed with deployment\n\nThe pull request base branch changed or could not be verified while reading its review and CI requirements. Check the base branch and run the command again.',
+        message: UNVERIFIED_BASE.message,
         status: false
       }
     }
@@ -738,6 +745,10 @@ export async function prechecks(
     sha,
     stableBranch: data.inputs.stable_branch,
     stableBranchUsed: data.environmentObj.stable_branch_used,
+    unavailableCheckMessage:
+      checkEvaluation.kind === 'base-unverified'
+        ? checkEvaluation.message
+        : undefined,
     updateBranch: data.inputs.update_branch,
     userIsAdmin
   })
@@ -919,6 +930,8 @@ async function checkStackPrerequisites({
         sha: pull.headSha,
         stableBranch: stack.stableBranch,
         stableBranchUsed: false,
+        unavailableCheckMessage:
+          check.kind === 'base-unverified' ? check.message : undefined,
         updateBranch: 'warn',
         userIsAdmin
       })
@@ -999,16 +1012,16 @@ async function evaluateCommitChecks({
       throw new Error('The GraphQL response did not include a check rollup')
     }
 
-    const checkResults = [
-      ...(await loadAllCheckResults({
-        octokit,
-        pullRequestNumber,
-        repo,
-        baseRefName: result.repository.pullRequest.baseRefName,
-        commit,
-        statusCheckRollup
-      }))
-    ]
+    const checkResults = await loadAllCheckResults({
+      octokit,
+      pullRequestNumber,
+      repo,
+      baseRefName: result.repository.pullRequest.baseRefName,
+      commit,
+      statusCheckRollup
+    })
+    if ('kind' in checkResults) return checkResults
+
     // Resolve identities before grouping reruns, or a newer hidden result could
     // escape the earlier known App's group. Never resolve from display URLs.
     if (stackRequiredChecks !== null) {
@@ -1229,7 +1242,7 @@ async function loadAllCheckResults({
   readonly baseRefName: string | undefined
   readonly commit: PrechecksGraphqlCommitNode['commit']
   readonly statusCheckRollup: StatusCheckRollup
-}): Promise<readonly RawCheckResult[]> {
+}): Promise<RawCheckResult[] | typeof UNVERIFIED_BASE> {
   const checkResults = [...statusCheckRollup.contexts.nodes]
   let pageInfo = statusCheckRollup.contexts.pageInfo
   if (!pageInfo) {
@@ -1315,9 +1328,7 @@ async function loadAllCheckResults({
       throw new Error('The paginated check data belongs to another commit')
     }
     if (page.repository?.pullRequest?.baseRefName !== baseRefName) {
-      throw new Error(
-        'The pull request base branch changed or could not be verified while reading its CI checks'
-      )
+      return UNVERIFIED_BASE
     }
     if (page.node.statusCheckRollup === null) {
       throw new Error('The paginated check rollup is unavailable')

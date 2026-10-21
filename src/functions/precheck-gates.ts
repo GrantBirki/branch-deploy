@@ -23,6 +23,7 @@ export interface PrecheckGateRequest {
   readonly sha: string
   readonly stableBranch: string
   readonly stableBranchUsed: boolean
+  readonly unavailableCheckMessage: string | undefined
   readonly updateBranch: 'disabled' | 'force' | 'warn'
   readonly userIsAdmin: boolean
 }
@@ -77,6 +78,7 @@ export function evaluatePrecheckGates({
   sha,
   stableBranch,
   stableBranchUsed,
+  unavailableCheckMessage,
   updateBranch,
   userIsAdmin
 }: PrecheckGateRequest): PrecheckGateDecision {
@@ -118,7 +120,9 @@ export function evaluatePrecheckGates({
     }
   }
 
-  const checksUnavailableMessage = `### ⚠️ Cannot proceed with deployment\n\n- commitStatus: \`UNAVAILABLE\`\n\n> The Action could not verify all CI checks for this pull request, so no deployment was started. Retry the command after GitHub's check data is available, or explicitly configure \`skip_ci\` for this environment.`
+  const checksUnavailableMessage =
+    unavailableCheckMessage ??
+    `### ⚠️ Cannot proceed with deployment\n\n- commitStatus: \`UNAVAILABLE\`\n\n> The Action could not verify all CI checks for this pull request, so no deployment was started. Retry the command after GitHub's check data is available, or explicitly configure \`skip_ci\` for this environment.`
 
   if (commitStatus === 'UNAVAILABLE' && commitOid === undefined) {
     return reject(checksUnavailableMessage)

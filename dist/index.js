@@ -39661,7 +39661,7 @@ function accept(message, logs = [{ level: 'info', message }]) {
 function reject(message, logs = []) {
     return { kind: 'reject', logs, message };
 }
-function evaluatePrecheckGates({ allowDraftDeploy, allowShaDeployments, commitOid, commitStatus, exactSha, forkBypass, isDraft, isFork, mergeStateStatus, missingCheckMessage, noopMode, outdated, outdatedBranch, reviewDecision, sha, stableBranch, stableBranchUsed, updateBranch, userIsAdmin }) {
+function evaluatePrecheckGates({ allowDraftDeploy, allowShaDeployments, commitOid, commitStatus, exactSha, forkBypass, isDraft, isFork, mergeStateStatus, missingCheckMessage, noopMode, outdated, outdatedBranch, reviewDecision, sha, stableBranch, stableBranchUsed, unavailableCheckMessage, updateBranch, userIsAdmin }) {
     if (stableBranchUsed) {
         const message = `✅ deployment to the ${COLORS.highlight}stable${COLORS.reset} branch requested`;
         return {
@@ -39697,7 +39697,8 @@ function evaluatePrecheckGates({ allowDraftDeploy, allowShaDeployments, commitOi
             sha: exactSha
         };
     }
-    const checksUnavailableMessage = `### ⚠️ Cannot proceed with deployment\n\n- commitStatus: \`UNAVAILABLE\`\n\n> The Action could not verify all CI checks for this pull request, so no deployment was started. Retry the command after GitHub's check data is available, or explicitly configure \`skip_ci\` for this environment.`;
+    const checksUnavailableMessage = unavailableCheckMessage ??
+        `### ⚠️ Cannot proceed with deployment\n\n- commitStatus: \`UNAVAILABLE\`\n\n> The Action could not verify all CI checks for this pull request, so no deployment was started. Retry the command after GitHub's check data is available, or explicitly configure \`skip_ci\` for this environment.`;
     if (commitStatus === 'UNAVAILABLE' && commitOid === undefined) {
         return reject(checksUnavailableMessage);
     }
@@ -40346,6 +40347,11 @@ async function loadPrStackRequiredChecks(octokit, request) {
 
 
 
+const UNVERIFIED_BASE = {
+    commitStatus: 'UNAVAILABLE',
+    kind: 'base-unverified',
+    message: '### ⚠️ Cannot proceed with deployment\n\nThe pull request base branch changed or could not be verified while checking reviews and CI. Confirm the target branch, then post a new deployment command.'
+};
 // Runs precheck logic before the branch deployment can proceed
 // :param context: The context of the event
 // :param octokit: The octokit client
@@ -40636,7 +40642,7 @@ async function prechecks(context, octokit, data) {
             result.repository.pullRequest.baseRefName !== baseRef) {
             // Retargeting a pull request can change its review policy without moving its head.
             return {
-                message: '### ⚠️ Cannot proceed with deployment\n\nThe pull request base branch changed or could not be verified while reading its review and CI requirements. Check the base branch and run the command again.',
+                message: UNVERIFIED_BASE.message,
                 status: false
             };
         }
@@ -40813,6 +40819,9 @@ async function prechecks(context, octokit, data) {
         sha,
         stableBranch: data.inputs.stable_branch,
         stableBranchUsed: data.environmentObj.stable_branch_used,
+        unavailableCheckMessage: checkEvaluation.kind === 'base-unverified'
+            ? checkEvaluation.message
+            : undefined,
         updateBranch: data.inputs.update_branch,
         userIsAdmin
     });
@@ -40950,6 +40959,7 @@ async function checkStackPrerequisites({ context, data, octokit, query, stack, a
                 sha: pull.headSha,
                 stableBranch: stack.stableBranch,
                 stableBranchUsed: false,
+                unavailableCheckMessage: check.kind === 'base-unverified' ? check.message : undefined,
                 updateBranch: 'warn',
                 userIsAdmin
             });
@@ -41002,16 +41012,16 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
         if (statusCheckRollup === undefined) {
             throw new Error('The GraphQL response did not include a check rollup');
         }
-        const checkResults = [
-            ...(await loadAllCheckResults({
-                octokit,
-                pullRequestNumber,
-                repo,
-                baseRefName: result.repository.pullRequest.baseRefName,
-                commit,
-                statusCheckRollup
-            }))
-        ];
+        const checkResults = await loadAllCheckResults({
+            octokit,
+            pullRequestNumber,
+            repo,
+            baseRefName: result.repository.pullRequest.baseRefName,
+            commit,
+            statusCheckRollup
+        });
+        if ('kind' in checkResults)
+            return checkResults;
         // Resolve identities before grouping reruns, or a newer hidden result could
         // escape the earlier known App's group. Never resolve from display URLs.
         if (stackRequiredChecks !== null) {
@@ -41234,7 +41244,7 @@ async function loadAllCheckResults({ octokit, pullRequestNumber, repo, baseRefNa
             throw new Error('The paginated check data belongs to another commit');
         }
         if (page.repository?.pullRequest?.baseRefName !== baseRefName) {
-            throw new Error('The pull request base branch changed or could not be verified while reading its CI checks');
+            return UNVERIFIED_BASE;
         }
         if (page.node.statusCheckRollup === null) {
             throw new Error('The paginated check rollup is unavailable');
