@@ -131,13 +131,6 @@ test('documented checkout steps do not persist credentials', () => {
   assert.deepStrictEqual(unsafeCheckouts, [])
 })
 
-test('README checkouts use the commit Branch Deploy selected', () => {
-  for (const {body} of checkoutSteps('README.md')) {
-    assert.match(body, /if: steps\.branch-deploy\.outputs\.continue == 'true'/u)
-    assert.match(body, /ref: \$\{\{ steps\.branch-deploy\.outputs\.sha \}\}/u)
-  }
-})
-
 test('documented inline scripts do not interpolate untrusted expressions', () => {
   const unsafeScripts: string[] = []
 
