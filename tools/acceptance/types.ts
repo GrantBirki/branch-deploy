@@ -155,7 +155,7 @@ export interface MockGitHubState extends MockPullRequestChecks {
   commits: Map<string, MockCommit>
   commitsToTrees: Map<string, string>
   comparisonBehindBy: number
-  confirmationReaction: '+1' | '-1' | null
+  confirmationReaction: '+1' | '-1' | (() => '+1' | '-1') | null
   deployments: MockDeployment[]
   deploymentResponseSha: string | null
   failInitialReaction: boolean

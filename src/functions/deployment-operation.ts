@@ -741,7 +741,7 @@ async function continueDeployment(
   lease: DeploymentLockLease,
   progress: OperationProgress
 ): Promise<OperationOutcome> {
-  const {context} = request
+  const {context, octokit, reactionId} = request
   const {environment, environmentResult, precheck} = ready
   const githubRunId = parseInt(process.env['GITHUB_RUN_ID'] ?? '')
   const deploymentType: OperationDeploymentType = precheck.noopMode
@@ -768,6 +768,40 @@ async function continueDeployment(
     deploymentType
   )
   if (earlyRefFailure !== null) return earlyRefFailure
+
+  // Confirmation approves the request, not the CI result from before the wait.
+  if (precheck.recheckCi !== undefined) {
+    const {commitStatus, failure} = await precheck.recheckCi()
+    setActionOutput('commit_status', commitStatus)
+    if (failure !== undefined) {
+      const message = dedent(`
+        ### Deployment stopped after confirmation
+
+        No deployment was started. Branch Deploy could not verify that all selected CI checks still passed.
+
+        Review the workflow logs, then post a new deployment command once CI passes.
+      `)
+      saveActionState('bypass', 'true')
+      await lease.cleanup('because CI did not pass after confirmation')
+      try {
+        await actionStatus({context, octokit, reactionId, message})
+      } catch (error) {
+        core.warning(
+          `failed to report CI after confirmation: ${legacyApiError(error).message}`
+        )
+      }
+      core.setFailed(failure)
+      return terminal(request, {
+        runResult: 'failure',
+        decision: 'failure',
+        reasonCode: 'prechecks_failed',
+        deploymentType,
+        environment,
+        ref: precheck.ref,
+        sha: precheck.sha
+      })
+    }
+  }
 
   const deploymentStartTime = timestamp()
   core.debug(`deployment_start_time: ${deploymentStartTime}`)

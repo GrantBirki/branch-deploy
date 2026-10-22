@@ -2244,6 +2244,336 @@ const scenarios = [
       })
   },
   {
+    name: 'CI changes while deployment confirmation is pending',
+    run: async () => {
+      const checkName =
+        'untrusted-check-name` [test link](#untrusted-check-link) `'
+      const status = {
+        context: checkName,
+        isRequired: false,
+        state: 'SUCCESS',
+        type: 'status-context'
+      } as const
+      const hiddenAppCheck = {
+        conclusion: 'SUCCESS',
+        databaseId: 123,
+        integrationId: null,
+        isRequired: false,
+        name: checkName,
+        type: 'check-run'
+      } as const
+      const visibleAppCheck = {...hiddenAppCheck, integrationId: 7}
+      const newerCheck = {...visibleAppCheck, databaseId: 124}
+      const requiredCheck = {...visibleAppCheck, isRequired: true, name: 'scan'}
+      const hiddenRequiredCheck = {...requiredCheck, integrationId: null}
+      const hiddenRerun = {
+        ...hiddenRequiredCheck,
+        databaseId: newerCheck.databaseId
+      }
+      const failedRerun = {
+        ...hiddenRerun,
+        conclusion: 'FAILURE',
+        isRequired: false
+      }
+      const olderOptional = {...failedRerun, databaseId: 122}
+      const build = {...requiredCheck, databaseId: 121, name: 'build'}
+      const buildAndScanRules = [
+        {context: build.name, app_id: null},
+        {context: requiredCheck.name, app_id: null}
+      ] as const
+      const scanApp = requiredCheck.integrationId
+      const verifiedFailedRerun = {run: failedRerun, appId: scanApp}
+      const otherAppRun = {...failedRerun, integrationId: 8}
+      const olderOtherApp = {...olderOptional, integrationId: 8}
+      const hiddenRequiredWithOptional = [
+        hiddenRequiredCheck,
+        olderOtherApp
+      ] as const
+      const latestRequiredCheck = {...requiredCheck, databaseId: 125}
+      const pagePadding = Array.from({length: 99}, (_, index) => ({
+        ...status,
+        context: `healthy-${String(index)}`
+      }))
+      for (const [change, before, after, expected, lookup, rules] of [
+        ['rollup disappears', status, null, 'MISSING'],
+        ['status disappears', status, [], 'MISSING'],
+        ['status fails', status, [{...status, state: 'FAILURE'}], 'FAILURE'],
+        [
+          'only an older successful commit status remains',
+          {...status, updatedAt: '2026-01-01T00:02:00Z'},
+          [{...status, updatedAt: '2026-01-01T00:01:00Z'}],
+          'MISSING'
+        ],
+        [
+          'same name on a different run with its App hidden',
+          hiddenAppCheck,
+          [{...newerCheck, integrationId: null}],
+          'MISSING'
+        ],
+        [
+          'same run with its App now visible',
+          hiddenAppCheck,
+          [visibleAppCheck],
+          'SUCCESS'
+        ],
+        [
+          'only an older successful run remains from the same App',
+          newerCheck,
+          [visibleAppCheck],
+          'MISSING'
+        ],
+        [
+          'original run reveals its App alongside a successful rerun',
+          hiddenAppCheck,
+          [visibleAppCheck, newerCheck],
+          'SUCCESS'
+        ],
+        [
+          'original run reveals its App alongside a pending rerun',
+          hiddenAppCheck,
+          [visibleAppCheck, {...newerCheck, conclusion: null}],
+          'PENDING'
+        ],
+        [
+          'original run hides its App alongside a successful rerun',
+          visibleAppCheck,
+          [{...hiddenAppCheck, conclusion: 'FAILURE'}, newerCheck],
+          'SUCCESS'
+        ],
+        [
+          'a newer run shows its App but the original run is missing',
+          hiddenAppCheck,
+          [newerCheck],
+          'MISSING'
+        ],
+        [
+          'the App is hidden and a failing rerun is no longer marked required',
+          requiredCheck,
+          [hiddenRequiredCheck, failedRerun],
+          'MISSING',
+          verifiedFailedRerun
+        ],
+        [
+          'only a successful required rerun with its App hidden remains',
+          requiredCheck,
+          [hiddenRerun],
+          'SUCCESS',
+          {run: hiddenRerun, appId: scanApp}
+        ],
+        ...(
+          [
+            ['the required App', scanApp, 'MISSING'],
+            ['a different App', 8, 'SUCCESS'],
+            ['an unreadable App', null, 'UNAVAILABLE']
+          ] as const
+        ).map(
+          ([source, appId, expected]) =>
+            [
+              `a newly required scan has a later failed run from ${source}`,
+              build,
+              [build, requiredCheck, failedRerun],
+              expected,
+              {run: failedRerun, appId},
+              buildAndScanRules
+            ] as const
+        ),
+        [
+          'a successful required commit status shares the name of a newly required scan',
+          build,
+          [
+            build,
+            {...status, context: 'scan', isRequired: true},
+            requiredCheck,
+            failedRerun
+          ],
+          'MISSING',
+          verifiedFailedRerun,
+          buildAndScanRules
+        ],
+        [
+          'the rollup marks the scan required before the branch rule includes it',
+          build,
+          [build, requiredCheck, failedRerun],
+          'MISSING',
+          verifiedFailedRerun
+        ],
+        ...(
+          [
+            ['can', scanApp, 'SUCCESS'],
+            ['cannot', null, 'UNAVAILABLE']
+          ] as const
+        ).map(
+          ([read, appId, expected]) =>
+            [
+              `both scan Apps are hidden and the required run's App ${read} be verified`,
+              hiddenRequiredWithOptional,
+              [hiddenRequiredCheck, olderOptional],
+              expected,
+              {run: hiddenRequiredCheck, appId}
+            ] as const
+        ),
+        [
+          'only the required run can be verified after the rule is bound to its App',
+          hiddenRequiredWithOptional,
+          [hiddenRequiredCheck, olderOptional],
+          'SUCCESS',
+          {run: hiddenRequiredCheck, appId: scanApp},
+          [{context: requiredCheck.name, app_id: scanApp}]
+        ],
+        [
+          'a newer optional run from another App finishes between pages',
+          requiredCheck,
+          [
+            ...pagePadding,
+            {...otherAppRun, conclusion: null},
+            otherAppRun,
+            requiredCheck
+          ],
+          'SUCCESS'
+        ],
+        [
+          'the second page reveals the App of an older optional run',
+          hiddenRequiredWithOptional,
+          [...pagePadding, olderOptional, olderOtherApp, hiddenRequiredCheck],
+          'SUCCESS'
+        ],
+        [
+          'an unreadable optional run is older than the latest required run',
+          latestRequiredCheck,
+          [requiredCheck, failedRerun, latestRequiredCheck],
+          'SUCCESS'
+        ],
+        [
+          'pages disagree on the conclusion of the same newer run',
+          visibleAppCheck,
+          [...pagePadding, newerCheck, {...newerCheck, conclusion: 'FAILURE'}],
+          'UNAVAILABLE'
+        ],
+        [
+          'pages disagree on a required run as its App becomes visible',
+          hiddenRequiredCheck,
+          [
+            ...pagePadding,
+            {...hiddenRequiredCheck, conclusion: 'FAILURE', isRequired: false},
+            requiredCheck
+          ],
+          'UNAVAILABLE'
+        ],
+        [
+          'pages repeat the same successful required run with its App hidden',
+          hiddenRequiredCheck,
+          [...pagePadding, hiddenRequiredCheck, hiddenRequiredCheck],
+          'SUCCESS'
+        ]
+      ] as const) {
+        const name = `CI ${change} during confirmation`
+        await withMockGitHub(name, async context => {
+          const {state} = context
+          const lock = lockBranch('production')
+          state.pullRequest = {...state.pullRequest, merged: false}
+          const initial = 'type' in before ? ([before] as const) : before
+          const [admitted] = initial
+          state.rollupContexts = initial
+          if (admitted.isRequired) {
+            setClassicRequiredChecks(state, [
+              {context: admitted.name, app_id: null}
+            ])
+          }
+          state.confirmationReaction = () => {
+            assert.equal(requireMockLock(context, lock)['sticky'], false)
+            if (rules !== undefined) setClassicRequiredChecks(state, rules)
+            if (lookup !== undefined && lookup.appId !== null) {
+              const {run, appId} = lookup
+              const id = run.databaseId
+              state.checkRuns.set(id, {
+                id,
+                node_id: `CR_${id}`,
+                name: run.name,
+                head_sha: ACCEPTANCE_SHAS.feature,
+                conclusion: run.conclusion.toLowerCase(),
+                app: {id: appId}
+              })
+            }
+            if (after === null) {
+              state.rollupState = null
+            } else {
+              state.rollupState = expected === 'FAILURE' ? 'FAILURE' : 'SUCCESS'
+              state.rollupContexts = after
+            }
+            return '+1'
+          }
+
+          const result = await runMain(context, {
+            checks: admitted.isRequired ? 'required' : 'all',
+            deployment_confirmation: 'true',
+            deployment_confirmation_timeout: '1',
+            skip_completing: 'true'
+          })
+
+          assertOutput(context, result, 'sha', ACCEPTANCE_SHAS.feature)
+          assertOutput(context, result, 'commit_status', expected)
+          assertCommentIncludes(context, 'Deployment confirmed by __octocat__')
+          if (lookup !== undefined || expected === 'SUCCESS') {
+            assert.deepEqual(
+              context.routeLog
+                .filter(route => route.path.includes('/check-runs/'))
+                .map(route => [route.method, route.path]),
+              lookup === undefined
+                ? []
+                : [['GET', apiPath(`/check-runs/${lookup.run.databaseId}`)]],
+              diagnostics(context, result)
+            )
+          }
+          if (after !== null && after.length > 100) {
+            assert.equal(
+              routeVariables(context, 'POST', '/graphql', 2)['cursor'],
+              '100'
+            )
+          }
+          if (expected === 'SUCCESS') {
+            assertExit(context, result, 0)
+            assertReason(context, result, 'deployment_ready')
+            assertOutput(context, result, 'continue', 'true')
+            assert.equal(
+              requireDeployment(context).sha,
+              ACCEPTANCE_SHAS.feature
+            )
+            return
+          }
+
+          assertExit(context, result, 1)
+          assertDecision(context, result, 'failure')
+          assertReason(context, result, 'prechecks_failed')
+          assert.equal(result.output['continue'], undefined)
+          assert.equal(result.output['context'], undefined)
+          const stopComment = state.comments.find(comment =>
+            comment.body.includes('No deployment was started.')
+          )
+          assert.ok(stopComment, diagnostics(context, result))
+          assert.doesNotMatch(
+            stopComment.body,
+            /untrusted-check-(?:name|link)/u
+          )
+          assert.equal(
+            state.comments.some(comment =>
+              comment.body.includes('Deployment Triggered')
+            ),
+            false
+          )
+          assert.equal(
+            context.routeLog.some(
+              route =>
+                route.method === 'POST' &&
+                route.path === apiPath('/deployments')
+            ),
+            false
+          )
+          assert.equal(state.branches.has(lock), false)
+        })
+      }
+    }
+  },
+  {
     name: 'confirmation finds actor reaction on page two',
     run: () =>
       withMockGitHub(
@@ -3480,7 +3810,10 @@ const scenarios = [
                   context.state.pullRequestStackResponses,
                   responses.slice(expectedReads)
                 )
-                assert.deepEqual(prechecksQueryNumbers(context), [1])
+                assert.deepEqual(
+                  prechecksQueryNumbers(context),
+                  expectedReads === 2 ? [1] : [1, 1]
+                )
                 assert.deepEqual(stackQueryRoutes(context), [])
                 assert.deepEqual(context.state.prStackResponses, [
                   previewResponse

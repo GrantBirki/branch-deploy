@@ -31,10 +31,12 @@ import type {
   BranchDeployContext,
   BranchDeployOctokit,
   CheckRunResult,
+  ConfirmationCiResult,
   PrecheckData,
   PrecheckFailure,
   PrecheckResult,
   PrechecksGraphqlCommitNode,
+  PrechecksGraphqlContextsPageResult,
   PrechecksGraphqlResult,
   RawCheckResult,
   StatusCheckRollup
@@ -163,7 +165,7 @@ type CommitCheckEvaluation =
   | typeof UNVERIFIED_BASE
   | {
       readonly commitStatus: string
-      readonly filterChecksResult?: FilterChecksResult
+      readonly filterChecksResult: FilterChecksResult
       readonly kind: 'failed'
     }
   | {
@@ -591,15 +593,25 @@ export async function prechecks(
     )
   }
 
-  const checkEvaluation = await evaluateCommitChecks({
+  const checkPolicy = {
     checks,
     environment: data.environment,
     ignoredChecks,
     octokit,
-    pullRequestNumber: context.issue.number,
     repo: context.repo,
-    result,
-    skipCi,
+    skipCi
+  }
+  const confirmationTargets: ConfirmationCheckTarget[] | undefined =
+    data.inputs.deployment_confirmation && isPullRequestDeployment && !skipCi
+      ? []
+      : undefined
+  const checkEvaluation = await evaluateCommitChecks({
+    ...checkPolicy,
+    ...pullRequestCheckTarget(
+      result,
+      context.issue.number,
+      confirmationTargets
+    ),
     stackRequiredChecks
   })
   const commitStatus = checkEvaluation.commitStatus
@@ -637,9 +649,9 @@ export async function prechecks(
       query,
       stack,
       allowDraftDeploy,
-      ignoredChecks,
+      checkPolicy,
+      confirmationTargets,
       isFork,
-      skipCi,
       skipReviews,
       stackRequiredChecks,
       userIsAdmin
@@ -812,6 +824,21 @@ export async function prechecks(
     noopMode: noopMode,
     sha: sha,
     baseRef,
+    ...(confirmationTargets === undefined
+      ? {}
+      : {
+          recheckCi: () =>
+            recheckConfirmationCi(
+              checkPolicy,
+              confirmationTargets,
+              stackRequiredChecks === null
+                ? null
+                : {
+                    stableBranch: stack?.stableBranch ?? baseRef,
+                    ...(stack === null ? {scope: 'ordinary'} : {})
+                  }
+            )
+        }),
     isFork: isFork,
     ...(expectNoStack ? {expectNoStack: true} : {}),
     ...(stack === null ? {} : {stack})
@@ -860,10 +887,10 @@ function requireStackPolicyData(
 
 interface StackPrecheckRequest extends PrechecksRequest {
   readonly allowDraftDeploy: boolean
-  readonly ignoredChecks: readonly string[]
+  readonly checkPolicy: CommitCheckPolicy
+  readonly confirmationTargets: ConfirmationCheckTarget[] | undefined
   readonly isFork: boolean
   readonly query: string
-  readonly skipCi: boolean
   readonly skipReviews: boolean
   readonly stack: PrStackSnapshot
   readonly stackRequiredChecks: readonly PrStackRequiredCheck[] | null
@@ -877,9 +904,9 @@ async function checkStackPrerequisites({
   query,
   stack,
   allowDraftDeploy,
-  ignoredChecks,
+  checkPolicy,
+  confirmationTargets,
   isFork,
-  skipCi,
   skipReviews,
   stackRequiredChecks,
   userIsAdmin
@@ -898,14 +925,8 @@ async function checkStackPrerequisites({
       )
       requireStackPolicyData(result, pull.headSha, pull.baseRef)
       const check = await evaluateCommitChecks({
-        checks: data.inputs.checks,
-        environment: data.environment,
-        ignoredChecks,
-        octokit,
-        pullRequestNumber: pull.number,
-        repo: context.repo,
-        result,
-        skipCi,
+        ...checkPolicy,
+        ...pullRequestCheckTarget(result, pull.number, confirmationTargets),
         stackRequiredChecks
       })
       const gate = evaluatePrecheckGates({
@@ -949,16 +970,273 @@ async function checkStackPrerequisites({
   return null
 }
 
-interface EvaluateCommitChecksRequest {
+interface CommitCheckPolicy {
   readonly checks: PrecheckData['inputs']['checks']
   readonly environment: string
   readonly ignoredChecks: readonly string[]
   readonly octokit: PrechecksOctokit
-  readonly pullRequestNumber: number
   readonly repo: BranchDeployContext['repo']
-  readonly result: PrechecksGraphqlResult
   readonly skipCi: boolean
+}
+
+interface CommitCheckTarget {
+  readonly baseRefName: string | undefined
+  readonly commit: PrechecksGraphqlCommitNode['commit'] | undefined
+  readonly pullRequestNumber: number
+}
+
+interface ConfirmationCheckTarget extends CommitCheckTarget {
+  readonly selectedChecks: readonly RawCheckResult[]
+}
+
+interface ConfirmationCheckRun {
+  readonly admitted: CheckRunResult
+  reported?: CheckRunResult
+}
+
+function pullRequestCheckTarget(
+  result: PrechecksGraphqlResult,
+  pullRequestNumber: number,
+  confirmationTargets: ConfirmationCheckTarget[] | undefined
+): CommitCheckTarget & Pick<EvaluateCommitChecksRequest, 'onSelectedCheck'> {
+  const {baseRefName, commits} = result.repository.pullRequest
+  const target = {
+    pullRequestNumber,
+    baseRefName,
+    commit: commits?.nodes?.[0]?.commit
+  }
+  if (confirmationTargets === undefined) return target
+
+  const selectedChecks: RawCheckResult[] = []
+  confirmationTargets.push({...target, selectedChecks})
+  return {
+    ...target,
+    onSelectedCheck: check => selectedChecks.push(check)
+  }
+}
+
+async function recheckConfirmationCi(
+  policy: CommitCheckPolicy,
+  targets: readonly ConfirmationCheckTarget[],
+  base: Pick<
+    Parameters<typeof loadPrStackRequiredChecks>[1],
+    'stableBranch' | 'scope'
+  > | null
+): Promise<ConfirmationCiResult> {
+  let stackRequiredChecks: readonly PrStackRequiredCheck[] | null = null
+  if (base !== null) {
+    try {
+      const {data: branch} = await policy.octokit.rest.repos.getBranch({
+        ...policy.repo,
+        branch: base.stableBranch,
+        headers: API_HEADERS
+      })
+      stackRequiredChecks = await loadPrStackRequiredChecks(policy.octokit, {
+        ...policy.repo,
+        ...base,
+        stableSha: branch.commit.sha,
+        branch
+      })
+    } catch (error) {
+      const failure =
+        'Could not verify the required CI checks for the base branch.'
+      core.debug(`${failure} ${legacyApiError(error).message}`)
+      return {commitStatus: 'UNAVAILABLE', failure}
+    }
+  }
+
+  // The commit_status output describes the selected PR, even if a lower
+  // pull request in its stack prevents the deployment.
+  let commitStatus: string | null = 'UNAVAILABLE'
+  for (const target of targets) {
+    const check = await recheckCommitChecks({
+      ...policy,
+      ...target,
+      stackRequiredChecks
+    })
+    if (target === targets[0]) commitStatus = check.commitStatus
+    if (check.kind === 'passed' || check.kind === 'no-checks') continue
+    if (check.kind === 'unavailable') {
+      core.debug(
+        `Could not recheck CI after confirmation: ${String(check.error)}`
+      )
+    }
+
+    const detail =
+      check.kind === 'failed' || check.kind === 'missing'
+        ? check.filterChecksResult.message
+        : 'the check results or pull request base could not be verified'
+    return {
+      commitStatus,
+      failure: `CI for PR #${target.pullRequestNumber} at \`${String(target.commit?.oid)}\`: ${detail}`
+    }
+  }
+  return {commitStatus}
+}
+
+async function recheckCommitChecks({
+  selectedChecks,
+  ...request
+}: EvaluateCommitChecksRequest &
+  ConfirmationCheckTarget): Promise<CommitCheckEvaluation> {
+  const confirmationRuns = new Map<string, ConfirmationCheckRun>()
+  for (const admitted of selectedChecks) {
+    if (!isCheckRun(admitted)) continue
+    const {id} = admitted
+    if (typeof id === 'string' && id !== '') {
+      confirmationRuns.set(id, {admitted})
+    }
+  }
+
+  const latestChecks = new Map<string, RawCheckResult>()
+  const check = await evaluateCommitChecks({
+    ...request,
+    confirmationRuns,
+    onSelectedCheck: latest => latestChecks.set(checkIdentity(latest), latest)
+  })
+  if (check.kind !== 'passed' && check.kind !== 'no-checks') return check
+
+  const missing = selectedChecks.filter(
+    selected =>
+      !confirmedCheckContinues(selected, confirmationRuns, latestChecks)
+  )
+  return missing.length === 0 ? check : unverifiedConfirmationChecks(missing)
+}
+
+function unverifiedConfirmationChecks(
+  missing: readonly RawCheckResult[]
+): Extract<CommitCheckEvaluation, {kind: 'missing'}> {
+  const message = `Could not verify checks selected for this deployment: ${missing.map(checkName).join(', ')}`
+  return {
+    commitStatus: 'MISSING',
+    filterChecksResult: {message, status: 'MISSING'},
+    kind: 'missing'
+  }
+}
+
+function confirmedCheckContinues(
+  admitted: RawCheckResult,
+  confirmationRuns: ReadonlyMap<string, ConfirmationCheckRun>,
+  latestChecks: ReadonlyMap<string, RawCheckResult>
+): boolean {
+  if (!isCheckRun(admitted)) {
+    const latest = latestChecks.get(checkIdentity(admitted))
+    if (latest === undefined) return false
+    const id = checkNodeId(admitted)
+    if (id !== undefined && id !== '' && checkNodeId(latest) === id) return true
+
+    // Legacy statuses identify a context, not its publisher. A different status
+    // must be strictly newer; an absent or invalid timestamp cannot establish that.
+    return (
+      Date.parse(checkTimestampValue(latest) ?? '') >
+      Date.parse(checkTimestampValue(admitted) ?? '')
+    )
+  }
+
+  // The original run can establish its App without being the run that passed CI.
+  const original = confirmationRuns.get(admitted.id ?? '')?.reported
+  const source = original ?? admitted
+  const latest = latestChecks.get(checkIdentity(source))
+  if (latest === undefined) return false
+  if (original !== undefined && checkNodeId(latest) === original.id) return true
+
+  // Use the same run ordering as latestCheckResults. A different green run is
+  // evidence only if it is from the same known App and demonstrably newer.
+  if ((checkIntegrationId(source) ?? 0) <= 0) return false
+  return newerCheckRun(latest, admitted)
+}
+
+function newerCheckRun(
+  check: RawCheckResult,
+  previous: RawCheckResult
+): boolean {
+  const id = checkDatabaseId(check) ?? 0
+  const previousId = checkDatabaseId(previous) ?? 0
+  return (
+    Number.isSafeInteger(previousId) &&
+    previousId > 0 &&
+    Number.isSafeInteger(id) &&
+    id > previousId
+  )
+}
+
+interface EvaluateCommitChecksRequest
+  extends CommitCheckPolicy, CommitCheckTarget {
+  readonly onSelectedCheck?: (check: RawCheckResult) => void
+  readonly confirmationRuns?: ReadonlyMap<string, ConfirmationCheckRun>
   readonly stackRequiredChecks: readonly PrStackRequiredCheck[] | null
+}
+
+// Policy can change during confirmation. Compare runs selected now as well as
+// runs admitted before the wait, without assuming same-named runs share an App.
+function confirmationRunsNeedingApp(
+  confirmationRuns: ReadonlyMap<string, ConfirmationCheckRun>,
+  reportedChecks: Iterable<RawCheckResult>,
+  selected: (check: RawCheckResult) => boolean,
+  boundNames: ReadonlySet<string>
+): ReadonlySet<CheckRunResult> {
+  const byName = new Map<string, CheckRunResult[]>()
+  const selectedRuns = new Set<CheckRunResult>()
+  for (const check of reportedChecks) {
+    if (!isCheckRun(check)) continue
+    if (selected(check)) selectedRuns.add(check)
+    const runs = byName.get(check.name)
+    if (runs === undefined) byName.set(check.name, [check])
+    else runs.push(check)
+  }
+
+  for (const {admitted} of confirmationRuns.values()) {
+    const original = byName
+      .get(admitted.name)
+      ?.find(run => run.id === admitted.id)
+    if (original !== undefined) selectedRuns.add(original)
+    // A missing run can establish continuity only if its App was known at admission.
+    else if (checkIntegrationId(admitted) !== null) selectedRuns.add(admitted)
+  }
+
+  // An App learned at admission belongs to that exact run, not to its name.
+  const appId = (run: CheckRunResult): number | null => {
+    const admitted = confirmationRuns.get(run.id ?? '')?.admitted
+    return (
+      checkIntegrationId(run) ??
+      (admitted === undefined ? null : checkIntegrationId(admitted))
+    )
+  }
+
+  const needsApp = new Set<CheckRunResult>()
+  for (const check of selectedRuns) {
+    const runs = byName.get(check.name) ?? []
+    const app = appId(check)
+    // Compare with the newest selected run from this App, not every past run.
+    if (
+      app !== null &&
+      runs.some(
+        run =>
+          selectedRuns.has(run) &&
+          appId(run) === app &&
+          newerCheckRun(run, check)
+      )
+    ) {
+      continue
+    }
+    if (boundNames.has(check.name)) needsApp.add(check)
+
+    for (const run of runs) {
+      const {id} = run
+      if (run === check || (id !== undefined && id !== '' && id === check.id))
+        continue
+      const other = appId(run)
+      if (app !== null && other !== null && app !== other) continue
+      if (!newerCheckRun(check, run)) {
+        needsApp.add(run)
+        needsApp.add(check)
+      } else if (app === null && other === null) {
+        // Identify the selected run, not an older run that cannot supersede it.
+        needsApp.add(check)
+      }
+    }
+  }
+  return needsApp
 }
 
 async function evaluateCommitChecks({
@@ -968,7 +1246,10 @@ async function evaluateCommitChecks({
   octokit,
   pullRequestNumber,
   repo,
-  result,
+  commit,
+  baseRefName,
+  onSelectedCheck,
+  confirmationRuns,
   skipCi,
   stackRequiredChecks
 }: EvaluateCommitChecksRequest): Promise<CommitCheckEvaluation> {
@@ -980,11 +1261,18 @@ async function evaluateCommitChecks({
   }
 
   try {
-    const commit = result.repository.pullRequest.commits?.nodes?.[0]?.commit
     if (commit === undefined) {
       throw new Error('The GraphQL response did not include a commit')
     }
-    const statusCheckRollup = commit.statusCheckRollup
+    const source = {octokit, pullRequestNumber, repo, baseRefName, commit}
+    // A fork's head may advance during confirmation. Read CI on the commit
+    // we admitted, not on the pull request's latest commit.
+    const current =
+      confirmationRuns === undefined
+        ? commit
+        : await readCommitCheckPage(source, null)
+    if ('kind' in current) return current
+    const {statusCheckRollup} = current
     const explicitChecks = Array.isArray(checks) && checks.length > 0
 
     if (explicitChecks && statusCheckRollup === null) {
@@ -1012,79 +1300,73 @@ async function evaluateCommitChecks({
       throw new Error('The GraphQL response did not include a check rollup')
     }
 
-    const checkResults = await loadAllCheckResults({
-      octokit,
-      pullRequestNumber,
-      repo,
-      baseRefName: result.repository.pullRequest.baseRefName,
-      commit,
+    const reported = await loadAllCheckResults({
+      ...source,
       statusCheckRollup
     })
-    if ('kind' in checkResults) return checkResults
-
-    // Resolve identities before grouping reruns, or a newer hidden result could
-    // escape the earlier known App's group. Never resolve from display URLs.
-    if (stackRequiredChecks !== null) {
-      for (const [index, check] of checkResults.entries()) {
-        if (
-          isCheckRun(check) &&
-          checkIntegrationId(check) === null &&
-          !ignoredChecks.includes(check.name) &&
-          stackRequiredChecks.some(
-            required =>
-              required.appId !== null && required.context === check.name
+    if ('kind' in reported) return reported
+    const boundNames = new Set(
+      stackRequiredChecks
+        ?.filter(
+          rule => rule.appId !== null && !ignoredChecks.includes(rule.context)
+        )
+        .map(rule => rule.context)
+    )
+    const selected = checkSelection(
+      checks,
+      ignoredChecks,
+      checks === 'required'
+    )
+    const confirmation =
+      confirmationRuns === undefined
+        ? undefined
+        : confirmationCheckEvidence(
+            reported,
+            confirmationRuns,
+            selected,
+            boundNames
           )
-        ) {
-          const id = check.databaseId
-          if (
-            typeof id !== 'number' ||
-            !Number.isSafeInteger(id) ||
-            id < 1 ||
-            typeof check.id !== 'string' ||
-            check.id === ''
-          ) {
-            throw new Error(
-              'Cannot verify required check App: missing check run identity'
-            )
-          }
-          const {data: run} = await octokit.rest.checks.get({
-            ...repo,
-            check_run_id: id,
-            headers: API_HEADERS
-          })
-          if (
-            typeof run !== 'object' ||
-            run === null ||
-            !('id' in run) ||
-            run.id !== id ||
-            !('node_id' in run) ||
-            run.node_id !== check.id ||
-            !('head_sha' in run) ||
-            run.head_sha !== commit.oid ||
-            !('name' in run) ||
-            run.name !== check.name ||
-            !('conclusion' in run) ||
-            (typeof run.conclusion === 'string'
-              ? run.conclusion.toUpperCase()
-              : run.conclusion) !== check.conclusion ||
-            !('app' in run) ||
-            typeof run.app !== 'object' ||
-            run.app === null ||
-            !('id' in run.app) ||
-            typeof run.app.id !== 'number' ||
-            !Number.isSafeInteger(run.app.id) ||
-            run.app.id < 1
-          ) {
-            throw new Error(
-              'Cannot verify required check App: check run identity, SHA, name, result, or App did not match'
-            )
-          }
-          checkResults[index] = {
-            ...check,
-            checkSuite: {app: {databaseId: run.app.id}}
-          }
-        }
+    const resolved = confirmation?.checks ?? reported
+    for (const [index, check] of resolved.entries()) {
+      if (!isCheckRun(check)) continue
+      const evidence = confirmationRuns?.get(check.id ?? '')
+      const admitted = evidence?.admitted
+      const before =
+        admitted === undefined ? null : checkIntegrationId(admitted)
+      const now = checkIntegrationId(check)
+      // Only App identity carries across reads of the exact run. Resolve hidden
+      // competitors before grouping, even when one is no longer marked required.
+      let appId = now ?? before
+      const bound = boundNames.has(check.name)
+      const needsApp = confirmation?.needsApp.has(check) ?? bound
+      if (now === null && needsApp && (appId === null || bound)) {
+        appId = await verifiedCheckAppId(source, check)
       }
+      if (
+        admitted !== undefined &&
+        (check.name !== admitted.name || (before !== null && before !== appId))
+      ) {
+        return unverifiedConfirmationChecks([admitted])
+      }
+      const run =
+        appId !== null && appId !== now
+          ? {...check, checkSuite: {app: {databaseId: appId}}}
+          : check
+      resolved[index] = run
+      if (evidence !== undefined) evidence.reported = run
+    }
+    let checkResults: readonly RawCheckResult[] = resolved
+    if (confirmation !== undefined) {
+      // Remember what was selected before keeping the newest result per source.
+      // A newer, now-optional run must not erase a requirement we just observed.
+      const selectedSources = new Set(
+        resolved.filter(selected).map(checkIdentity)
+      )
+      checkResults = latestCheckResults(resolved, selected)
+      const lost = checkResults.filter(
+        check => !selected(check) && selectedSources.has(checkIdentity(check))
+      )
+      if (lost.length !== 0) return unverifiedConfirmationChecks(lost)
     }
     const missing = missingRequiredStackChecks({
       checks,
@@ -1097,7 +1379,8 @@ async function evaluateCommitChecks({
       checks,
       checkResults,
       ignoredChecks,
-      checks === 'required'
+      checks === 'required',
+      onSelectedCheck
     )
 
     if (filterChecksResult.status === 'SUCCESS') {
@@ -1122,6 +1405,62 @@ async function evaluateCommitChecks({
   } catch (error) {
     return {commitStatus: 'UNAVAILABLE', error, kind: 'unavailable'}
   }
+}
+
+// Bind REST's App ID to this exact GraphQL observation, never a display URL.
+async function verifiedCheckAppId(
+  {
+    octokit,
+    repo,
+    commit
+  }: Pick<CommitCheckPageSource, 'octokit' | 'repo' | 'commit'>,
+  check: CheckRunResult
+): Promise<number> {
+  const id = check.databaseId
+  if (
+    typeof id !== 'number' ||
+    !Number.isSafeInteger(id) ||
+    id < 1 ||
+    typeof check.id !== 'string' ||
+    check.id === ''
+  ) {
+    throw new Error(
+      'Cannot verify required check App: missing check run identity'
+    )
+  }
+  const {data: run} = await octokit.rest.checks.get({
+    ...repo,
+    check_run_id: id,
+    headers: API_HEADERS
+  })
+  if (
+    typeof run !== 'object' ||
+    run === null ||
+    !('id' in run) ||
+    run.id !== id ||
+    !('node_id' in run) ||
+    run.node_id !== check.id ||
+    !('head_sha' in run) ||
+    run.head_sha !== commit.oid ||
+    !('name' in run) ||
+    run.name !== check.name ||
+    !('conclusion' in run) ||
+    (typeof run.conclusion === 'string'
+      ? run.conclusion.toUpperCase()
+      : run.conclusion) !== check.conclusion ||
+    !('app' in run) ||
+    typeof run.app !== 'object' ||
+    run.app === null ||
+    !('id' in run.app) ||
+    typeof run.app.id !== 'number' ||
+    !Number.isSafeInteger(run.app.id) ||
+    run.app.id < 1
+  ) {
+    throw new Error(
+      'Cannot verify required check App: check run identity, SHA, name, result, or App did not match'
+    )
+  }
+  return run.app.id
 }
 
 // GitHub emits per-node FORBIDDEN errors when the token cannot view the App
@@ -1228,19 +1567,15 @@ function missingRequiredStackChecks({
   }
 }
 
-async function loadAllCheckResults({
-  octokit,
-  pullRequestNumber,
-  repo,
-  baseRefName,
-  commit,
-  statusCheckRollup
-}: Pick<
-  EvaluateCommitChecksRequest,
-  'octokit' | 'pullRequestNumber' | 'repo'
-> & {
-  readonly baseRefName: string | undefined
+interface CommitCheckPageSource
+  extends Pick<CommitCheckPolicy, 'octokit' | 'repo'>, CommitCheckTarget {
   readonly commit: PrechecksGraphqlCommitNode['commit']
+}
+
+async function loadAllCheckResults({
+  statusCheckRollup,
+  ...source
+}: CommitCheckPageSource & {
   readonly statusCheckRollup: StatusCheckRollup
 }): Promise<RawCheckResult[] | typeof UNVERIFIED_BASE> {
   const checkResults = [...statusCheckRollup.contexts.nodes]
@@ -1249,16 +1584,53 @@ async function loadAllCheckResults({
     throw new Error('The GraphQL response did not include check page info')
   }
 
-  if (!pageInfo.hasNextPage) {
-    return checkResults
+  const seenCursors = new Set<string>()
+
+  while (pageInfo.hasNextPage) {
+    const cursor = pageInfo.endCursor
+    if (cursor === null || cursor === '') {
+      throw new Error('The check page has no end cursor')
+    }
+    if (seenCursors.has(cursor)) {
+      throw new Error('The check page cursor did not advance')
+    }
+    seenCursors.add(cursor)
+
+    const page = await readCommitCheckPage(source, cursor)
+    if ('kind' in page) return page
+    if (page.statusCheckRollup === null) {
+      throw new Error('The paginated check rollup is unavailable')
+    }
+
+    checkResults.push(...page.statusCheckRollup.contexts.nodes)
+    pageInfo = page.statusCheckRollup.contexts.pageInfo
+    if (!pageInfo) {
+      throw new Error('The paginated check response has no page info')
+    }
   }
 
+  return checkResults
+}
+
+async function readCommitCheckPage(
+  {
+    octokit,
+    pullRequestNumber,
+    repo,
+    baseRefName,
+    commit
+  }: CommitCheckPageSource,
+  cursor: string | null
+): Promise<
+  | NonNullable<PrechecksGraphqlContextsPageResult['node']>
+  | typeof UNVERIFIED_BASE
+> {
   if (commit.id === undefined || commit.id === '') {
     throw new Error('The GraphQL response did not include a commit node ID')
   }
 
   // isRequired is relative to the pull request's current base, even on a pinned commit.
-  const query = `query($commitId:ID!, $cursor:String!, $owner:String!, $name:String!, $number:Int!) {
+  const query = `query($commitId:ID!, $cursor:String, $owner:String!, $name:String!, $number:Int!) {
                   repository(owner:$owner, name:$name) {
                     pullRequest(number:$number) { baseRefName }
                   }
@@ -1300,48 +1672,25 @@ async function loadAllCheckResults({
                     }
                   }
                 }`
-  const seenCursors = new Set<string>()
-
-  while (pageInfo.hasNextPage) {
-    const cursor = pageInfo.endCursor
-    if (cursor === null || cursor === '') {
-      throw new Error('The check page has no end cursor')
-    }
-    if (seenCursors.has(cursor)) {
-      throw new Error('The check page cursor did not advance')
-    }
-    seenCursors.add(cursor)
-
-    const page = prechecksGraphqlContextsPageResult(
-      await graphqlAllowingInaccessibleApps(octokit, query, {
-        commitId: commit.id,
-        cursor,
-        owner: repo.owner,
-        name: repo.repo,
-        number: pullRequestNumber
-      })
-    )
-    if (!page.node) {
-      throw new Error('The paginated commit node is unavailable')
-    }
-    if (page.node.id !== commit.id || page.node.oid !== commit.oid) {
-      throw new Error('The paginated check data belongs to another commit')
-    }
-    if (page.repository?.pullRequest?.baseRefName !== baseRefName) {
-      return UNVERIFIED_BASE
-    }
-    if (page.node.statusCheckRollup === null) {
-      throw new Error('The paginated check rollup is unavailable')
-    }
-
-    checkResults.push(...page.node.statusCheckRollup.contexts.nodes)
-    pageInfo = page.node.statusCheckRollup.contexts.pageInfo
-    if (!pageInfo) {
-      throw new Error('The paginated check response has no page info')
-    }
+  const page = prechecksGraphqlContextsPageResult(
+    await graphqlAllowingInaccessibleApps(octokit, query, {
+      commitId: commit.id,
+      cursor,
+      owner: repo.owner,
+      name: repo.repo,
+      number: pullRequestNumber
+    })
+  )
+  if (!page.node) {
+    throw new Error('The paginated commit node is unavailable')
   }
-
-  return checkResults
+  if (page.node.id !== commit.id || page.node.oid !== commit.oid) {
+    throw new Error('The paginated check data belongs to another commit')
+  }
+  if (page.repository?.pullRequest?.baseRefName !== baseRefName) {
+    return UNVERIFIED_BASE
+  }
+  return page.node
 }
 
 // A helper function to filter out ignored checks and return the combined status of the remaining checks
@@ -1356,18 +1705,14 @@ export function filterChecks(
   checks: 'all' | 'required' | readonly string[],
   checkResults: readonly RawCheckResult[],
   ignoredChecks: readonly string[],
-  required: boolean
+  required: boolean,
+  onSelectedCheck?: (check: RawCheckResult) => void
 ): {message: string; status: 'FAILURE' | 'MISSING' | 'PENDING' | 'SUCCESS'} {
   const healthyCheckStatuses = ['SUCCESS', 'SKIPPED', 'NEUTRAL']
-  checkResults = latestCheckResults(checkResults, check => {
-    const name = checkName(check)
-    const included =
-      typeof checks === 'string' ||
-      checks.length === 0 ||
-      checks.some(checkName => checkName === name)
-    const ignored = ignoredChecks.some(ignoredCheck => ignoredCheck === name)
-    return included && !ignored && (!required || check.isRequired)
-  })
+  checkResults = latestCheckResults(
+    checkResults,
+    checkSelection(checks, ignoredChecks, required)
+  )
 
   const checksDisplay = typeof checks === 'string' ? checks : checks.join(',')
   core.debug(`filterChecks() - checks: ${checksDisplay}`)
@@ -1435,6 +1780,10 @@ export function filterChecks(
       return !isIgnored && (required ? check.isRequired : true)
     })
 
+  if (onSelectedCheck !== undefined) {
+    filteredChecks.forEach(onSelectedCheck)
+  }
+
   // Determine if all remaining checks are in a healthy state
   const unhealthyChecks = filteredChecks.filter(
     check => !healthyCheckStatuses.some(status => status === checkStatus(check))
@@ -1461,6 +1810,22 @@ export function filterChecks(
       ? 'one or more checks are pending'
       : 'one or more checks did not pass',
     status: allPending ? 'PENDING' : 'FAILURE'
+  }
+}
+
+function checkSelection(
+  checks: CommitCheckPolicy['checks'],
+  ignoredChecks: readonly string[],
+  required: boolean
+): (check: RawCheckResult) => boolean {
+  return check => {
+    const name = checkName(check)
+    const included =
+      typeof checks === 'string' ||
+      checks.length === 0 ||
+      checks.some(checkName => checkName === name)
+    const ignored = ignoredChecks.some(ignoredCheck => ignoredCheck === name)
+    return included && !ignored && (!required || check.isRequired)
   }
 }
 
@@ -1501,12 +1866,15 @@ function validateCheckResult(check: RawCheckResult): void {
   }
 }
 
-function checkTimestamp(check: RawCheckResult): number {
-  const value = isCheckRun(check)
+function checkTimestampValue(check: RawCheckResult): string | null | undefined {
+  return isCheckRun(check)
     ? (check.startedAt ?? check.completedAt)
-    : 'updatedAt' in check
-      ? (check.updatedAt ?? check.createdAt)
-      : undefined
+    : (('updatedAt' in check ? check.updatedAt : undefined) ??
+        ('createdAt' in check ? check.createdAt : undefined))
+}
+
+function checkTimestamp(check: RawCheckResult): number {
+  const value = checkTimestampValue(check)
   if (value === undefined || value === null) {
     throw new Error('A duplicate check result is missing its timestamp')
   }
@@ -1523,6 +1891,57 @@ function checkDatabaseId(check: RawCheckResult): number | null {
 
 function checkNodeId(check: RawCheckResult): string | undefined {
   return 'id' in check ? check.id : undefined
+}
+
+// Reconcile overlapping pages before deciding which Apps we need to identify.
+// Keep disagreements until we know whether that run could affect the decision.
+function confirmationCheckEvidence(
+  reported: readonly RawCheckResult[],
+  confirmationRuns: ReadonlyMap<string, ConfirmationCheckRun>,
+  selected: (check: RawCheckResult) => boolean,
+  boundNames: ReadonlySet<string>
+): {checks: RawCheckResult[]; needsApp: ReadonlySet<CheckRunResult>} {
+  const byNode = new Map<string | symbol, RawCheckResult>()
+  const conflicts = new Set<RawCheckResult>()
+  for (const check of reported) {
+    validateCheckResult(check)
+    const id = checkNodeId(check)
+    const key = id === undefined || id === '' ? Symbol() : id
+    const previous = byNode.get(key)
+    if (previous === undefined) {
+      byNode.set(key, check)
+      continue
+    }
+
+    const before = isCheckRun(previous) ? checkIntegrationId(previous) : null
+    const now = isCheckRun(check) ? checkIntegrationId(check) : null
+    if (
+      previous.isRequired !== check.isRequired ||
+      checkStatus(previous) !== checkStatus(check) ||
+      checkName(previous) !== checkName(check) ||
+      checkDatabaseId(previous) !== checkDatabaseId(check) ||
+      (before !== null && now !== null && before !== now)
+    ) {
+      conflicts.add(previous).add(check)
+    }
+    // Preserve a visible App, but never infer the App of a different run.
+    if (before === null) byNode.set(key, check)
+  }
+  const checks = [...byNode.values()]
+  const needsApp = confirmationRunsNeedingApp(
+    confirmationRuns,
+    new Set([...checks, ...conflicts]),
+    selected,
+    boundNames
+  )
+  for (const check of conflicts) {
+    if (selected(check) || (isCheckRun(check) && needsApp.has(check))) {
+      throw new Error(
+        `Conflicting results for the same check: ${checkIdentity(check)}`
+      )
+    }
+  }
+  return {checks, needsApp}
 }
 
 export function latestCheckResults(

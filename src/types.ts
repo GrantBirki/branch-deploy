@@ -260,6 +260,11 @@ export interface PrecheckFailure {
   readonly status: false
 }
 
+export interface ConfirmationCiResult {
+  readonly commitStatus: string | null
+  readonly failure?: string
+}
+
 export interface PrecheckSuccess {
   readonly baseRef: string
   readonly expectNoStack?: boolean
@@ -268,6 +273,7 @@ export interface PrecheckSuccess {
   readonly isFork: boolean
   readonly message: string
   readonly noopMode: boolean
+  readonly recheckCi?: () => Promise<ConfirmationCiResult>
   readonly ref: string
   readonly sha: string
   readonly stack?: PrStackSnapshot

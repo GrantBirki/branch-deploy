@@ -748,7 +748,10 @@ function routeGraphql(
     ) {
       throw new Error('unexpected paginated prechecks GraphQL variables')
     }
-    const cursor = requireString(variables, 'cursor')
+    const cursor =
+      variables['cursor'] === null
+        ? 0
+        : Number(requireString(variables, 'cursor'))
     return {
       status: 200,
       value: {
@@ -757,7 +760,7 @@ function routeGraphql(
           node: {
             id: prechecksCommitId(state, number),
             oid: pull.graphqlCommitOid ?? pull.pullRequest.headSha,
-            statusCheckRollup: checkRollup(pull, Number(cursor))
+            statusCheckRollup: checkRollup(pull, cursor)
           }
         }
       }
@@ -1168,7 +1171,9 @@ function routeIssues(
           const reaction = createReaction(
             state,
             commentId,
-            state.confirmationReaction
+            typeof state.confirmationReaction === 'function'
+              ? state.confirmationReaction()
+              : state.confirmationReaction
           )
           return {
             status: 200,
