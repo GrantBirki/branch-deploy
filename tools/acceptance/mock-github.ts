@@ -8,6 +8,7 @@ import {
 import type {
   MockBranch,
   MockCommit,
+  MockCommitChecks,
   MockDeployment,
   MockDeploymentStatus,
   MockFault,
@@ -191,6 +192,7 @@ export function createMockState(): MockGitHubState {
     blobs: new Map(),
     branchRules: [],
     branches,
+    checksByCommit: new Map(),
     comments: [
       {
         body: '.deploy',
@@ -398,7 +400,8 @@ function pullResponse(state: MockGitHubState): unknown {
   }
 }
 
-function checkRollup(state: MockPullRequestChecks, start = 0): unknown {
+function checkRollup(state: MockCommitChecks, start = 0): unknown {
+  state.beforeCheckPage?.(start)
   if (!state.rollupAvailable) {
     return undefined
   }
@@ -471,13 +474,11 @@ function prechecksBaseRef(pull: MockPrechecksPull): string {
   return pull.baseRefResponses.shift() ?? pull.pullRequest.baseRef
 }
 
-function prechecksCommitId(state: MockGitHubState, number: number): string {
-  return number === state.pullRequest.number
-    ? 'C_acceptance'
-    : `C_acceptance_${String(number)}`
-}
-
-function prechecksGraphql(state: MockPrechecksPull, commitId: string): unknown {
+function prechecksGraphql(
+  state: MockPrechecksPull,
+  checksByCommit: MockGitHubState['checksByCommit']
+): unknown {
+  const oid = state.graphqlCommitOid ?? state.pullRequest.headSha
   return {
     data: {
       repository: {
@@ -492,9 +493,11 @@ function prechecksGraphql(state: MockPrechecksPull, commitId: string): unknown {
             nodes: [
               {
                 commit: {
-                  id: commitId,
-                  oid: state.graphqlCommitOid ?? state.pullRequest.headSha,
-                  statusCheckRollup: checkRollup(state)
+                  id: `C_${oid}`,
+                  oid,
+                  statusCheckRollup: checkRollup(
+                    checksByCommit.get(oid) ?? state
+                  )
                 }
               }
             ]
@@ -733,7 +736,7 @@ function routeGraphql(
     }
     return {
       status: 200,
-      value: prechecksGraphql(pull, prechecksCommitId(state, number))
+      value: prechecksGraphql(pull, state.checksByCommit)
     }
   }
   if (
@@ -742,10 +745,12 @@ function routeGraphql(
   ) {
     const number = requireNumber(variables, 'number')
     const pull = prechecksPull(state, number)
-    if (
-      pull === undefined ||
-      requireString(variables, 'commitId') !== prechecksCommitId(state, number)
-    ) {
+    const commitId = requireString(variables, 'commitId')
+    const oid = commitId.slice(2)
+    const checks =
+      state.checksByCommit.get(oid) ??
+      (pull?.pullRequest.headSha === oid ? pull : undefined)
+    if (pull === undefined || checks === undefined) {
       throw new Error('unexpected paginated prechecks GraphQL variables')
     }
     const cursor =
@@ -758,9 +763,9 @@ function routeGraphql(
         data: {
           repository: {pullRequest: {baseRefName: prechecksBaseRef(pull)}},
           node: {
-            id: prechecksCommitId(state, number),
-            oid: pull.graphqlCommitOid ?? pull.pullRequest.headSha,
-            statusCheckRollup: checkRollup(pull, cursor)
+            id: commitId,
+            oid,
+            statusCheckRollup: checkRollup(checks, cursor)
           }
         }
       }

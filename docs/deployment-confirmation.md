@@ -33,11 +33,9 @@ The only reaction (👍 or 👎) that will be considered is the first reaction f
 
 ### Confirming a Deployment 👍
 
-If CI is enabled for your pull request deployment, Branch Deploy checks it again on the exact commit you confirmed. If a selected check is no longer healthy, disappears, or can't be verified, no deployment starts. Once CI is healthy, post a fresh `.deploy` (or `.noop`) to try again.
+For a pull request deployment with CI enabled, we [check CI](./checks.md) again on the exact commit you confirmed. We continue only if the same selected checks still pass. Repositories without CI and workflows that deploy before merging still work as before. CI can still change after we check.
 
-Branch Deploy accepts the original check run or a newer healthy run from the same GitHub App. We apply the same rule to checks that become required while we wait. If GitHub hides the App or gives us conflicting results, we stop unless we can verify the checks that matter to this deployment. For legacy commit statuses, we can verify that a status is the same or newer, but not which App sent it.
-
-The recheck follows your [existing CI settings](./checks.md), so repositories without CI and deploy-before-merge workflows still work as before. CI can still change after this final check.
+We stop if a selected check appears, disappears, or is replaced, even by a passing rerun. We also stop if GitHub returns overlapping pages of checks, since we may have missed one. Once the checks settle, post a fresh `.deploy` or `.noop` and confirm the commit it shows. Don't rerun the deployment workflow.
 
 ![confirm](./assets/deployment-approved.png)
 

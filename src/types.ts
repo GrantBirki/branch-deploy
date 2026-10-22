@@ -263,6 +263,7 @@ export interface PrecheckFailure {
 export interface ConfirmationCiResult {
   readonly commitStatus: string | null
   readonly failure?: string
+  readonly checksChanged?: true
 }
 
 export interface PrecheckSuccess {

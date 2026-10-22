@@ -1650,7 +1650,6 @@ test('does not start a deployment if CI turns red while awaiting confirmation', 
   const createComment = mock.method(octokit.rest.issues, 'createComment')
   recheckCiMock.mock.mockImplementation(() => {
     assertCalledTimes(deploymentConfirmationMock, 1)
-    assert.strictEqual(pullRefReads, 1)
     return Promise.resolve({commitStatus: 'FAILURE', failure})
   })
 
@@ -1666,6 +1665,7 @@ test('does not start a deployment if CI turns red while awaiting confirmation', 
   })
   assertCalledTimes(recheckCiMock, 1)
   assertCalledWith(setOutputMock, 'commit_status', 'FAILURE')
+  assert.strictEqual(pullRefReads, 0)
   assertNotCalled(createComment)
   assertNotCalledWith(setOutputMock, 'continue', 'true')
   assertNotCalledWith(setOutputMock, 'context', String)
@@ -1681,8 +1681,42 @@ test('does not start a deployment if CI turns red while awaiting confirmation', 
   const message = actionStatusMock.mock.calls.at(-1)?.arguments[0].message ?? ''
   assert.match(message, /no deployment was started/i)
   assert.ok(!message.includes(checkName))
-  assert.match(message, /review the workflow logs/i)
+  assert.match(message, /once the checks are passing and visible/i)
+  assert.ok(message.includes('https://github.com/corp/test/actions/runs/12345'))
   assertCalledWith(setFailedMock, failure)
+})
+
+test('does not announce a deployment if the PR head moves during the CI recheck', async () => {
+  setEnv('INPUT_DEPLOYMENT_CONFIRMATION', 'true')
+  const createComment = mock.method(octokit.rest.issues, 'createComment')
+  recheckCiMock.mock.mockImplementation(() => {
+    liveRefSha = 'new-commit'
+    return Promise.resolve({commitStatus: 'SUCCESS'})
+  })
+
+  assert.strictEqual(await run(), 'failure')
+  assertCalledWith(setOutputMock, 'reason_code', 'ref_changed')
+  assertNotCalled(createComment)
+  assertNotCalled(createDeploymentMock)
+  assertCalledTimes(unlockIfUnchangedMock, 1)
+  const message = actionStatusMock.mock.calls.at(-1)?.arguments[0].message ?? ''
+  assert.match(message, /no deployment was started/i)
+})
+
+test('asks for a new command if passing checks were replaced during confirmation', async () => {
+  setEnv('INPUT_DEPLOYMENT_CONFIRMATION', 'true')
+  recheckCiMock.mock.mockImplementation(() =>
+    Promise.resolve({
+      commitStatus: 'UNAVAILABLE',
+      failure: 'CI checks changed',
+      checksChanged: true
+    })
+  )
+
+  assert.strictEqual(await run(), 'failure')
+  const message = actionStatusMock.mock.calls.at(-1)?.arguments[0].message ?? ''
+  assert.match(message, /new deployment command and confirm the commit/i)
+  assertNotCalled(createDeploymentMock)
 })
 
 test('preserves the CI refusal and a sticky lock if it cannot post the refusal', async () => {

@@ -761,28 +761,24 @@ async function continueDeployment(
     logUrl
   )
   if (confirmationFailure !== null) return confirmationFailure
-  const earlyRefFailure = await changedRefOutcome(
-    request,
-    ready,
-    lease,
-    deploymentType
-  )
-  if (earlyRefFailure !== null) return earlyRefFailure
 
-  // Confirmation approves the request, not the CI result from before the wait.
   if (precheck.recheckCi !== undefined) {
-    const {commitStatus, failure} = await precheck.recheckCi()
+    const {commitStatus, failure, checksChanged} = await precheck.recheckCi()
     setActionOutput('commit_status', commitStatus)
     if (failure !== undefined) {
+      const recovery =
+        checksChanged === true
+          ? 'The selected CI checks changed while we waited. Post a new deployment command and confirm the commit it shows.'
+          : 'Branch Deploy could not verify that all selected CI checks still pass. Once the checks are passing and visible to Branch Deploy, post a new deployment command.'
       const message = dedent(`
         ### Deployment stopped after confirmation
 
-        No deployment was started. Branch Deploy could not verify that all selected CI checks still passed.
+        No deployment was started. ${recovery}
 
-        Review the workflow logs, then post a new deployment command once CI passes.
+        [View the workflow run](${logUrl}) for details.
       `)
       saveActionState('bypass', 'true')
-      await lease.cleanup('because CI did not pass after confirmation')
+      await lease.cleanup('after the CI recheck stopped the deployment')
       try {
         await actionStatus({context, octokit, reactionId, message})
       } catch (error) {
@@ -802,6 +798,15 @@ async function continueDeployment(
       })
     }
   }
+
+  // The ref can move while we recheck CI. Verify it before announcing the deployment.
+  const earlyRefFailure = await changedRefOutcome(
+    request,
+    ready,
+    lease,
+    deploymentType
+  )
+  if (earlyRefFailure !== null) return earlyRefFailure
 
   const deploymentStartTime = timestamp()
   core.debug(`deployment_start_time: ${deploymentStartTime}`)
