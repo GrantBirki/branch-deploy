@@ -434,6 +434,7 @@ function additionalCheckPage(
     readonly baseRefName?: string
     readonly id?: string
     readonly oid?: string
+    readonly state?: string
   } = {}
 ): PrechecksGraphqlContextsPageResult {
   return {
@@ -442,7 +443,9 @@ function additionalCheckPage(
       id: overrides.id ?? 'commit-node',
       oid: overrides.oid ?? 'abc123',
       statusCheckRollup:
-        nodes === null ? null : {contexts: {nodes, pageInfo}, state: 'FAILURE'}
+        nodes === null
+          ? null
+          : {contexts: {nodes, pageInfo}, state: overrides.state ?? 'FAILURE'}
     }
   }
 }
@@ -2191,38 +2194,51 @@ const CONFIRMED_CI = {
 } as const
 const MORE_CHECKS = {hasNextPage: true, endCursor: 'more'} as const
 
-for (const insertedFailure of [false, true]) {
-  const scenario = insertedFailure
-    ? 'stops when a new failing check shifts the second page'
-    : 'accepts the same 101 passing checks across two pages'
-  test('confirmation ' + scenario, async () => {
+for (const [change, selection, expected] of [
+  ['none', 'all', 'SUCCESS'],
+  ['check inserted before cursor', 'all', 'UNAVAILABLE'],
+  ['rollup changed between pages', 'all', 'UNAVAILABLE'],
+  ['rollup changed between pages', 'empty checks', 'UNAVAILABLE'],
+  ['rollup changed between pages', 'ignore first', 'SUCCESS'],
+  ['rollup changed between pages', 'required', 'SUCCESS'],
+  ['rollup changed between pages', 'named', 'SUCCESS']
+] as const) {
+  test(`confirmation reads 101 checks: ${change}, ${selection}`, async () => {
     const checks = Array.from({length: 101}, (_, index) => {
       const name = 'green-' + String(index + 1).padStart(3, '0')
-      return {...CONFIRMED_CI, databaseId: index + 1, id: 'CR_' + name, name}
+      return {
+        ...CONFIRMED_CI,
+        databaseId: index + 1,
+        id: 'CR_' + name,
+        isRequired: index > 0,
+        name
+      }
     })
+    if (selection === 'empty checks') data.inputs.checks = []
+    if (selection === 'ignore first') data.inputs.ignored_checks = ['green-001']
+    if (selection === 'required') data.inputs.checks = 'required'
+    if (selection === 'named') data.inputs.checks = ['green-101']
+
     const firstPage = checks.slice(0, 100)
-    // Inserting a check before the cursor repeats green-100 and hides the failure.
-    const afterPageOne = insertedFailure
-      ? [
-          {...CONFIRMED_CI, name: 'aaa-new-failure', conclusion: 'FAILURE'},
-          ...checks
-        ]
-      : checks
+    // Inserting a passing check before the cursor repeats green-100 without changing the rollup.
+    const afterPageOne =
+      change === 'check inserted before cursor'
+        ? [{...CONFIRMED_CI, name: 'aaa-new-check'}, ...checks]
+        : checks
+    // If green-001 fails after page one was read, no check is repeated or omitted.
+    const state =
+      change === 'rollup changed between pages' ? 'FAILURE' : 'SUCCESS'
     mockCheckPages(
       initialCheckPage(firstPage, MORE_CHECKS, 'SUCCESS'),
-      additionalCheckPage(checks.slice(100)),
-      additionalCheckPage(firstPage, MORE_CHECKS),
-      additionalCheckPage(afterPageOne.slice(100))
+      additionalCheckPage(checks.slice(100), LAST_PAGE, {state: 'SUCCESS'}),
+      additionalCheckPage(firstPage, MORE_CHECKS, {state: 'SUCCESS'}),
+      additionalCheckPage(afterPageOne.slice(100), LAST_PAGE, {state})
     )
 
     const recheckCi = await prepareConfirmationCiRecheck()
     const result = await recheckCi()
-    assert.equal(
-      result.commitStatus,
-      insertedFailure ? 'UNAVAILABLE' : 'SUCCESS',
-      result.failure
-    )
-    assert.equal(Boolean(result.failure), insertedFailure)
+    assert.equal(result.commitStatus, expected, result.failure)
+    assert.equal(Boolean(result.failure), expected === 'UNAVAILABLE')
     assertCalledTimes(graphQLOK, 4)
     assertCalledTimes(getCheckRunMock, 0)
   })
@@ -2353,6 +2369,9 @@ for (const [description, id, appId, expected, lookups, selectedId = 125] of [
     'confirmation with an optional hidden run of the same name: ' + description,
     async () => {
       const required = {...CONFIRMED_CI, databaseId: selectedId}
+      loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+        Promise.resolve([{context: required.name, appId: null}])
+      )
       const optional = {
         ...HIDDEN_CHECK,
         id: 'CR_' + String(id),
@@ -2388,6 +2407,45 @@ for (const [description, id, appId, expected, lookups, selectedId = 125] of [
     }
   )
 }
+
+test('confirmation accepts unchanged runs when REST identifies the newer run as the same App', async () => {
+  const checks = [
+    {...CONFIRMED_CI, databaseId: 120, id: 'CR_120'},
+    HIDDEN_CHECK
+  ]
+  getCheckRunMock.mock.mockImplementation(() =>
+    Promise.resolve({data: VISIBLE_CHECK_RUN})
+  )
+
+  const result = await confirmationCi(
+    checks,
+    additionalCheckPage(checks, LAST_PAGE, {state: 'SUCCESS'})
+  )
+  assert.deepEqual(result, {commitStatus: 'SUCCESS'})
+  assert.deepEqual(
+    getCheckRunMock.mock.calls.map(call => call.arguments[0]?.check_run_id),
+    [HIDDEN_CHECK.databaseId, HIDDEN_CHECK.databaseId]
+  )
+})
+
+test('confirmation accepts required test when only an older lint result is marked required', async () => {
+  data.inputs.checks = 'required'
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.resolve([{context: 'test', appId: null}])
+  )
+  const lint = {...CONFIRMED_CI, name: 'lint', databaseId: 120, id: 'CR_120'}
+  const checks = [
+    {...CONFIRMED_CI, name: 'test'},
+    lint,
+    {...lint, databaseId: 123, id: 'CR_123', isRequired: false}
+  ]
+
+  const result = await confirmationCi(
+    checks,
+    additionalCheckPage(checks, LAST_PAGE, {state: 'SUCCESS'})
+  )
+  assert.deepEqual(result, {commitStatus: 'SUCCESS'})
+})
 
 for (const [scenario, optionalApp, selectedId, expectedCalls] of [
   ['only the selected App is hidden', CONFIRMED_CI.checkSuite, 123, []],

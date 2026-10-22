@@ -41103,28 +41103,31 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
         if (statusCheckRollup === undefined) {
             throw new Error('The GraphQL response did not include a check rollup');
         }
-        const runs = await loadAllCheckResults({
+        const checkResults = await loadAllCheckResults({
             ...source,
-            statusCheckRollup
+            statusCheckRollup,
+            verifyRollupState: afterConfirmation === true &&
+                (checks === 'all' || checks.length === 0) &&
+                ignoredChecks.length === 0
         });
-        if ('kind' in runs)
-            return runs;
-        const required = checks === 'required';
-        const selected = checkSelection(checks, ignoredChecks, required);
-        let competingRuns;
+        if ('kind' in checkResults)
+            return checkResults;
         if (afterConfirmation === true) {
             // Overlapping pages can hide a check inserted before the cursor. Reject the
             // read even if the repeated check is unchanged or isn't selected for deployment.
-            const ids = runs.map(confirmationCheckNodeId);
+            const ids = checkResults.map(confirmationCheckNodeId);
             if (new Set(ids).size !== ids.length) {
                 throw new Error('A check appeared twice while reading CI after confirmation');
             }
-            competingRuns = confirmationRunsNeedingApp(runs, selected);
         }
-        // Resolve identities before grouping runs, including a hidden, now-optional
-        // result that could supersede a required check during confirmation.
+        // Resolve competing Apps on both reads so identical runs produce the same selection.
+        const required = checks === 'required';
+        const selected = checkSelection(checks, ignoredChecks, required);
+        const competingRuns = selectedChecks === undefined
+            ? undefined
+            : confirmationRunsNeedingApp(checkResults, selected);
         if (stackRequiredChecks !== null || competingRuns !== undefined) {
-            for (const [index, check] of runs.entries()) {
+            for (const [index, check] of checkResults.entries()) {
                 if (isCheckRun(check) &&
                     checkIntegrationId(check) === null &&
                     !ignoredChecks.includes(check.name) &&
@@ -41167,24 +41170,11 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
                         run.app.id < 1) {
                         throw new Error('Cannot verify required check App: check run identity, SHA, name, result, or App did not match');
                     }
-                    runs[index] = {
+                    checkResults[index] = {
                         ...check,
                         checkSuite: { app: { databaseId: run.app.id } }
                     };
                 }
-            }
-        }
-        let checkResults = runs;
-        if (competingRuns !== undefined) {
-            const selectedSources = new Set(runs.filter(selected).map(checkIdentity));
-            checkResults = latestCheckResults(runs, selected);
-            if (checkResults.some(check => !selected(check) && selectedSources.has(checkIdentity(check)))) {
-                const message = 'A newer check result no longer satisfies the required CI check.';
-                return {
-                    commitStatus: 'MISSING',
-                    filterChecksResult: { message, status: 'MISSING' },
-                    kind: 'missing'
-                };
             }
         }
         const missing = missingRequiredStackChecks({
@@ -41279,7 +41269,7 @@ function missingRequiredStackChecks({ checks, checkResults, ignoredChecks, requi
         kind: 'missing'
     };
 }
-async function loadAllCheckResults({ statusCheckRollup, ...source }) {
+async function loadAllCheckResults({ statusCheckRollup, verifyRollupState, ...source }) {
     const checkResults = [...statusCheckRollup.contexts.nodes];
     let pageInfo = statusCheckRollup.contexts.pageInfo;
     const seenCursors = new Set();
@@ -41301,6 +41291,12 @@ async function loadAllCheckResults({ statusCheckRollup, ...source }) {
             return page;
         if (page.statusCheckRollup === null) {
             throw new Error('The paginated check rollup is unavailable');
+        }
+        // An earlier page's check can change without moving. When all checks count,
+        // a changed rollup tells us these pages are inconsistent; it isn't a CI verdict.
+        if (verifyRollupState &&
+            page.statusCheckRollup.state !== statusCheckRollup.state) {
+            throw new Error('The overall CI status changed while reading check pages');
         }
         checkResults.push(...page.statusCheckRollup.contexts.nodes);
         pageInfo = page.statusCheckRollup.contexts.pageInfo;

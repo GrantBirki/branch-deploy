@@ -2262,6 +2262,7 @@ const scenarios = [
         ['failing run', 'FAILURE'],
         ['replacement run', 'UNAVAILABLE'],
         ['shifted check pages', 'UNAVAILABLE'],
+        ['page-one check fails before page two', 'UNAVAILABLE'],
         ['moved pull request head', 'SUCCESS']
       ] as const) {
         await withMockGitHub(change, async context => {
@@ -2278,7 +2279,9 @@ const scenarios = [
           state.rollupContexts = [check]
           const movedHead = change === 'moved pull request head'
           const shiftedPages = change === 'shifted check pages'
-          if (shiftedPages) {
+          const paginated =
+            shiftedPages || change === 'page-one check fails before page two'
+          if (paginated) {
             state.rollupContexts = Array.from({length: 101}, (_, i) => ({
               ...check,
               databaseId: i + 1,
@@ -2294,20 +2297,23 @@ const scenarios = [
                   headSha: ACCEPTANCE_SHAS.default
                 }
               }
-            } else if (shiftedPages) {
+            } else if (paginated) {
               state.beforeCheckPage = start => {
                 if (start !== 100) return
-                // The new failure sorts before page one. Page two now repeats check 100.
-                state.rollupState = 'FAILURE'
-                state.rollupContexts = [
-                  {
-                    ...check,
-                    conclusion: 'FAILURE',
-                    databaseId: 102,
-                    name: 'aaa-new-failure'
-                  },
-                  ...state.rollupContexts
-                ]
+                if (shiftedPages) {
+                  // A new passing check sorts first. Page two repeats check 100, with the rollup still green.
+                  state.rollupContexts = [
+                    {...check, databaseId: 102, name: 'aaa-new-check'},
+                    ...state.rollupContexts
+                  ]
+                } else {
+                  // Check 1 fails after page one was returned. No check moves or appears twice.
+                  state.rollupState = 'FAILURE'
+                  state.rollupContexts = state.rollupContexts.map(
+                    (run, index) =>
+                      index === 0 ? {...run, conclusion: 'FAILURE'} : run
+                  )
+                }
               }
             } else {
               const conclusion = expected === 'FAILURE' ? 'FAILURE' : 'SUCCESS'
