@@ -2256,13 +2256,16 @@ const scenarios = [
       })
   },
   {
-    name: 'confirmation stops before announcing a deployment if checks or the head change',
+    name: 'confirmation verifies selected checks and the head before announcing a deployment',
     run: async () => {
-      for (const [change, expected] of [
+      for (const [change, expected, pagedChecks] of [
         ['failing run', 'FAILURE'],
         ['replacement run', 'UNAVAILABLE'],
         ['shifted check pages', 'UNAVAILABLE'],
-        ['page-one check fails before page two', 'UNAVAILABLE'],
+        ['page-one check fails before page two', 'FAILURE', 'all'],
+        ['required check fails between pages', 'FAILURE', 'required'],
+        ['only an optional check fails between pages', 'SUCCESS', 'required'],
+        ['failure moves between pages on both reads', 'UNAVAILABLE', 'all'],
         ['moved pull request head', 'SUCCESS']
       ] as const) {
         await withMockGitHub(change, async context => {
@@ -2275,18 +2278,35 @@ const scenarios = [
             name: 'untrusted-check-name \`[link](#untrusted-check-link)\`',
             type: 'check-run'
           } as const
+          const supersededFailure = {
+            ...check,
+            conclusion: 'FAILURE',
+            databaseId: 1,
+            name: 'ci-003'
+          } as const
           state.pullRequest = {...state.pullRequest, merged: false}
           state.rollupContexts = [check]
           const movedHead = change === 'moved pull request head'
           const shiftedPages = change === 'shifted check pages'
-          const paginated =
-            shiftedPages || change === 'page-one check fails before page two'
+          const paginated = shiftedPages || pagedChecks !== undefined
+          const optional = pagedChecks === 'required' && expected === 'SUCCESS'
+          const movingFailure =
+            change === 'failure moves between pages on both reads'
+          const pagesAfterConfirmation: number[] = []
           if (paginated) {
             state.rollupContexts = Array.from({length: 101}, (_, i) => ({
               ...check,
-              databaseId: i + 1,
+              databaseId: i + 2,
+              isRequired: !optional || i !== 0,
               name: `ci-${String(i + 1).padStart(3, '0')}`
             }))
+            if (movingFailure) {
+              // The newer ci-003 passed. Its old failure cannot explain a red rollup.
+              state.rollupContexts = [
+                ...state.rollupContexts,
+                supersededFailure
+              ]
+            }
           }
           state.confirmationReaction = () => {
             assert.equal(requireMockLock(context, lock)['sticky'], false)
@@ -2299,7 +2319,8 @@ const scenarios = [
               }
             } else if (paginated) {
               state.beforeCheckPage = start => {
-                if (start !== 100) return
+                pagesAfterConfirmation.push(start)
+                if (start !== 100 && !movingFailure) return
                 if (shiftedPages) {
                   // A new passing check sorts first. Page two repeats check 100, with the rollup still green.
                   state.rollupContexts = [
@@ -2307,11 +2328,19 @@ const scenarios = [
                     ...state.rollupContexts
                   ]
                 } else {
-                  // Check 1 fails after page one was returned. No check moves or appears twice.
+                  // Check 1 fails after we read page one. If check 101 just recovered,
+                  // both pages look green even though the overall result stayed red.
+                  const failingCheck = movingFailure && start === 0 ? 100 : 0
                   state.rollupState = 'FAILURE'
                   state.rollupContexts = state.rollupContexts.map(
                     (run, index) =>
-                      index === 0 ? {...run, conclusion: 'FAILURE'} : run
+                      run === supersededFailure
+                        ? run
+                        : {
+                            ...run,
+                            conclusion:
+                              index === failingCheck ? 'FAILURE' : 'SUCCESS'
+                          }
                   )
                 }
               }
@@ -2324,17 +2353,30 @@ const scenarios = [
           }
 
           const inputs = {
+            checks: pagedChecks ?? 'all',
             deployment_confirmation: 'true',
             skip_completing: 'true'
           }
           const result = await runMain(context, inputs)
+          if (pagedChecks !== undefined) {
+            assert.deepEqual(pagesAfterConfirmation, [0, 100, 0, 100])
+          }
+          assertOutput(context, result, 'commit_status', expected)
+          if (optional) {
+            assertExit(context, result, 0)
+            assertReason(context, result, 'deployment_ready')
+            assert.equal(
+              requireDeployment(context).sha,
+              ACCEPTANCE_SHAS.feature
+            )
+            return
+          }
           assertExit(context, result, 1)
           assertReason(
             context,
             result,
             movedHead ? 'ref_changed' : 'prechecks_failed'
           )
-          assertOutput(context, result, 'commit_status', expected)
           assert.equal(result.output['continue'], undefined)
           assert.equal(result.output['context'], undefined)
           assertNoDeployment(context, result)

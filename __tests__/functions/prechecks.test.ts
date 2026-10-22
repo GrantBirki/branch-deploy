@@ -10,6 +10,7 @@ import type {PrStackRequiredCheck} from '../../src/functions/pr-stack-checks.ts'
 import {COLORS} from '../../src/functions/colors.ts'
 import type {
   BranchDeployContext,
+  CheckRunResult,
   GraphqlResponseErrorLike,
   PrecheckData,
   PrechecksGraphqlContextsPageResult,
@@ -2194,52 +2195,86 @@ const CONFIRMED_CI = {
 } as const
 const MORE_CHECKS = {hasNextPage: true, endCursor: 'more'} as const
 
+// The failing check at each page request, or null if all current checks pass.
+// A retry must start at page one. Only ci-001 is required.
+const CONFIRMATION_PAGE_FAILURES = {
+  unchanged: [null, null],
+  inserted: [null, 'insert'],
+  requiredFails: [null, 1, 1, 1],
+  optionalFails: [null, 2, 2, 2],
+  failureMoves: [101, 1, 1, 1],
+  rollupKeepsChanging: [null, 1, null, 1],
+  failureKeepsMoving: [101, 1, 101, 1]
+} as const
+
 for (const [change, selection, expected] of [
-  ['none', 'all', 'SUCCESS'],
-  ['check inserted before cursor', 'all', 'UNAVAILABLE'],
-  ['rollup changed between pages', 'all', 'UNAVAILABLE'],
-  ['rollup changed between pages', 'empty checks', 'UNAVAILABLE'],
-  ['rollup changed between pages', 'ignore first', 'SUCCESS'],
-  ['rollup changed between pages', 'required', 'SUCCESS'],
-  ['rollup changed between pages', 'named', 'SUCCESS']
+  ['unchanged', 'all', 'SUCCESS'],
+  ['inserted', 'all', 'UNAVAILABLE'],
+  ['requiredFails', 'required', 'FAILURE'],
+  ['requiredFails', 'named', 'FAILURE'],
+  ['requiredFails', 'ignore optional', 'FAILURE'],
+  ['optionalFails', 'required', 'SUCCESS'],
+  ['optionalFails', 'ignore optional', 'SUCCESS'],
+  ['failureMoves', 'all', 'FAILURE'],
+  ['failureMoves', 'empty checks', 'FAILURE'],
+  ['failureMoves', 'named', 'FAILURE'],
+  ['rollupKeepsChanging', 'required', 'UNAVAILABLE'],
+  ['failureKeepsMoving', 'all', 'UNAVAILABLE']
 ] as const) {
-  test(`confirmation reads 101 checks: ${change}, ${selection}`, async () => {
-    const checks = Array.from({length: 101}, (_, index) => {
-      const name = 'green-' + String(index + 1).padStart(3, '0')
+  test(`confirmation reads paginated checks: ${change}, ${selection}`, async () => {
+    const checks: CheckRunResult[] = Array.from({length: 101}, (_, index) => {
+      const name = 'ci-' + String(index + 1).padStart(3, '0')
       return {
         ...CONFIRMED_CI,
         databaseId: index + 1,
         id: 'CR_' + name,
-        isRequired: index > 0,
+        isRequired: index === 0,
         name
       }
     })
     if (selection === 'empty checks') data.inputs.checks = []
-    if (selection === 'ignore first') data.inputs.ignored_checks = ['green-001']
+    if (selection === 'ignore optional') data.inputs.ignored_checks = ['ci-002']
     if (selection === 'required') data.inputs.checks = 'required'
-    if (selection === 'named') data.inputs.checks = ['green-101']
+    if (selection === 'named') data.inputs.checks = ['ci-001']
 
-    const firstPage = checks.slice(0, 100)
-    // Inserting a passing check before the cursor repeats green-100 without changing the rollup.
-    const afterPageOne =
-      change === 'check inserted before cursor'
-        ? [{...CONFIRMED_CI, name: 'aaa-new-check'}, ...checks]
-        : checks
-    // If green-001 fails after page one was read, no check is repeated or omitted.
-    const state =
-      change === 'rollup changed between pages' ? 'FAILURE' : 'SUCCESS'
+    // A superseded optional failure cannot explain a red rollup for current checks.
+    if (change === 'failureMoves' && selection === 'named') {
+      const optional = {...HIDDEN_CHECK, name: 'optional', isRequired: false}
+      checks.push(
+        {...optional, id: 'CR_122', databaseId: 122, conclusion: 'FAILURE'},
+        optional
+      )
+    }
+
+    const reads = CONFIRMATION_PAGE_FAILURES[change]
+    const pages = reads.map((failedCheck, index) => {
+      const first = index % 2 === 0
+      const inserted = failedCheck === 'insert'
+      const nodes = inserted ? [CONFIRMED_CI, ...checks] : checks
+      const visible = first ? nodes.slice(0, 100) : nodes.slice(100)
+      return additionalCheckPage(
+        visible.map(check =>
+          check.databaseId === failedCheck
+            ? {...check, conclusion: 'FAILURE'}
+            : check
+        ),
+        first ? MORE_CHECKS : LAST_PAGE,
+        {state: failedCheck === null || inserted ? 'SUCCESS' : 'FAILURE'}
+      )
+    })
     mockCheckPages(
-      initialCheckPage(firstPage, MORE_CHECKS, 'SUCCESS'),
+      initialCheckPage(checks.slice(0, 100), MORE_CHECKS, 'SUCCESS'),
       additionalCheckPage(checks.slice(100), LAST_PAGE, {state: 'SUCCESS'}),
-      additionalCheckPage(firstPage, MORE_CHECKS, {state: 'SUCCESS'}),
-      additionalCheckPage(afterPageOne.slice(100), LAST_PAGE, {state})
+      ...pages
     )
-
     const recheckCi = await prepareConfirmationCiRecheck()
     const result = await recheckCi()
     assert.equal(result.commitStatus, expected, result.failure)
-    assert.equal(Boolean(result.failure), expected === 'UNAVAILABLE')
-    assertCalledTimes(graphQLOK, 4)
+    assert.equal(Boolean(result.failure), expected !== 'SUCCESS')
+    assert.deepEqual(
+      graphQLOK.mock.calls.slice(2).map(call => call.arguments[1]['cursor']),
+      reads.map((_, index) => (index % 2 === 0 ? null : MORE_CHECKS.endCursor))
+    )
     assertCalledTimes(getCheckRunMock, 0)
   })
 }

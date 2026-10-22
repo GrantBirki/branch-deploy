@@ -162,7 +162,13 @@ const UNVERIFIED_BASE = {
     '### ⚠️ Cannot proceed with deployment\n\nThe pull request base branch changed or could not be verified while checking reviews and CI. Confirm the target branch, then post a new deployment command.'
 } as const
 
+const INCONSISTENT_CHECK_PAGES = {
+  commitStatus: 'UNAVAILABLE',
+  kind: 'inconsistent-pages'
+} as const
+
 type CommitCheckEvaluation =
+  | typeof INCONSISTENT_CHECK_PAGES
   | typeof UNVERIFIED_BASE
   | {
       readonly commitStatus: string
@@ -1043,13 +1049,21 @@ async function recheckConfirmationCi(
   let commitStatus: string | null = 'UNAVAILABLE'
   for (const target of targets) {
     const selectedChecks = new Map<string, string>()
-    const check = await evaluateCommitChecks({
+    const request = {
       ...policy,
       ...target,
       afterConfirmation: true,
       selectedChecks,
       stackRequiredChecks
-    })
+    } as const
+    let check = await evaluateCommitChecks(request)
+    if (check.kind === 'inconsistent-pages') {
+      // Start at page one; combining pages from different reads could hide a failure.
+      core.info(
+        'CI changed between pages after confirmation. Reading the checks once more.'
+      )
+      check = await evaluateCommitChecks(request)
+    }
     const selectedPr = target === targets[0]
     if (selectedPr) commitStatus = check.commitStatus
     const subject = `CI for PR #${target.pullRequestNumber} at \`${String(target.commit?.oid)}\``
@@ -1151,10 +1165,7 @@ async function evaluateCommitChecks({
     const checkResults = await loadAllCheckResults({
       ...source,
       statusCheckRollup,
-      verifyRollupState:
-        afterConfirmation === true &&
-        (checks === 'all' || checks.length === 0) &&
-        ignoredChecks.length === 0
+      verifyRollupState: afterConfirmation === true
     })
     if ('kind' in checkResults) return checkResults
     if (afterConfirmation === true) {
@@ -1394,7 +1405,9 @@ async function loadAllCheckResults({
 }: CommitCheckPageSource & {
   readonly statusCheckRollup: StatusCheckRollup
   readonly verifyRollupState: boolean
-}): Promise<RawCheckResult[] | typeof UNVERIFIED_BASE> {
+}): Promise<
+  RawCheckResult[] | typeof INCONSISTENT_CHECK_PAGES | typeof UNVERIFIED_BASE
+> {
   const checkResults = [...statusCheckRollup.contexts.nodes]
   let pageInfo = statusCheckRollup.contexts.pageInfo
   const seenCursors = new Set<string>()
@@ -1419,16 +1432,28 @@ async function loadAllCheckResults({
       throw new Error('The paginated check rollup is unavailable')
     }
 
-    // An earlier page's check can change without moving. When all checks count,
-    // a changed rollup tells us these pages are inconsistent; it isn't a CI verdict.
+    // The rollup covers every check, not just the ones selected for deployment.
+    // Use it to spot inconsistent pages, never to reject an optional failure.
     if (
       verifyRollupState &&
       page.statusCheckRollup.state !== statusCheckRollup.state
     ) {
-      throw new Error('The overall CI status changed while reading check pages')
+      return INCONSISTENT_CHECK_PAGES
     }
     checkResults.push(...page.statusCheckRollup.contexts.nodes)
     pageInfo = page.statusCheckRollup.contexts.pageInfo
+  }
+
+  // A failure can move from a later page to one already read. Both rollups can
+  // stay red while every current check we received looks healthy. An older,
+  // superseded failure doesn't explain the rollup, and this isn't a policy check.
+  if (
+    verifyRollupState &&
+    seenCursors.size > 0 &&
+    statusCheckRollup.state !== 'SUCCESS' &&
+    latestCheckResults(checkResults, () => false).every(checkIsHealthy)
+  ) {
+    return INCONSISTENT_CHECK_PAGES
   }
 
   return checkResults
@@ -1530,7 +1555,6 @@ export function filterChecks(
   required: boolean,
   selectedChecks?: Map<string, string>
 ): {message: string; status: 'FAILURE' | 'MISSING' | 'PENDING' | 'SUCCESS'} {
-  const healthyCheckStatuses = ['SUCCESS', 'SKIPPED', 'NEUTRAL']
   checkResults = latestCheckResults(
     checkResults,
     checkSelection(checks, ignoredChecks, required)
@@ -1613,9 +1637,7 @@ export function filterChecks(
   }
 
   // Determine if all remaining checks are in a healthy state
-  const unhealthyChecks = filteredChecks.filter(
-    check => !healthyCheckStatuses.some(status => status === checkStatus(check))
-  )
+  const unhealthyChecks = filteredChecks.filter(check => !checkIsHealthy(check))
 
   // If no checks remain after filtering, default to SUCCESS
   if (filteredChecks.length === 0) {
@@ -1639,6 +1661,11 @@ export function filterChecks(
       : 'one or more checks did not pass',
     status: allPending ? 'PENDING' : 'FAILURE'
   }
+}
+
+function checkIsHealthy(check: RawCheckResult): boolean {
+  const status = checkStatus(check)
+  return status === 'SUCCESS' || status === 'SKIPPED' || status === 'NEUTRAL'
 }
 
 function checkSelection(
