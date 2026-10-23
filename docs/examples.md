@@ -32,7 +32,7 @@ Quick links below to jump to a specific branch-deploy example:
 
 ## Hardened Workflow Starting Point
 
-This is the recommended starting point for a new workflow that uses deployment credentials. It requires Branch Deploy `v12.1.0` or later and pins that release to its full commit SHA. Update both Branch Deploy references together when upgrading.
+Use this workflow when a deployment needs credentials. Replace `<FULL_RELEASE_COMMIT_SHA>` in both Branch Deploy steps with the same 40-character commit SHA from [this repository's releases](https://github.com/grantbirki/branch-deploy/releases). Choose a release that checks for required CI that hasn't reported yet and writes informational messages as plain log text.
 
 Before a runner starts, the `branch-deploy` job accepts pull request comments only from a repository `OWNER` or organization `MEMBER`. `COLLABORATOR` is deliberately omitted; add it to the allowlist only if outside collaborators should be able to request deployments. This field describes the commenter's association with the repository, not the pull request head, so Branch Deploy's secure `allow_forks: false` default remains the fork control and the Action still performs its repository-permission and request-admission checks.
 
@@ -46,6 +46,8 @@ The four jobs keep code trust separate from deployment authority:
 The example assumes that the protected default branch contains `.github/scripts/validate-candidate` and `.github/scripts/deploy-candidate`. The validation helper must inspect candidate content without executing candidate-controlled tools, providers, hooks, or package scripts. The deployment helper owns credential use and must fail before provider execution when the candidate violates policy.
 
 `.noop` runs `validate` and then `result`; it skips the credentialed `deploy` job. `.deploy` runs all four jobs and accepts only `production` as its target. Fork deployments are disabled, checkouts do not persist credentials, no cache or artifact crosses the boundary, and every candidate checkout uses the exact SHA admitted by Branch Deploy.
+
+Branch Deploy records the deployment for the selected commit. On the `deploy` job, `deployment: false` keeps GitHub from creating a second deployment for the workflow ref. Environment reviewers and wait timers still apply. If you use [custom deployment protection rules](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments#interaction-with-protection-rules), leave deployment creation enabled.
 
 ```yaml
 name: branch-deploy
@@ -84,7 +86,7 @@ jobs:
     steps:
       - name: branch-deploy
         id: branch-deploy
-        uses: grantbirki/branch-deploy@a7a7ea40a15a79a036322c2924ab74f5eded702c # v12.1.0
+        uses: grantbirki/branch-deploy@<FULL_RELEASE_COMMIT_SHA>
         with:
           environment_targets: production
           skip_completing: true
@@ -136,7 +138,9 @@ jobs:
           needs.validate.result == 'success' &&
           fromJSON(needs.branch-deploy.outputs.context).run_attempt == github.run_attempt }}
     runs-on: ubuntu-latest
-    environment: production
+    environment:
+      name: production
+      deployment: false
     concurrency:
       group: branch-deploy-production
       cancel-in-progress: false
@@ -189,7 +193,7 @@ jobs:
       pull-requests: write
     steps:
       - name: report result
-        uses: grantbirki/branch-deploy@a7a7ea40a15a79a036322c2924ab74f5eded702c # v12.1.0
+        uses: grantbirki/branch-deploy@<FULL_RELEASE_COMMIT_SHA>
         with:
           result_mode: true
           context: ${{ needs.branch-deploy.outputs.context }}
@@ -265,7 +269,9 @@ Use the [Terraform guidance above](#terraform) for pull request previews and dep
 
 Use the [four-job workflow](#hardened-workflow-starting-point) as the branch workflow. It checks out deployment helpers at `context.trusted_sha` and the proposed configuration at Branch Deploy's `sha` output. [Separate checkout directories](trusted-checkouts.md) keep those revisions clear, but code running in either directory can change both. Run pull request code on a different runner from the jobs that can apply changes or post the result.
 
-Set `sticky_locks: true` on the starting Branch Deploy step to keep the lock until merge. On the `deploy` job, use `group: terraform-production`, `queue: max`, and `cancel-in-progress: false` to match the merge workflow below. This puts both applies in the same queue and keeps `.unlock` responsive.
+On the starting Branch Deploy step, set `deployment_confirmation: true` to keep the confirmation prompt and `sticky_locks: true` to hold the lock until merge.
+
+On the `deploy` job, use `group: terraform-production`, `queue: max`, and `cancel-in-progress: false` to share the apply queue with the merge workflow below. If you need to stop a queued apply, cancel its workflow run before using `.unlock`. Releasing the lock doesn't cancel the queued job.
 
 ### `.github/workflows/deploy.yml`
 
