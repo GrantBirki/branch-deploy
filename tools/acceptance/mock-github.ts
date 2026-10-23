@@ -411,6 +411,15 @@ function checkRollup(state: MockCommitChecks, start = 0): unknown {
   return {
     state: state.rollupState,
     contexts: {
+      // GitHub reports counts for the entire connection on each page.
+      checkRunCountsByState: rollupStateCounts(
+        state.rollupContexts,
+        'check-run'
+      ),
+      statusContextCountsByState: rollupStateCounts(
+        state.rollupContexts,
+        'status-context'
+      ),
       nodes: state.rollupContexts
         .slice(start, start + 100)
         .map(rollupContextResponse),
@@ -423,6 +432,22 @@ function checkRollup(state: MockCommitChecks, start = 0): unknown {
       }
     }
   }
+}
+
+function rollupStateCounts(
+  contexts: readonly MockRollupContext[],
+  type: MockRollupContext['type']
+): readonly {state: string; count: number}[] {
+  const counts = new Map<string, number>()
+  for (const context of contexts) {
+    if (context.type !== type) continue
+    const state =
+      context.type === 'check-run'
+        ? (context.conclusion ?? 'IN_PROGRESS')
+        : context.state
+    counts.set(state, (counts.get(state) ?? 0) + 1)
+  }
+  return Array.from(counts, ([state, count]) => ({state, count}))
 }
 
 function rollupContextResponse(context: MockRollupContext): unknown {
@@ -440,6 +465,7 @@ function rollupContextResponse(context: MockRollupContext): unknown {
             : {databaseId: context.integrationId ?? 1}
       },
       conclusion: context.conclusion,
+      status: context.conclusion === null ? 'IN_PROGRESS' : 'COMPLETED',
       isRequired: context.isRequired,
       name: context.name
     }

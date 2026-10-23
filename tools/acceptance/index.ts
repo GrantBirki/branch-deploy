@@ -2258,7 +2258,7 @@ const scenarios = [
   {
     name: 'confirmation verifies selected checks and the head before announcing a deployment',
     run: async () => {
-      for (const [change, expected, pagedChecks] of [
+      for (const [change, expected, pagedChecks, optionalConclusion] of [
         ['failing run', 'FAILURE'],
         ['replacement run', 'UNAVAILABLE'],
         ['shifted check pages', 'UNAVAILABLE'],
@@ -2266,6 +2266,18 @@ const scenarios = [
         ['required check fails between pages', 'FAILURE', 'required'],
         ['only an optional check fails between pages', 'SUCCESS', 'required'],
         ['failure moves between pages on both reads', 'UNAVAILABLE', 'all'],
+        [
+          'required check fails with an optional failure already visible',
+          'FAILURE',
+          'required',
+          'FAILURE'
+        ],
+        [
+          'failure moves between pages with an optional check pending',
+          'UNAVAILABLE',
+          'required',
+          null
+        ],
         ['moved pull request head', 'SUCCESS']
       ] as const) {
         await withMockGitHub(change, async context => {
@@ -2284,14 +2296,20 @@ const scenarios = [
             databaseId: 1,
             name: 'ci-003'
           } as const
+          const unrelatedCheck = {
+            ...check,
+            conclusion: optionalConclusion ?? null,
+            databaseId: 103,
+            isRequired: false,
+            name: 'unrelated-check'
+          } as const
           state.pullRequest = {...state.pullRequest, merged: false}
           state.rollupContexts = [check]
           const movedHead = change === 'moved pull request head'
           const shiftedPages = change === 'shifted check pages'
           const paginated = shiftedPages || pagedChecks !== undefined
           const optional = pagedChecks === 'required' && expected === 'SUCCESS'
-          const movingFailure =
-            change === 'failure moves between pages on both reads'
+          const movingFailure = change.startsWith('failure moves between pages')
           const pagesAfterConfirmation: number[] = []
           if (paginated) {
             state.rollupContexts = Array.from({length: 101}, (_, i) => ({
@@ -2300,8 +2318,14 @@ const scenarios = [
               isRequired: !optional || i !== 0,
               name: `ci-${String(i + 1).padStart(3, '0')}`
             }))
+            if (optionalConclusion !== undefined) {
+              state.rollupState = optionalConclusion ?? 'PENDING'
+              state.rollupContexts = state.rollupContexts.map((run, index) =>
+                index === 1 ? unrelatedCheck : run
+              )
+            }
             if (movingFailure) {
-              // The newer ci-003 passed. Its old failure cannot explain a red rollup.
+              // Keep an older failed run in the counts without treating it as current.
               state.rollupContexts = [
                 ...state.rollupContexts,
                 supersededFailure
@@ -2329,12 +2353,12 @@ const scenarios = [
                   ]
                 } else {
                   // Check 1 fails after we read page one. If check 101 just recovered,
-                  // both pages look green even though the overall result stayed red.
+                  // neither page includes the current failure, even if another check isn't green.
                   const failingCheck = movingFailure && start === 0 ? 100 : 0
                   state.rollupState = 'FAILURE'
                   state.rollupContexts = state.rollupContexts.map(
                     (run, index) =>
-                      run === supersededFailure
+                      run === supersededFailure || run === unrelatedCheck
                         ? run
                         : {
                             ...run,
@@ -2358,10 +2382,10 @@ const scenarios = [
             skip_completing: 'true'
           }
           const result = await runMain(context, inputs)
+          assertOutput(context, result, 'commit_status', expected)
           if (pagedChecks !== undefined) {
             assert.deepEqual(pagesAfterConfirmation, [0, 100, 0, 100])
           }
-          assertOutput(context, result, 'commit_status', expected)
           if (optional) {
             assertExit(context, result, 0)
             assertReason(context, result, 'deployment_ready')
@@ -2410,6 +2434,52 @@ const scenarios = [
         })
       }
     }
+  },
+  {
+    name: 'confirmation allows a passing required check when a different App reports a same-named failure',
+    run: () =>
+      withMockGitHub('same check name, two hidden Apps', async context => {
+        const {state} = context
+        state.pullRequest = {...state.pullRequest, merged: false}
+        state.rollupState = 'FAILURE'
+        state.rollupContexts = [
+          ...[123, 122].map(id => {
+            const isRequired = id === 123
+            const conclusion = isRequired ? 'SUCCESS' : 'FAILURE'
+            state.checkRuns.set(id, {
+              id,
+              node_id: `CR_${String(id)}`,
+              name: 'ci',
+              head_sha: ACCEPTANCE_SHAS.feature,
+              conclusion: conclusion.toLowerCase(),
+              app: {id: isRequired ? 15368 : 456}
+            })
+            return {
+              type: 'check-run' as const,
+              name: 'ci',
+              conclusion,
+              databaseId: id,
+              integrationId: null,
+              isRequired
+            }
+          }),
+          ...Array.from({length: 99}, (_, i) => ({
+            type: 'status-context' as const,
+            context: `optional-${String(i)}`,
+            state: 'SUCCESS',
+            isRequired: false
+          }))
+        ]
+        state.confirmationReaction = '+1'
+
+        const result = await runMain(context, {
+          checks: 'required',
+          deployment_confirmation: 'true'
+        })
+        assertExit(context, result, 0)
+        assertReason(context, result, 'deployment_ready')
+        assert.equal(requireDeployment(context).sha, ACCEPTANCE_SHAS.feature)
+      })
   },
   {
     name: 'confirmation checks the original fork commit, not the new head',

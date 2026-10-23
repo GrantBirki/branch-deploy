@@ -294,6 +294,7 @@ export interface CheckRunResult {
   readonly isRequired: boolean
   readonly name: string
   readonly startedAt?: string
+  readonly status?: string
 }
 
 export interface LegacyIncompleteCheckRunResult {
@@ -327,7 +328,14 @@ export interface OperationOutcome {
   readonly sha?: string | null
 }
 
+type CheckStateCounts = readonly {
+  readonly state: string
+  readonly count: number
+}[]
+
 export interface StatusCheckContexts {
+  readonly checkRunCountsByState?: CheckStateCounts | null
+  readonly statusContextCountsByState?: CheckStateCounts | null
   readonly nodes: readonly RawCheckResult[]
   readonly pageInfo: {
     readonly endCursor: string | null

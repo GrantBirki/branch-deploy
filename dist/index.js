@@ -41080,12 +41080,19 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
         if (commit === undefined) {
             throw new Error('The GraphQL response did not include a commit');
         }
-        const source = { octokit, pullRequestNumber, repo, baseRefName, commit };
+        const source = {
+            octokit,
+            pullRequestNumber,
+            repo,
+            baseRefName,
+            commit,
+            afterConfirmation: afterConfirmation === true
+        };
         // A fork's head may advance during confirmation. Read CI on the commit
         // we admitted, not on the pull request's latest commit.
-        const current = afterConfirmation !== true
-            ? commit
-            : await readCommitCheckPage(source, null);
+        const current = source.afterConfirmation
+            ? await readCommitCheckPage(source, null)
+            : commit;
         if ('kind' in current)
             return current;
         const { statusCheckRollup } = current;
@@ -41115,19 +41122,10 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
         }
         const checkResults = await loadAllCheckResults({
             ...source,
-            statusCheckRollup,
-            verifyRollupState: afterConfirmation === true
+            statusCheckRollup
         });
         if ('kind' in checkResults)
             return checkResults;
-        if (afterConfirmation === true) {
-            // Overlapping pages can hide a check inserted before the cursor. Reject the
-            // read even if the repeated check is unchanged or isn't selected for deployment.
-            const ids = checkResults.map(confirmationCheckNodeId);
-            if (new Set(ids).size !== ids.length) {
-                throw new Error('A check appeared twice while reading CI after confirmation');
-            }
-        }
         // Resolve competing Apps on both reads so identical runs produce the same selection.
         const required = checks === 'required';
         const selected = checkSelection(checks, ignoredChecks, required);
@@ -41277,10 +41275,12 @@ function missingRequiredStackChecks({ checks, checkResults, ignoredChecks, requi
         kind: 'missing'
     };
 }
-async function loadAllCheckResults({ statusCheckRollup, verifyRollupState, ...source }) {
+async function loadAllCheckResults({ statusCheckRollup, ...source }) {
     const checkResults = [...statusCheckRollup.contexts.nodes];
     let pageInfo = statusCheckRollup.contexts.pageInfo;
     const seenCursors = new Set();
+    let expected;
+    let countsChanged = false;
     // Only an explicit false proves we reached the last page, even if its checks pass.
     while (pageInfo?.hasNextPage !== false) {
         if (pageInfo?.hasNextPage !== true) {
@@ -41300,32 +41300,63 @@ async function loadAllCheckResults({ statusCheckRollup, verifyRollupState, ...so
         if (page.statusCheckRollup === null) {
             throw new Error('The paginated check rollup is unavailable');
         }
-        // The rollup covers every check, not just the ones selected for deployment.
-        // Use it to spot inconsistent pages, never to reject an optional failure.
-        if (verifyRollupState &&
-            page.statusCheckRollup.state !== statusCheckRollup.state) {
-            return INCONSISTENT_CHECK_PAGES;
+        if (source.afterConfirmation) {
+            expected ??= reportedCheckStateCounts(statusCheckRollup.contexts);
+            const counts = reportedCheckStateCounts(page.statusCheckRollup.contexts);
+            if (!(0,external_node_util_.isDeepStrictEqual)(counts, expected))
+                countsChanged = true;
         }
         checkResults.push(...page.statusCheckRollup.contexts.nodes);
         pageInfo = page.statusCheckRollup.contexts.pageInfo;
     }
-    // A failure can move from a later page to one already read. Both rollups can
-    // stay red while every current check we received looks healthy. An older,
-    // superseded failure doesn't explain the rollup, and this isn't a policy check.
-    if (verifyRollupState &&
-        seenCursors.size > 0 &&
-        statusCheckRollup.state !== 'SUCCESS' &&
-        latestCheckResults(checkResults, () => false).every(checkIsHealthy)) {
-        return INCONSISTENT_CHECK_PAGES;
+    if (source.afterConfirmation) {
+        // An overlapping page can hide a check inserted before its cursor.
+        const ids = checkResults.map(confirmationCheckNodeId);
+        if (new Set(ids).size !== ids.length) {
+            throw new Error('A check appeared twice while reading CI after confirmation');
+        }
+        if (expected !== undefined) {
+            // Count raw results, not just required or latest checks. GitHub reports
+            // these totals for the whole connection on each page, not a locked snapshot.
+            const observed = new Map();
+            for (const check of checkResults) {
+                const key = isCheckRun(check)
+                    ? `check:${String(check.conclusion ?? check.status)}`
+                    : `status:${String(checkStatus(check))}`;
+                observed.set(key, (observed.get(key) ?? 0) + 1);
+            }
+            if (countsChanged || !(0,external_node_util_.isDeepStrictEqual)(observed, expected)) {
+                return INCONSISTENT_CHECK_PAGES;
+            }
+        }
     }
     return checkResults;
 }
-async function readCommitCheckPage({ octokit, pullRequestNumber, repo, baseRefName, commit }, cursor) {
+function reportedCheckStateCounts(contexts) {
+    const counts = new Map();
+    for (const [kind, states] of [
+        ['check', contexts.checkRunCountsByState],
+        ['status', contexts.statusContextCountsByState]
+    ]) {
+        if (states === undefined || states === null) {
+            throw new Error('GitHub did not report CI state counts');
+        }
+        for (const { state, count } of states) {
+            if (!Number.isSafeInteger(count) || count < 0) {
+                throw new Error('GitHub reported an invalid CI state count');
+            }
+            if (count > 0)
+                counts.set(`${kind}:${state}`, count);
+        }
+    }
+    return counts;
+}
+async function readCommitCheckPage({ octokit, pullRequestNumber, repo, baseRefName, commit, afterConfirmation }, cursor) {
     if (commit.id === undefined || commit.id === '') {
         throw new Error('The GraphQL response did not include a commit node ID');
     }
     // isRequired is relative to the pull request's current base, even on a pinned commit.
-    const query = `query($commitId:ID!, $cursor:String, $owner:String!, $name:String!, $number:Int!) {
+    const query = `query($commitId:ID!, $cursor:String, $owner:String!, $name:String!, $number:Int!, $afterConfirmation:Boolean!) {
                   repository(owner:$owner, name:$name) {
                     pullRequest(number:$number) { baseRefName }
                   }
@@ -41336,6 +41367,8 @@ async function readCommitCheckPage({ octokit, pullRequestNumber, repo, baseRefNa
                       statusCheckRollup {
                         state
                         contexts(first:100, after:$cursor) {
+                          checkRunCountsByState @include(if:$afterConfirmation) { state count }
+                          statusContextCountsByState @include(if:$afterConfirmation) { state count }
                           nodes {
                             ... on CheckRun {
                               id
@@ -41347,6 +41380,7 @@ async function readCommitCheckPage({ octokit, pullRequestNumber, repo, baseRefNa
                               }
                               isRequired(pullRequestNumber:$number)
                               conclusion
+                              status @include(if:$afterConfirmation)
                               name
                             }
                             ... on StatusContext {
@@ -41370,6 +41404,7 @@ async function readCommitCheckPage({ octokit, pullRequestNumber, repo, baseRefNa
     const page = prechecksGraphqlContextsPageResult(await graphqlAllowingInaccessibleApps(octokit, query, {
         commitId: commit.id,
         cursor,
+        afterConfirmation,
         owner: repo.owner,
         name: repo.repo,
         number: pullRequestNumber
@@ -41453,7 +41488,10 @@ function filterChecks(checks, checkResults, ignoredChecks, required, selectedChe
         }
     }
     // Determine if all remaining checks are in a healthy state
-    const unhealthyChecks = filteredChecks.filter(check => !checkIsHealthy(check));
+    const unhealthyChecks = filteredChecks.filter(check => {
+        const status = checkStatus(check);
+        return status !== 'SUCCESS' && status !== 'SKIPPED' && status !== 'NEUTRAL';
+    });
     // If no checks remain after filtering, default to SUCCESS
     if (filteredChecks.length === 0) {
         const message = 'filterChecks() - after filtering, no checks remain - this will result in a SUCCESS state as it is treated as if no checks are defined';
@@ -41471,10 +41509,6 @@ function filterChecks(checks, checkResults, ignoredChecks, required, selectedChe
             : 'one or more checks did not pass',
         status: allPending ? 'PENDING' : 'FAILURE'
     };
-}
-function checkIsHealthy(check) {
-    const status = checkStatus(check);
-    return status === 'SUCCESS' || status === 'SKIPPED' || status === 'NEUTRAL';
 }
 function checkSelection(checks, ignoredChecks, required) {
     return check => {
