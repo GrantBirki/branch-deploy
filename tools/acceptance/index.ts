@@ -1990,13 +1990,19 @@ const scenarios = [
     name: '.wcid',
     run: () =>
       withMockGitHub('.wcid', async context => {
-        seedLock(context.state, 'production', 'feature-branch', 'octocat', 1)
         setTriggerComment(context.state, '.wcid')
 
+        const unlocked = await runMain(context)
+        assertExit(context, unlocked, 0)
+        assertReason(context, unlocked, 'lock_info_completed')
+        assertOutput(context, unlocked, 'continue', '')
+
+        seedLock(context.state, 'production', 'feature-branch', 'octocat', 1)
         const result = await runMain(context)
 
         assertExit(context, result, 0)
         assertReason(context, result, 'lock_info_completed')
+        assertOutput(context, result, 'continue', '')
         assertCommentIncludes(context, '### Lock Details 🔒')
         assertCommentIncludes(context, '- __Branch__: `feature-branch`')
       })

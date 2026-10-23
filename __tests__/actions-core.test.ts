@@ -311,6 +311,19 @@ describe('stdout commands and logging', () => {
     )
   })
 
+  test('prints runner command markers in informational messages as text', () => {
+    const output = captureStdout()
+
+    core.info('::group::one\n \t::group::two\r\u0085::group::three')
+    core.info('value::detail\r\nnote ##[group]four')
+
+    assert.strictEqual(
+      output.read(),
+      `: :group::one\n \t: :group::two\r\u0085: :group::three${EOL}` +
+        `value::detail\r\nnote # #[group]four${EOL}`
+    )
+  })
+
   test('sets the failure exit code before issuing the error command', () => {
     const output = captureStdout()
 

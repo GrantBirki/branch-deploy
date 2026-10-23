@@ -128,7 +128,11 @@ export function debug(message: string): void {
 }
 
 export function info(message: string): void {
-  process.stdout.write(`${message}${EOL}`)
+  // The runner recognizes "::" after leading whitespace and "##[" anywhere on a line.
+  const text = message
+    .replace(/^([\p{Z}\t\v\f\u0085]*)::/gmu, '$1: :')
+    .replaceAll('##[', '# #[')
+  process.stdout.write(`${text}${EOL}`)
 }
 
 export function warning(message: string | Error): void {
