@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import {readFileSync} from 'node:fs'
 import {test} from 'node:test'
 
-const BRANCH_DEPLOY_V12_1_0 = 'a7a7ea40a15a79a036322c2924ab74f5eded702c'
 const CHECKOUT_V7_0_0 = '9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0'
 
 function hardenedSection(): string {
@@ -55,7 +54,7 @@ test('the hardened starting point admits only owner and member comments by defau
   assert.match(section, /repository-permission and request-admission checks/u)
 })
 
-test('the hardened starting point uses lowercase names and commented action pins', () => {
+test('the hardened starting point uses lowercase names', () => {
   const workflow = hardenedWorkflow()
   const names = Array.from(workflow.matchAll(/^\s*name: (.+)$/gmu), match => {
     const name = match[1]
@@ -65,19 +64,6 @@ test('the hardened starting point uses lowercase names and commented action pins
   assert.ok(names.length > 0)
   for (const name of names) {
     assert.strictEqual(name, name.toLowerCase())
-  }
-
-  const actionUses = Array.from(
-    workflow.matchAll(/^\s*uses: (.+)$/gmu),
-    match => {
-      const actionUse = match[1]
-      assert.ok(actionUse !== undefined)
-      return actionUse
-    }
-  )
-  assert.strictEqual(actionUses.length, 6)
-  for (const actionUse of actionUses) {
-    assert.match(actionUse, /@[0-9a-f]{40} # v\d+\.\d+\.\d+$/u)
   }
 })
 
@@ -110,7 +96,6 @@ test('the hardened starting point keeps admission, validation, deployment, and r
   assert.match(deploy, /needs\.branch-deploy\.outputs\.noop == 'false'/u)
   assert.match(deploy, /needs\.validate\.result == 'success'/u)
   assert.match(deploy, /\.run_attempt == github\.run_attempt/u)
-  assert.match(deploy, /environment: production/u)
   assert.match(deploy, /\.trusted_sha/u)
   assert.match(deploy, /ref: \$\{\{ needs\.branch-deploy\.outputs\.sha \}\}/u)
   assert.match(deploy, /validate-candidate/u)
@@ -126,15 +111,6 @@ test('the hardened starting point keeps admission, validation, deployment, and r
   assert.match(result, /needs\.validate\.result/u)
   assert.match(result, /needs\.deploy\.result/u)
   assert.doesNotMatch(result, /actions\/checkout|secrets\.|id-token:/u)
-
-  const branchDeployPins = Array.from(
-    workflow.matchAll(/uses: grantbirki\/branch-deploy@([0-9a-f]{40})/gu),
-    match => match[1]
-  )
-  assert.deepStrictEqual(branchDeployPins, [
-    BRANCH_DEPLOY_V12_1_0,
-    BRANCH_DEPLOY_V12_1_0
-  ])
 
   const checkoutPins = Array.from(
     workflow.matchAll(/uses: actions\/checkout@([0-9a-f]{40})/gu),

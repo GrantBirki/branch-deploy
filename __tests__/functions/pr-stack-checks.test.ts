@@ -449,6 +449,29 @@ test('ordinary PRs inventory named status checks without treating workflow or de
   )
 })
 
+for (const type of [
+  'required_deployments',
+  'workflows',
+  'code_scanning',
+  'unknown'
+]) {
+  test(`whether the ${type} rule can require unnamed checks`, async () => {
+    const check = {context: 'build', integration_id: 123}
+    getBranchRulesMock.mock.mockImplementation(() =>
+      Promise.resolve({data: [{type}, statusRule([check])]})
+    )
+    const policy = loadPrStackRequiredChecks(octokit, {
+      ...requestFor(),
+      scope: 'named'
+    })
+    if (type === 'required_deployments') {
+      assert.deepEqual(await policy, [{context: 'build', appId: 123}])
+    } else {
+      await assert.rejects(policy, /cannot determine all required check names/u)
+    }
+  })
+}
+
 for (const classic of [
   {name: 'no CI', value: branch(), expected: []},
   {

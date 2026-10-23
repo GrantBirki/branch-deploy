@@ -769,7 +769,7 @@ async function continueDeployment(
       const recovery =
         checksChanged === true
           ? 'The selected CI checks changed while we waited. Post a new deployment command and confirm the commit it shows.'
-          : 'Branch Deploy could not verify that all selected CI checks still pass. Once the checks are passing and visible to Branch Deploy, post a new deployment command.'
+          : 'Branch Deploy could not verify that all selected CI checks still pass. Check the workflow run for the reason before posting another deployment command.'
       const message = dedent(`
         ### Deployment stopped after confirmation
 

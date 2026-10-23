@@ -1681,7 +1681,7 @@ test('does not start a deployment if CI turns red while awaiting confirmation', 
   const message = actionStatusMock.mock.calls.at(-1)?.arguments[0].message ?? ''
   assert.match(message, /no deployment was started/i)
   assert.ok(!message.includes(checkName))
-  assert.match(message, /once the checks are passing and visible/i)
+  assert.match(message, /check the workflow run for the reason/i)
   assert.ok(message.includes('https://github.com/corp/test/actions/runs/12345'))
   assertCalledWith(setFailedMock, failure)
 })
@@ -2450,6 +2450,7 @@ test('successfully runs the action in lock mode - details only - lock alias wcid
   setCommentBody('.wcid')
   assert.strictEqual(await run(), 'safe-exit')
   assertCalledWith(setOutputMock, 'comment_body', '.wcid')
+  assertCalledWith(setOutputMock, 'continue', '')
   assertCalledWith(
     infoSpy,
     `🔒 the deployment lock is currently claimed by ${COLORS.highlight}octocat`
@@ -2521,6 +2522,7 @@ test('successfully runs the action in lock mode and finds no lock - details only
   assert.strictEqual(await run(), 'safe-exit')
   assertCalledWith(setOutputMock, 'comment_body', '.lock --details')
   assertCalledWith(infoSpy, '✅ no active deployment locks found')
+  assertCalledWith(setOutputMock, 'continue', '')
   assertCalledWith(setOutputMock, 'triggered', 'true')
   assertCalledWith(setOutputMock, 'comment_id', 123)
   assertCalledWith(setOutputMock, 'type', 'lock')
