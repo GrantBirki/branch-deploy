@@ -1406,7 +1406,6 @@ async function loadAllCheckResults({
   let pageInfo = statusCheckRollup.contexts.pageInfo
   const seenCursors = new Set<string>()
   let expected: ReadonlyMap<string, number> | undefined
-  let countsChanged = false
 
   // Only an explicit false proves we reached the last page, even if its checks pass.
   while (pageInfo?.hasNextPage !== false) {
@@ -1431,7 +1430,8 @@ async function loadAllCheckResults({
     if (source.afterConfirmation) {
       expected ??= reportedCheckStateCounts(statusCheckRollup.contexts)
       const counts = reportedCheckStateCounts(page.statusCheckRollup.contexts)
-      if (!isDeepStrictEqual(counts, expected)) countsChanged = true
+      // A state change can reorder checks across the cursor. Discard this entire read.
+      if (!isDeepStrictEqual(counts, expected)) return INCONSISTENT_CHECK_PAGES
     }
     checkResults.push(...page.statusCheckRollup.contexts.nodes)
     pageInfo = page.statusCheckRollup.contexts.pageInfo
@@ -1455,7 +1455,7 @@ async function loadAllCheckResults({
           : `status:${String(checkStatus(check))}`
         observed.set(key, (observed.get(key) ?? 0) + 1)
       }
-      if (countsChanged || !isDeepStrictEqual(observed, expected)) {
+      if (!isDeepStrictEqual(observed, expected)) {
         return INCONSISTENT_CHECK_PAGES
       }
     }

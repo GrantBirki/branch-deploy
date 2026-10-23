@@ -41280,7 +41280,6 @@ async function loadAllCheckResults({ statusCheckRollup, ...source }) {
     let pageInfo = statusCheckRollup.contexts.pageInfo;
     const seenCursors = new Set();
     let expected;
-    let countsChanged = false;
     // Only an explicit false proves we reached the last page, even if its checks pass.
     while (pageInfo?.hasNextPage !== false) {
         if (pageInfo?.hasNextPage !== true) {
@@ -41303,8 +41302,9 @@ async function loadAllCheckResults({ statusCheckRollup, ...source }) {
         if (source.afterConfirmation) {
             expected ??= reportedCheckStateCounts(statusCheckRollup.contexts);
             const counts = reportedCheckStateCounts(page.statusCheckRollup.contexts);
+            // A state change can reorder checks across the cursor. Discard this entire read.
             if (!(0,external_node_util_.isDeepStrictEqual)(counts, expected))
-                countsChanged = true;
+                return INCONSISTENT_CHECK_PAGES;
         }
         checkResults.push(...page.statusCheckRollup.contexts.nodes);
         pageInfo = page.statusCheckRollup.contexts.pageInfo;
@@ -41325,7 +41325,7 @@ async function loadAllCheckResults({ statusCheckRollup, ...source }) {
                     : `status:${String(checkStatus(check))}`;
                 observed.set(key, (observed.get(key) ?? 0) + 1);
             }
-            if (countsChanged || !(0,external_node_util_.isDeepStrictEqual)(observed, expected)) {
+            if (!(0,external_node_util_.isDeepStrictEqual)(observed, expected)) {
                 return INCONSISTENT_CHECK_PAGES;
             }
         }

@@ -2265,6 +2265,12 @@ const scenarios = [
         ['page-one check fails before page two', 'FAILURE', 'all'],
         ['required check fails between pages', 'FAILURE', 'required'],
         ['only an optional check fails between pages', 'SUCCESS', 'required'],
+        ['optional failure reorders pages once', 'SUCCESS', 'required'],
+        [
+          'optional failure reorders pages on both reads',
+          'UNAVAILABLE',
+          'required'
+        ],
         ['failure moves between pages on both reads', 'UNAVAILABLE', 'all'],
         [
           'required check fails with an optional failure already visible',
@@ -2309,13 +2315,18 @@ const scenarios = [
           const shiftedPages = change === 'shifted check pages'
           const paginated = shiftedPages || pagedChecks !== undefined
           const optional = pagedChecks === 'required' && expected === 'SUCCESS'
+          const optionalReordersPages = change.startsWith(
+            'optional failure reorders pages'
+          )
           const movingFailure = change.startsWith('failure moves between pages')
           const pagesAfterConfirmation: number[] = []
           if (paginated) {
             state.rollupContexts = Array.from({length: 101}, (_, i) => ({
               ...check,
               databaseId: i + 2,
-              isRequired: !optional || i !== 0,
+              isRequired: optionalReordersPages
+                ? i !== 100
+                : !optional || i !== 0,
               name: `ci-${String(i + 1).padStart(3, '0')}`
             }))
             if (optionalConclusion !== undefined) {
@@ -2342,8 +2353,27 @@ const scenarios = [
                 }
               }
             } else if (paginated) {
+              const initial = state.rollupContexts
               state.beforeCheckPage = start => {
                 pagesAfterConfirmation.push(start)
+                if (optionalReordersPages) {
+                  // The optional check fails and sorts first. GitHub's counts change and
+                  // page two repeats the passing required check at the end of page one.
+                  const last = initial.at(-1)
+                  assert.equal(last?.type, 'check-run')
+                  const green =
+                    start === 0 &&
+                    (pagesAfterConfirmation.length === 1 ||
+                      expected === 'UNAVAILABLE')
+                  state.rollupState = green ? 'SUCCESS' : 'FAILURE'
+                  state.rollupContexts = green
+                    ? initial
+                    : [
+                        {...last, conclusion: 'FAILURE'},
+                        ...initial.slice(0, 100)
+                      ]
+                  return
+                }
                 if (start !== 100 && !movingFailure) return
                 if (shiftedPages) {
                   // A new passing check sorts first. Page two repeats check 100, with the rollup still green.

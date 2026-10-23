@@ -2325,6 +2325,44 @@ for (const [change, selection, expected, optional = 'SUCCESS'] of [
   })
 }
 
+for (const reread of ['consistent', 'still changing'] as const) {
+  test(`confirmation discards overlapping pages when counts change: reread is ${reread}`, async () => {
+    const required = CONFIRMED_CI
+    const optional = {
+      ...HIDDEN_CHECK,
+      name: 'optional',
+      isRequired: false,
+      conclusion: 'FAILURE'
+    }
+    const counts = {checks: {SUCCESS: 1, FAILURE: 1}}
+    const first = additionalCheckPage([required], MORE_CHECKS, {
+      state: 'SUCCESS',
+      counts: {checks: {SUCCESS: 2}}
+    })
+    const last = additionalCheckPage([required], LAST_PAGE, {counts})
+    data.inputs.checks = 'required'
+    // The optional check failed and moved ahead of the cursor. GitHub returned
+    // the required check on both pages; only a fresh read can tell what failed.
+    const result = await confirmationCi(
+      [required],
+      first,
+      last,
+      reread === 'consistent'
+        ? additionalCheckPage([optional], MORE_CHECKS, {counts})
+        : first,
+      last
+    )
+    const more = MORE_CHECKS.endCursor
+    assert.deepEqual(
+      graphQLOK.mock.calls.slice(1).map(call => call.arguments[1]['cursor']),
+      [null, more, null, more]
+    )
+    const passed = reread === 'consistent'
+    assert.equal(result.commitStatus, passed ? 'SUCCESS' : 'UNAVAILABLE')
+    assert.equal(Boolean(result.failure), !passed)
+  })
+}
+
 test('confirmation rereads when the pages omit a failed status but show an optional pending status', async () => {
   const required = LEGACY_CI_STATUS
   const optional = {
