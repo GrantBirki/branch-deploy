@@ -159,7 +159,7 @@ const UNVERIFIED_BASE = {
   commitStatus: 'UNAVAILABLE',
   kind: 'base-unverified',
   message:
-    '### ⚠️ Cannot proceed with deployment\n\nThe pull request base branch changed or could not be verified while checking reviews and CI. Confirm the target branch, then post a new deployment command.'
+    'The pull request base branch changed or could not be verified while checking reviews and CI. Confirm the target branch, then post a new deployment command.'
 } as const
 
 const INCONSISTENT_CHECK_PAGES = {
@@ -167,9 +167,17 @@ const INCONSISTENT_CHECK_PAGES = {
   kind: 'inconsistent-pages'
 } as const
 
+const UNVERIFIED_CHECK_PAGES = {
+  commitStatus: 'UNAVAILABLE',
+  kind: 'unverified-pages',
+  message:
+    'GitHub returned checks on multiple pages, and the Action could not verify that every result was successful, skipped, or neutral. This includes optional, ignored, and superseded results. Review the checks, then post a new deployment command.'
+} as const
+
 type CommitCheckEvaluation =
   | typeof INCONSISTENT_CHECK_PAGES
   | typeof UNVERIFIED_BASE
+  | typeof UNVERIFIED_CHECK_PAGES
   | {
       readonly commitStatus: string
       readonly filterChecksResult: FilterChecksResult
@@ -488,6 +496,8 @@ export async function prechecks(
                             statusCheckRollup {
                               state
                               contexts(first:100) {
+                                checkRunCountsByState { state count }
+                                statusContextCountsByState { state count }
                                 nodes {
                                   ... on CheckRun {
                                     id
@@ -499,6 +509,7 @@ export async function prechecks(
                                     }
                                     isRequired(pullRequestNumber:$number)
                                     conclusion
+                                    status
                                     name
                                   }
                                   ... on StatusContext {
@@ -545,7 +556,7 @@ export async function prechecks(
     ) {
       // Retargeting a pull request can change its review policy without moving its head.
       return {
-        message: UNVERIFIED_BASE.message,
+        message: `### ⚠️ Cannot proceed with deployment\n\n${UNVERIFIED_BASE.message}`,
         status: false
       }
     }
@@ -765,9 +776,7 @@ export async function prechecks(
     stableBranch: data.inputs.stable_branch,
     stableBranchUsed: data.environmentObj.stable_branch_used,
     unavailableCheckMessage:
-      checkEvaluation.kind === 'base-unverified'
-        ? checkEvaluation.message
-        : undefined,
+      'message' in checkEvaluation ? checkEvaluation.message : undefined,
     updateBranch: data.inputs.update_branch,
     userIsAdmin
   })
@@ -958,8 +967,7 @@ async function checkStackPrerequisites({
         sha: pull.headSha,
         stableBranch: stack.stableBranch,
         stableBranchUsed: false,
-        unavailableCheckMessage:
-          check.kind === 'base-unverified' ? check.message : undefined,
+        unavailableCheckMessage: 'message' in check ? check.message : undefined,
         updateBranch: 'warn',
         userIsAdmin
       })
@@ -1049,21 +1057,13 @@ async function recheckConfirmationCi(
   let commitStatus: string | null = 'UNAVAILABLE'
   for (const target of targets) {
     const selectedChecks = new Map<string, string>()
-    const request = {
+    const check = await evaluateCommitChecks({
       ...policy,
       ...target,
       afterConfirmation: true,
       selectedChecks,
       stackRequiredChecks
-    } as const
-    let check = await evaluateCommitChecks(request)
-    if (check.kind === 'inconsistent-pages') {
-      // Start at page one; combining pages from different reads could hide a failure.
-      core.info(
-        'CI changed between pages after confirmation. Reading the checks once more.'
-      )
-      check = await evaluateCommitChecks(request)
-    }
+    })
     const selectedPr = target === targets[0]
     if (selectedPr) commitStatus = check.commitStatus
     const subject = `CI for PR #${target.pullRequestNumber} at \`${String(target.commit?.oid)}\``
@@ -1085,7 +1085,9 @@ async function recheckConfirmationCi(
     const detail =
       check.kind === 'failed' || check.kind === 'missing'
         ? check.filterChecksResult.message
-        : 'the check results or pull request base could not be verified'
+        : 'message' in check
+          ? check.message
+          : 'the check results or pull request base could not be verified'
     return {
       commitStatus,
       failure: `${subject}: ${detail}`
@@ -1168,11 +1170,17 @@ async function evaluateCommitChecks({
       throw new Error('The GraphQL response did not include a check rollup')
     }
 
-    const checkResults = await loadAllCheckResults({
-      ...source,
-      statusCheckRollup
-    })
-    if ('kind' in checkResults) return checkResults
+    let pages = await loadAllCheckResults(source, statusCheckRollup)
+    if ('kind' in pages && pages.kind === 'inconsistent-pages') {
+      // Discard the entire read. A retry starts on the same commit and checks its base again.
+      core.info('CI changed between pages. Reading the checks once more.')
+      const first = await readCommitCheckPage(source, null)
+      if ('kind' in first) return first
+      if (first.statusCheckRollup === null) return INCONSISTENT_CHECK_PAGES
+      pages = await loadAllCheckResults(source, first.statusCheckRollup)
+    }
+    if ('kind' in pages) return pages
+    const {checkResults, allPagesHealthy} = pages
 
     // Resolve competing Apps on both reads so identical runs produce the same selection.
     const required = checks === 'required'
@@ -1261,6 +1269,7 @@ async function evaluateCommitChecks({
     )
 
     if (filterChecksResult.status === 'SUCCESS') {
+      if (!allPagesHealthy) return UNVERIFIED_CHECK_PAGES
       return {
         commitStatus: 'SUCCESS',
         filterChecksResult,
@@ -1394,16 +1403,16 @@ interface CommitCheckPageSource
   readonly commit: PrechecksGraphqlCommitNode['commit']
 }
 
-async function loadAllCheckResults({
-  statusCheckRollup,
-  ...source
-}: CommitCheckPageSource & {
-  readonly statusCheckRollup: StatusCheckRollup
-}): Promise<
-  RawCheckResult[] | typeof INCONSISTENT_CHECK_PAGES | typeof UNVERIFIED_BASE
+async function loadAllCheckResults(
+  source: CommitCheckPageSource,
+  rollup: StatusCheckRollup
+): Promise<
+  | {readonly checkResults: RawCheckResult[]; readonly allPagesHealthy: boolean}
+  | typeof INCONSISTENT_CHECK_PAGES
+  | typeof UNVERIFIED_BASE
 > {
-  const checkResults = [...statusCheckRollup.contexts.nodes]
-  let pageInfo = statusCheckRollup.contexts.pageInfo
+  const checkResults = [...rollup.contexts.nodes]
+  let pageInfo = rollup.contexts.pageInfo
   const seenCursors = new Set<string>()
   let expected: ReadonlyMap<string, number> | undefined
 
@@ -1427,41 +1436,35 @@ async function loadAllCheckResults({
       throw new Error('The paginated check rollup is unavailable')
     }
 
-    if (source.afterConfirmation) {
-      expected ??= reportedCheckStateCounts(statusCheckRollup.contexts)
-      const counts = reportedCheckStateCounts(page.statusCheckRollup.contexts)
-      // A state change can reorder checks across the cursor. Discard this entire read.
-      if (!isDeepStrictEqual(counts, expected)) return INCONSISTENT_CHECK_PAGES
-    }
+    expected ??= reportedCheckStateCounts(rollup.contexts)
+    const counts = reportedCheckStateCounts(page.statusCheckRollup.contexts)
+    if (!isDeepStrictEqual(counts, expected)) return INCONSISTENT_CHECK_PAGES
     checkResults.push(...page.statusCheckRollup.contexts.nodes)
     pageInfo = page.statusCheckRollup.contexts.pageInfo
   }
 
-  if (source.afterConfirmation) {
+  if (expected !== undefined || source.afterConfirmation) {
     // An overlapping page can hide a check inserted before its cursor.
-    const ids = checkResults.map(confirmationCheckNodeId)
+    const ids = checkResults.map(requireCheckNodeId)
     if (new Set(ids).size !== ids.length) {
-      throw new Error(
-        'A check appeared twice while reading CI after confirmation'
-      )
-    }
-    if (expected !== undefined) {
-      // Count raw results, not just required or latest checks. GitHub reports
-      // these totals for the whole connection on each page, not a locked snapshot.
-      const observed = new Map<string, number>()
-      for (const check of checkResults) {
-        const key = isCheckRun(check)
-          ? `check:${String(check.conclusion ?? check.status)}`
-          : `status:${String(checkStatus(check))}`
-        observed.set(key, (observed.get(key) ?? 0) + 1)
-      }
-      if (!isDeepStrictEqual(observed, expected)) {
-        return INCONSISTENT_CHECK_PAGES
-      }
+      throw new Error('A check appeared twice while reading CI')
     }
   }
+  if (expected === undefined) return {checkResults, allPagesHealthy: true}
 
-  return checkResults
+  // GitHub reports state counts for the whole connection, but pages are not a
+  // snapshot. Mixed counts cannot establish that only unselected checks were unhealthy.
+  const observed = new Map<string, number>()
+  let allPagesHealthy = checkResults.length !== 0
+  for (const check of checkResults) {
+    const run = isCheckRun(check)
+    const state = run ? (check.conclusion ?? check.status) : checkStatus(check)
+    const key = `${run ? 'check' : 'status'}:${String(state)}`
+    observed.set(key, (observed.get(key) ?? 0) + 1)
+    if (!isHealthyCheckStatus(state)) allPagesHealthy = false
+  }
+  if (!isDeepStrictEqual(observed, expected)) return INCONSISTENT_CHECK_PAGES
+  return {checkResults, allPagesHealthy}
 }
 
 function reportedCheckStateCounts(
@@ -1476,13 +1479,14 @@ function reportedCheckStateCounts(
       throw new Error('GitHub did not report CI state counts')
     }
     for (const {state, count} of states) {
-      if (!Number.isSafeInteger(count) || count < 0) {
+      const key = `${kind}:${state}`
+      if (!Number.isSafeInteger(count) || count < 0 || counts.has(key)) {
         throw new Error('GitHub reported an invalid CI state count')
       }
-      if (count > 0) counts.set(`${kind}:${state}`, count)
+      counts.set(key, count)
     }
   }
-  return counts
+  return new Map([...counts].filter(([, count]) => count > 0))
 }
 
 async function readCommitCheckPage(
@@ -1491,8 +1495,7 @@ async function readCommitCheckPage(
     pullRequestNumber,
     repo,
     baseRefName,
-    commit,
-    afterConfirmation
+    commit
   }: CommitCheckPageSource,
   cursor: string | null
 ): Promise<
@@ -1504,7 +1507,7 @@ async function readCommitCheckPage(
   }
 
   // isRequired is relative to the pull request's current base, even on a pinned commit.
-  const query = `query($commitId:ID!, $cursor:String, $owner:String!, $name:String!, $number:Int!, $afterConfirmation:Boolean!) {
+  const query = `query($commitId:ID!, $cursor:String, $owner:String!, $name:String!, $number:Int!) {
                   repository(owner:$owner, name:$name) {
                     pullRequest(number:$number) { baseRefName }
                   }
@@ -1515,8 +1518,8 @@ async function readCommitCheckPage(
                       statusCheckRollup {
                         state
                         contexts(first:100, after:$cursor) {
-                          checkRunCountsByState @include(if:$afterConfirmation) { state count }
-                          statusContextCountsByState @include(if:$afterConfirmation) { state count }
+                          checkRunCountsByState { state count }
+                          statusContextCountsByState { state count }
                           nodes {
                             ... on CheckRun {
                               id
@@ -1528,7 +1531,7 @@ async function readCommitCheckPage(
                               }
                               isRequired(pullRequestNumber:$number)
                               conclusion
-                              status @include(if:$afterConfirmation)
+                              status
                               name
                             }
                             ... on StatusContext {
@@ -1553,7 +1556,6 @@ async function readCommitCheckPage(
     await graphqlAllowingInaccessibleApps(octokit, query, {
       commitId: commit.id,
       cursor,
-      afterConfirmation,
       owner: repo.owner,
       name: repo.repo,
       number: pullRequestNumber
@@ -1659,7 +1661,7 @@ export function filterChecks(
 
   if (selectedChecks !== undefined) {
     for (const check of filteredChecks) {
-      const id = confirmationCheckNodeId(check)
+      const id = requireCheckNodeId(check)
       // A status and a check run may have the same name. Their node IDs identify
       // the records, not immutable conclusions or, for a status, its publisher.
       const kind = isCheckRun(check) ? 'check' : 'status'
@@ -1668,10 +1670,9 @@ export function filterChecks(
   }
 
   // Determine if all remaining checks are in a healthy state
-  const unhealthyChecks = filteredChecks.filter(check => {
-    const status = checkStatus(check)
-    return status !== 'SUCCESS' && status !== 'SKIPPED' && status !== 'NEUTRAL'
-  })
+  const unhealthyChecks = filteredChecks.filter(
+    check => !isHealthyCheckStatus(checkStatus(check))
+  )
 
   // If no checks remain after filtering, default to SUCCESS
   if (filteredChecks.length === 0) {
@@ -1774,10 +1775,10 @@ function checkNodeId(check: RawCheckResult): string | undefined {
   return 'id' in check ? check.id : undefined
 }
 
-function confirmationCheckNodeId(check: RawCheckResult): string {
+function requireCheckNodeId(check: RawCheckResult): string {
   const id = checkNodeId(check)
   if (typeof id !== 'string' || id === '') {
-    throw new Error('Cannot identify a CI check for deployment confirmation')
+    throw new Error('A CI check is missing its node ID')
   }
   return id
 }
@@ -1889,6 +1890,10 @@ function checkName(check: RawCheckResult): string | null | undefined {
   const context: string | null | undefined =
     'context' in check ? check.context : undefined
   return name ?? context
+}
+
+function isHealthyCheckStatus(status: string | null | undefined): boolean {
+  return status === 'SUCCESS' || status === 'SKIPPED' || status === 'NEUTRAL'
 }
 
 function checkStatus(check: RawCheckResult): string | null | undefined {

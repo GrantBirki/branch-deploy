@@ -39699,8 +39699,9 @@ function evaluatePrecheckGates({ allowDraftDeploy, allowShaDeployments, commitOi
             sha: exactSha
         };
     }
-    const checksUnavailableMessage = unavailableCheckMessage ??
-        `### ⚠️ Cannot proceed with deployment\n\n- commitStatus: \`UNAVAILABLE\`\n\n> The Action could not verify all CI checks for this pull request, so no deployment was started. Retry the command after GitHub's check data is available, or explicitly configure \`skip_ci\` for this environment.`;
+    const checksUnavailableMessage = '### ⚠️ Cannot proceed with deployment\n\n' +
+        (unavailableCheckMessage ??
+            `- commitStatus: \`UNAVAILABLE\`\n\n> The Action could not verify all CI checks for this pull request, so no deployment was started. Retry the command after GitHub's check data is available, or explicitly configure \`skip_ci\` for this environment.`);
     if (commitStatus === 'UNAVAILABLE' && commitOid === undefined) {
         return reject(checksUnavailableMessage);
     }
@@ -40351,11 +40352,16 @@ async function loadPrStackRequiredChecks(octokit, request) {
 const UNVERIFIED_BASE = {
     commitStatus: 'UNAVAILABLE',
     kind: 'base-unverified',
-    message: '### ⚠️ Cannot proceed with deployment\n\nThe pull request base branch changed or could not be verified while checking reviews and CI. Confirm the target branch, then post a new deployment command.'
+    message: 'The pull request base branch changed or could not be verified while checking reviews and CI. Confirm the target branch, then post a new deployment command.'
 };
 const INCONSISTENT_CHECK_PAGES = {
     commitStatus: 'UNAVAILABLE',
     kind: 'inconsistent-pages'
+};
+const UNVERIFIED_CHECK_PAGES = {
+    commitStatus: 'UNAVAILABLE',
+    kind: 'unverified-pages',
+    message: 'GitHub returned checks on multiple pages, and the Action could not verify that every result was successful, skipped, or neutral. This includes optional, ignored, and superseded results. Review the checks, then post a new deployment command.'
 };
 // Runs precheck logic before the branch deployment can proceed
 // :param context: The context of the event
@@ -40593,6 +40599,8 @@ async function prechecks(context, octokit, data) {
                             statusCheckRollup {
                               state
                               contexts(first:100) {
+                                checkRunCountsByState { state count }
+                                statusContextCountsByState { state count }
                                 nodes {
                                   ... on CheckRun {
                                     id
@@ -40604,6 +40612,7 @@ async function prechecks(context, octokit, data) {
                                     }
                                     isRequired(pullRequestNumber:$number)
                                     conclusion
+                                    status
                                     name
                                   }
                                   ... on StatusContext {
@@ -40647,7 +40656,7 @@ async function prechecks(context, octokit, data) {
             result.repository.pullRequest.baseRefName !== baseRef) {
             // Retargeting a pull request can change its review policy without moving its head.
             return {
-                message: UNVERIFIED_BASE.message,
+                message: `### ⚠️ Cannot proceed with deployment\n\n${UNVERIFIED_BASE.message}`,
                 status: false
             };
         }
@@ -40829,9 +40838,7 @@ async function prechecks(context, octokit, data) {
         sha,
         stableBranch: data.inputs.stable_branch,
         stableBranchUsed: data.environmentObj.stable_branch_used,
-        unavailableCheckMessage: checkEvaluation.kind === 'base-unverified'
-            ? checkEvaluation.message
-            : undefined,
+        unavailableCheckMessage: 'message' in checkEvaluation ? checkEvaluation.message : undefined,
         updateBranch: data.inputs.update_branch,
         userIsAdmin
     });
@@ -40973,7 +40980,7 @@ async function checkStackPrerequisites({ context, data, octokit, query, stack, a
                 sha: pull.headSha,
                 stableBranch: stack.stableBranch,
                 stableBranchUsed: false,
-                unavailableCheckMessage: check.kind === 'base-unverified' ? check.message : undefined,
+                unavailableCheckMessage: 'message' in check ? check.message : undefined,
                 updateBranch: 'warn',
                 userIsAdmin
             });
@@ -41031,19 +41038,13 @@ async function recheckConfirmationCi(policy, targets, base) {
     let commitStatus = 'UNAVAILABLE';
     for (const target of targets) {
         const selectedChecks = new Map();
-        const request = {
+        const check = await evaluateCommitChecks({
             ...policy,
             ...target,
             afterConfirmation: true,
             selectedChecks,
             stackRequiredChecks
-        };
-        let check = await evaluateCommitChecks(request);
-        if (check.kind === 'inconsistent-pages') {
-            // Start at page one; combining pages from different reads could hide a failure.
-            info('CI changed between pages after confirmation. Reading the checks once more.');
-            check = await evaluateCommitChecks(request);
-        }
+        });
         const selectedPr = target === targets[0];
         if (selectedPr)
             commitStatus = check.commitStatus;
@@ -41063,7 +41064,9 @@ async function recheckConfirmationCi(policy, targets, base) {
         }
         const detail = check.kind === 'failed' || check.kind === 'missing'
             ? check.filterChecksResult.message
-            : 'the check results or pull request base could not be verified';
+            : 'message' in check
+                ? check.message
+                : 'the check results or pull request base could not be verified';
         return {
             commitStatus,
             failure: `${subject}: ${detail}`
@@ -41120,12 +41123,20 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
         if (statusCheckRollup === undefined) {
             throw new Error('The GraphQL response did not include a check rollup');
         }
-        const checkResults = await loadAllCheckResults({
-            ...source,
-            statusCheckRollup
-        });
-        if ('kind' in checkResults)
-            return checkResults;
+        let pages = await loadAllCheckResults(source, statusCheckRollup);
+        if ('kind' in pages && pages.kind === 'inconsistent-pages') {
+            // Discard the entire read. A retry starts on the same commit and checks its base again.
+            info('CI changed between pages. Reading the checks once more.');
+            const first = await readCommitCheckPage(source, null);
+            if ('kind' in first)
+                return first;
+            if (first.statusCheckRollup === null)
+                return INCONSISTENT_CHECK_PAGES;
+            pages = await loadAllCheckResults(source, first.statusCheckRollup);
+        }
+        if ('kind' in pages)
+            return pages;
+        const { checkResults, allPagesHealthy } = pages;
         // Resolve competing Apps on both reads so identical runs produce the same selection.
         const required = checks === 'required';
         const selected = checkSelection(checks, ignoredChecks, required);
@@ -41193,6 +41204,8 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
             return missing;
         const filterChecksResult = filterChecks(checks, checkResults, ignoredChecks, required, selectedChecks);
         if (filterChecksResult.status === 'SUCCESS') {
+            if (!allPagesHealthy)
+                return UNVERIFIED_CHECK_PAGES;
             return {
                 commitStatus: 'SUCCESS',
                 filterChecksResult,
@@ -41275,9 +41288,9 @@ function missingRequiredStackChecks({ checks, checkResults, ignoredChecks, requi
         kind: 'missing'
     };
 }
-async function loadAllCheckResults({ statusCheckRollup, ...source }) {
-    const checkResults = [...statusCheckRollup.contexts.nodes];
-    let pageInfo = statusCheckRollup.contexts.pageInfo;
+async function loadAllCheckResults(source, rollup) {
+    const checkResults = [...rollup.contexts.nodes];
+    let pageInfo = rollup.contexts.pageInfo;
     const seenCursors = new Set();
     let expected;
     // Only an explicit false proves we reached the last page, even if its checks pass.
@@ -41299,38 +41312,37 @@ async function loadAllCheckResults({ statusCheckRollup, ...source }) {
         if (page.statusCheckRollup === null) {
             throw new Error('The paginated check rollup is unavailable');
         }
-        if (source.afterConfirmation) {
-            expected ??= reportedCheckStateCounts(statusCheckRollup.contexts);
-            const counts = reportedCheckStateCounts(page.statusCheckRollup.contexts);
-            // A state change can reorder checks across the cursor. Discard this entire read.
-            if (!(0,external_node_util_.isDeepStrictEqual)(counts, expected))
-                return INCONSISTENT_CHECK_PAGES;
-        }
+        expected ??= reportedCheckStateCounts(rollup.contexts);
+        const counts = reportedCheckStateCounts(page.statusCheckRollup.contexts);
+        if (!(0,external_node_util_.isDeepStrictEqual)(counts, expected))
+            return INCONSISTENT_CHECK_PAGES;
         checkResults.push(...page.statusCheckRollup.contexts.nodes);
         pageInfo = page.statusCheckRollup.contexts.pageInfo;
     }
-    if (source.afterConfirmation) {
+    if (expected !== undefined || source.afterConfirmation) {
         // An overlapping page can hide a check inserted before its cursor.
-        const ids = checkResults.map(confirmationCheckNodeId);
+        const ids = checkResults.map(requireCheckNodeId);
         if (new Set(ids).size !== ids.length) {
-            throw new Error('A check appeared twice while reading CI after confirmation');
-        }
-        if (expected !== undefined) {
-            // Count raw results, not just required or latest checks. GitHub reports
-            // these totals for the whole connection on each page, not a locked snapshot.
-            const observed = new Map();
-            for (const check of checkResults) {
-                const key = isCheckRun(check)
-                    ? `check:${String(check.conclusion ?? check.status)}`
-                    : `status:${String(checkStatus(check))}`;
-                observed.set(key, (observed.get(key) ?? 0) + 1);
-            }
-            if (!(0,external_node_util_.isDeepStrictEqual)(observed, expected)) {
-                return INCONSISTENT_CHECK_PAGES;
-            }
+            throw new Error('A check appeared twice while reading CI');
         }
     }
-    return checkResults;
+    if (expected === undefined)
+        return { checkResults, allPagesHealthy: true };
+    // GitHub reports state counts for the whole connection, but pages are not a
+    // snapshot. Mixed counts cannot establish that only unselected checks were unhealthy.
+    const observed = new Map();
+    let allPagesHealthy = checkResults.length !== 0;
+    for (const check of checkResults) {
+        const run = isCheckRun(check);
+        const state = run ? (check.conclusion ?? check.status) : checkStatus(check);
+        const key = `${run ? 'check' : 'status'}:${String(state)}`;
+        observed.set(key, (observed.get(key) ?? 0) + 1);
+        if (!isHealthyCheckStatus(state))
+            allPagesHealthy = false;
+    }
+    if (!(0,external_node_util_.isDeepStrictEqual)(observed, expected))
+        return INCONSISTENT_CHECK_PAGES;
+    return { checkResults, allPagesHealthy };
 }
 function reportedCheckStateCounts(contexts) {
     const counts = new Map();
@@ -41342,21 +41354,21 @@ function reportedCheckStateCounts(contexts) {
             throw new Error('GitHub did not report CI state counts');
         }
         for (const { state, count } of states) {
-            if (!Number.isSafeInteger(count) || count < 0) {
+            const key = `${kind}:${state}`;
+            if (!Number.isSafeInteger(count) || count < 0 || counts.has(key)) {
                 throw new Error('GitHub reported an invalid CI state count');
             }
-            if (count > 0)
-                counts.set(`${kind}:${state}`, count);
+            counts.set(key, count);
         }
     }
-    return counts;
+    return new Map([...counts].filter(([, count]) => count > 0));
 }
-async function readCommitCheckPage({ octokit, pullRequestNumber, repo, baseRefName, commit, afterConfirmation }, cursor) {
+async function readCommitCheckPage({ octokit, pullRequestNumber, repo, baseRefName, commit }, cursor) {
     if (commit.id === undefined || commit.id === '') {
         throw new Error('The GraphQL response did not include a commit node ID');
     }
     // isRequired is relative to the pull request's current base, even on a pinned commit.
-    const query = `query($commitId:ID!, $cursor:String, $owner:String!, $name:String!, $number:Int!, $afterConfirmation:Boolean!) {
+    const query = `query($commitId:ID!, $cursor:String, $owner:String!, $name:String!, $number:Int!) {
                   repository(owner:$owner, name:$name) {
                     pullRequest(number:$number) { baseRefName }
                   }
@@ -41367,8 +41379,8 @@ async function readCommitCheckPage({ octokit, pullRequestNumber, repo, baseRefNa
                       statusCheckRollup {
                         state
                         contexts(first:100, after:$cursor) {
-                          checkRunCountsByState @include(if:$afterConfirmation) { state count }
-                          statusContextCountsByState @include(if:$afterConfirmation) { state count }
+                          checkRunCountsByState { state count }
+                          statusContextCountsByState { state count }
                           nodes {
                             ... on CheckRun {
                               id
@@ -41380,7 +41392,7 @@ async function readCommitCheckPage({ octokit, pullRequestNumber, repo, baseRefNa
                               }
                               isRequired(pullRequestNumber:$number)
                               conclusion
-                              status @include(if:$afterConfirmation)
+                              status
                               name
                             }
                             ... on StatusContext {
@@ -41404,7 +41416,6 @@ async function readCommitCheckPage({ octokit, pullRequestNumber, repo, baseRefNa
     const page = prechecksGraphqlContextsPageResult(await graphqlAllowingInaccessibleApps(octokit, query, {
         commitId: commit.id,
         cursor,
-        afterConfirmation,
         owner: repo.owner,
         name: repo.repo,
         number: pullRequestNumber
@@ -41480,7 +41491,7 @@ function filterChecks(checks, checkResults, ignoredChecks, required, selectedChe
     });
     if (selectedChecks !== undefined) {
         for (const check of filteredChecks) {
-            const id = confirmationCheckNodeId(check);
+            const id = requireCheckNodeId(check);
             // A status and a check run may have the same name. Their node IDs identify
             // the records, not immutable conclusions or, for a status, its publisher.
             const kind = isCheckRun(check) ? 'check' : 'status';
@@ -41488,10 +41499,7 @@ function filterChecks(checks, checkResults, ignoredChecks, required, selectedChe
         }
     }
     // Determine if all remaining checks are in a healthy state
-    const unhealthyChecks = filteredChecks.filter(check => {
-        const status = checkStatus(check);
-        return status !== 'SUCCESS' && status !== 'SKIPPED' && status !== 'NEUTRAL';
-    });
+    const unhealthyChecks = filteredChecks.filter(check => !isHealthyCheckStatus(checkStatus(check)));
     // If no checks remain after filtering, default to SUCCESS
     if (filteredChecks.length === 0) {
         const message = 'filterChecks() - after filtering, no checks remain - this will result in a SUCCESS state as it is treated as if no checks are defined';
@@ -41572,10 +41580,10 @@ function checkDatabaseId(check) {
 function checkNodeId(check) {
     return 'id' in check ? check.id : undefined;
 }
-function confirmationCheckNodeId(check) {
+function requireCheckNodeId(check) {
     const id = checkNodeId(check);
     if (typeof id !== 'string' || id === '') {
-        throw new Error('Cannot identify a CI check for deployment confirmation');
+        throw new Error('A CI check is missing its node ID');
     }
     return id;
 }
@@ -41664,6 +41672,9 @@ function checkName(check) {
     const name = 'name' in check ? check.name : undefined;
     const context = 'context' in check ? check.context : undefined;
     return name ?? context;
+}
+function isHealthyCheckStatus(status) {
+    return status === 'SUCCESS' || status === 'SKIPPED' || status === 'NEUTRAL';
 }
 function checkStatus(check) {
     const conclusion = 'conclusion' in check ? check.conclusion : undefined;

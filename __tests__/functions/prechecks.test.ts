@@ -395,29 +395,35 @@ function mockApprovedCi(
   )
 }
 
+type TestCheckPageInfo =
+  NonNullable<TestStatusCheckRollup>['contexts']['pageInfo']
+
+interface TestCheckPageOptions {
+  readonly baseRefName?: string
+  readonly counts?: {
+    readonly checks?: Readonly<Record<string, number>> | null
+    readonly statuses?: Readonly<Record<string, number>>
+  }
+  readonly id?: string
+  readonly oid?: string
+  readonly state?: string
+}
+
 function initialCheckPage(
   nodes: readonly RawCheckResult[] | null,
-  pageInfo: {readonly endCursor: string | null; readonly hasNextPage: boolean},
-  state = 'FAILURE',
-  mergeStateStatus = 'CLEAN'
+  pageInfo: TestCheckPageInfo,
+  options: Pick<TestCheckPageOptions, 'counts' | 'state'> & {
+    readonly mergeStateStatus?: string
+  } = {}
 ): PrechecksGraphqlResult {
+  const {node: commit} = additionalCheckPage(nodes, pageInfo, options)
+  assert.ok(commit)
   return {
     repository: {
       pullRequest: {
         baseRefName: 'main',
-        commits: {
-          nodes: [
-            {
-              commit: {
-                id: 'commit-node',
-                oid: 'abc123',
-                statusCheckRollup:
-                  nodes === null ? null : {contexts: {nodes, pageInfo}, state}
-              }
-            }
-          ]
-        },
-        mergeStateStatus,
+        commits: {nodes: [{commit}]},
+        mergeStateStatus: options.mergeStateStatus ?? 'CLEAN',
         reviewDecision: 'APPROVED',
         reviews: {totalCount: 1}
       }
@@ -427,20 +433,8 @@ function initialCheckPage(
 
 function additionalCheckPage(
   nodes: readonly RawCheckResult[] | null,
-  pageInfo: {
-    readonly endCursor: string | null
-    readonly hasNextPage: boolean
-  } = LAST_PAGE,
-  overrides: {
-    readonly baseRefName?: string
-    readonly counts?: {
-      readonly checks?: Readonly<Record<string, number>> | null
-      readonly statuses?: Readonly<Record<string, number>>
-    }
-    readonly id?: string
-    readonly oid?: string
-    readonly state?: string
-  } = {}
+  pageInfo: TestCheckPageInfo = LAST_PAGE,
+  overrides: TestCheckPageOptions = {}
 ): PrechecksGraphqlContextsPageResult {
   const counts = overrides.counts
   const stateCountsFields =
@@ -512,7 +506,10 @@ async function confirmationCi(
   admitted: readonly RawCheckResult[] | null,
   ...pages: readonly PrechecksGraphqlContextsPageResult[]
 ) {
-  mockCheckPages(initialCheckPage(admitted, LAST_PAGE, 'SUCCESS'), ...pages)
+  mockCheckPages(
+    initialCheckPage(admitted, LAST_PAGE, {state: 'SUCCESS'}),
+    ...pages
+  )
   const recheckCi = await prepareConfirmationCiRecheck()
   return recheckCi()
 }
@@ -1715,6 +1712,10 @@ test('fails closed when a lower stack PR has incomplete CI data', async () => {
 function mockLowerStackCheckPages(baseRefName: string): void {
   mockNativeStack()
   data.inputs.checks = 'required'
+  const counts = {
+    checkRunCountsByState: [],
+    statusContextCountsByState: stateCounts({SUCCESS: 1, FAILURE: 1})
+  }
   queueMockImplementation(
     graphQLOK,
     () => Promise.resolve(stackPolicy({headSha: STACK_SELECTED_SHA})),
@@ -1723,15 +1724,10 @@ function mockLowerStackCheckPages(baseRefName: string): void {
         stackPolicy({
           headSha: STACK_LOWER_SHA,
           rollup: {
-            state: 'SUCCESS',
+            state: 'FAILURE',
             contexts: {
-              nodes: [
-                {
-                  context: 'legacy-ci',
-                  isRequired: true,
-                  state: 'SUCCESS'
-                }
-              ],
+              ...counts,
+              nodes: [LEGACY_CI_STATUS],
               pageInfo: {endCursor: 'next-check-page', hasNextPage: true}
             }
           }
@@ -1741,7 +1737,6 @@ function mockLowerStackCheckPages(baseRefName: string): void {
       assert.deepStrictEqual(variables, {
         commitId: 'stack-commit-' + STACK_LOWER_SHA,
         cursor: 'next-check-page',
-        afterConfirmation: false,
         owner: 'corp',
         name: 'test',
         number: 121
@@ -1754,9 +1749,11 @@ function mockLowerStackCheckPages(baseRefName: string): void {
           statusCheckRollup: {
             state: 'FAILURE',
             contexts: {
+              ...counts,
               nodes: [
                 {
                   context: 'security',
+                  id: 'SC_security',
                   isRequired: true,
                   state: 'FAILURE'
                 }
@@ -2040,7 +2037,6 @@ for (const state of ['FAILURE', 'PENDING'] as const) {
         [null, MORE_CHECKS.endCursor].map(cursor => ({
           commitId: 'commit-node',
           cursor,
-          afterConfirmation: true,
           owner: 'corp',
           name: 'test',
           number: 123
@@ -2057,7 +2053,10 @@ for (const checks of [null, [STACK_SECURITY_CHECK]]) {
     'confirmation still allows ' + scenario + ' when merging is blocked',
     async () => {
       mockCheckPages(
-        initialCheckPage(checks, LAST_PAGE, 'SUCCESS', 'BLOCKED'),
+        initialCheckPage(checks, LAST_PAGE, {
+          state: 'SUCCESS',
+          mergeStateStatus: 'BLOCKED'
+        }),
         additionalCheckPage(checks)
       )
       const recheckCi = await prepareConfirmationCiRecheck()
@@ -2093,7 +2092,7 @@ test('confirmation finds a new base-branch requirement even when admission found
   data.inputs.stable_branch = 'release'
   data.inputs.allow_non_default_target_branch_deployments = true
   mockCheckPages(
-    initialCheckPage(null, LAST_PAGE, 'SUCCESS'),
+    initialCheckPage(null, LAST_PAGE, {state: 'SUCCESS'}),
     additionalCheckPage(null)
   )
   const recheckCi = await prepareConfirmationCiRecheck()
@@ -2111,7 +2110,7 @@ test('confirmation finds a new base-branch requirement even when admission found
 })
 
 test('confirmation stops if the required CI policy becomes unreadable', async () => {
-  mockCheckPages(initialCheckPage([], LAST_PAGE, 'SUCCESS'))
+  mockCheckPages(initialCheckPage([], LAST_PAGE, {state: 'SUCCESS'}))
   const recheckCi = await prepareConfirmationCiRecheck()
   loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
     Promise.reject(new Error('Cannot read the base branch rules'))
@@ -2129,7 +2128,10 @@ for (const [description, response] of [
   ['another base', additionalCheckPage([], LAST_PAGE, {baseRefName: 'other'})]
 ] as const) {
   test('confirmation fails closed on ' + description, async () => {
-    mockCheckPages(initialCheckPage([], LAST_PAGE, 'SUCCESS'), response)
+    mockCheckPages(
+      initialCheckPage([], LAST_PAGE, {state: 'SUCCESS'}),
+      response
+    )
 
     const recheckCi = await prepareConfirmationCiRecheck()
     const result = await recheckCi()
@@ -2248,13 +2250,15 @@ for (const [change, selection, expected, optional = 'SUCCESS'] of [
   ['requiredFails', 'required', 'FAILURE', 'FAILURE'],
   ['requiredFails', 'named', 'FAILURE'],
   ['requiredFails', 'ignore optional', 'FAILURE'],
-  ['optionalFails', 'required', 'SUCCESS'],
-  ['optionalFails', 'ignore optional', 'SUCCESS'],
+  ['optionalFails', 'required', 'UNAVAILABLE'],
+  ['optionalFails', 'ignore optional', 'UNAVAILABLE'],
   ['failureMoves', 'all', 'FAILURE'],
   ['failureMoves', 'empty checks', 'FAILURE'],
   ['failureMoves', 'named', 'FAILURE'],
   ['failureMoves', 'required', 'FAILURE', 'IN_PROGRESS'],
-  ['unchanged', 'required', 'SUCCESS', 'IN_PROGRESS'],
+  ['unchanged', 'required', 'UNAVAILABLE', 'IN_PROGRESS'],
+  ['unchanged', 'all', 'SUCCESS', 'SKIPPED'],
+  ['unchanged', 'all', 'SUCCESS', 'NEUTRAL'],
   ['rollupKeepsChanging', 'required', 'UNAVAILABLE'],
   ['failureKeepsMoving', 'all', 'UNAVAILABLE']
 ] as const) {
@@ -2265,7 +2269,7 @@ for (const [change, selection, expected, optional = 'SUCCESS'] of [
     if (selection === 'required') data.inputs.checks = 'required'
     if (selection === 'named') data.inputs.checks = ['ci-001']
 
-    // Counts include superseded runs, even when they don't decide the deployment.
+    // Counts include superseded runs as well as the checks selected by policy.
     if (change === 'failureMoves' && selection === 'named') {
       const optional = {...HIDDEN_CHECK, name: 'optional', isRequired: false}
       checks.push(
@@ -2308,9 +2312,14 @@ for (const [change, selection, expected, optional = 'SUCCESS'] of [
         }
       )
     })
+    const admitted = checks.map(check => ({...check, conclusion: 'SUCCESS'}))
+    const options = {
+      state: 'SUCCESS',
+      counts: {checks: {SUCCESS: admitted.length}}
+    }
     mockCheckPages(
-      initialCheckPage(checks.slice(0, 100), MORE_CHECKS, 'SUCCESS'),
-      additionalCheckPage(checks.slice(100), LAST_PAGE, {state: 'SUCCESS'}),
+      initialCheckPage(admitted.slice(0, 100), MORE_CHECKS, options),
+      additionalCheckPage(admitted.slice(100), LAST_PAGE, options),
       ...pages
     )
     const recheckCi = await prepareConfirmationCiRecheck()
@@ -2357,9 +2366,11 @@ for (const reread of ['consistent', 'still changing'] as const) {
       graphQLOK.mock.calls.slice(1).map(call => call.arguments[1]['cursor']),
       [null, more, null, more]
     )
-    const passed = reread === 'consistent'
-    assert.equal(result.commitStatus, passed ? 'SUCCESS' : 'UNAVAILABLE')
-    assert.equal(Boolean(result.failure), !passed)
+    assert.equal(result.commitStatus, 'UNAVAILABLE', result.failure)
+    assert.match(
+      result.failure ?? '',
+      reread === 'consistent' ? /multiple pages/u : /could not be verified/u
+    )
   })
 }
 
@@ -2513,12 +2524,14 @@ for (const [description, pageInfo] of [
       description,
     async () => {
       const checks = [LEGACY_CI_STATUS]
+      const counts = {statuses: {SUCCESS: 1}}
       const result = await confirmationCi(
         checks,
-        additionalCheckPage([], MORE_CHECKS),
+        additionalCheckPage([], MORE_CHECKS, {counts}),
         additionalCheckPage(
           checks,
-          unsafeInvalidValue<typeof LAST_PAGE>(pageInfo)
+          unsafeInvalidValue<typeof LAST_PAGE>(pageInfo),
+          {counts}
         )
       )
       assert.equal(result.commitStatus, 'UNAVAILABLE', result.failure)
@@ -2632,17 +2645,15 @@ for (const [scenario, optionalApp, selectedId, expectedCalls] of [
         id: 'CR_122',
         databaseId: 122,
         checkSuite: optionalApp,
-        isRequired: false,
-        conclusion: 'FAILURE'
+        isRequired: false
       }
       data.inputs.checks = 'required'
       getCheckRunMock.mock.mockImplementation(() =>
         Promise.resolve({data: VISIBLE_CHECK_RUN})
       )
-      // The Apps share a check name. Pagination must not collapse the older
-      // optional failure into the newer required success before resolving the App.
+      // Both check runs passed. Resolve their Apps before comparing the selected checks.
       const firstPage = [required, ...PAGINATED_CHECKS.slice(2)]
-      const counts = {checks: {SUCCESS: 100, FAILURE: 1}}
+      const counts = {checks: {SUCCESS: 101}}
       const result = await confirmationCi(
         [required],
         additionalCheckPage(firstPage, MORE_CHECKS, {counts}),
@@ -2667,7 +2678,7 @@ test('confirmation verifies only the required hidden run when policy starts requ
   const older = {...check, databaseId: 122, id: 'CR_122', isRequired: false}
   data.inputs.checks = 'required'
   mockCheckPages(
-    initialCheckPage([check], LAST_PAGE, 'SUCCESS'),
+    initialCheckPage([check], LAST_PAGE, {state: 'SUCCESS'}),
     additionalCheckPage([check, older])
   )
   const recheckCi = await prepareConfirmationCiRecheck()
@@ -2713,7 +2724,7 @@ function setAppCheckPolicy(
     Promise.resolve(required)
   )
   graphQLOK.mock.mockImplementation(() =>
-    Promise.resolve(initialCheckPage(reported, LAST_PAGE, 'SUCCESS'))
+    Promise.resolve(initialCheckPage(reported, LAST_PAGE, {state: 'SUCCESS'}))
   )
 }
 
@@ -5048,18 +5059,16 @@ test('allows checks=required when only an optional CI check is failing', async (
 test('rejects a required failing check after the first 100 contexts', async () => {
   const firstPage = Array.from({length: 100}, (_, index) => ({
     conclusion: 'SUCCESS',
+    id: 'CR_' + String(index),
     isRequired: true,
     name: `healthy-${String(index)}`
   }))
+  const counts = {checks: {SUCCESS: 100, FAILURE: 1}}
   mockCheckPages(
-    initialCheckPage(firstPage, {
-      endCursor: 'cursor-1',
-      hasNextPage: true
-    }),
-    additionalCheckPage(
-      [{conclusion: 'FAILURE', isRequired: true, name: 'required-101'}],
-      LAST_PAGE
-    )
+    initialCheckPage(firstPage, MORE_CHECKS, {counts}),
+    additionalCheckPage([{...CONFIRMED_CI, conclusion: 'FAILURE'}], LAST_PAGE, {
+      counts
+    })
   )
   data.inputs.checks = 'required'
 
@@ -5070,8 +5079,7 @@ test('rejects a required failing check after the first 100 contexts', async () =
   })
   assert.deepStrictEqual(graphQLOK.mock.calls[1]?.arguments[1], {
     commitId: 'commit-node',
-    cursor: 'cursor-1',
-    afterConfirmation: false,
+    cursor: MORE_CHECKS.endCursor,
     owner: 'corp',
     name: 'test',
     number: 123
@@ -5084,15 +5092,16 @@ test('rejects a required failing check after the first 100 contexts', async () =
 })
 
 test('rejects a failing legacy status context on a later page', async () => {
+  const counts = {statuses: {SUCCESS: 1, FAILURE: 1}}
   mockCheckPages(
     initialCheckPage(
-      [{context: 'first-status', isRequired: true, state: 'SUCCESS'}],
-      {endCursor: 'cursor-1', hasNextPage: true}
+      [{...LEGACY_CI_STATUS, context: 'first-status', id: 'SC_first'}],
+      MORE_CHECKS,
+      {counts}
     ),
-    additionalCheckPage(
-      [{context: 'legacy-ci', isRequired: true, state: 'FAILURE'}],
-      LAST_PAGE
-    )
+    additionalCheckPage([{...LEGACY_CI_STATUS, state: 'FAILURE'}], LAST_PAGE, {
+      counts
+    })
   )
   data.inputs.checks = ['legacy-ci']
 
@@ -5104,15 +5113,12 @@ test('rejects a failing legacy status context on a later page', async () => {
 })
 
 test('finds an explicitly requested healthy check on a later page', async () => {
+  const counts = {checks: {SUCCESS: 1}, statuses: {SUCCESS: 1}}
   mockCheckPages(
-    initialCheckPage(
-      [{conclusion: 'SUCCESS', isRequired: true, name: 'first-check'}],
-      {endCursor: 'cursor-1', hasNextPage: true}
-    ),
-    additionalCheckPage(
-      [{conclusion: 'SUCCESS', isRequired: true, name: 'security'}],
-      LAST_PAGE
-    )
+    initialCheckPage([LEGACY_CI_STATUS], MORE_CHECKS, {counts}),
+    additionalCheckPage([{...CONFIRMED_CI, name: 'security'}], LAST_PAGE, {
+      counts
+    })
   )
   data.inputs.checks = ['security']
 
@@ -5121,37 +5127,54 @@ test('finds an explicitly requested healthy check on a later page', async () => 
   })
 })
 
-test('ignores a failing check discovered on a later page', async () => {
-  mockCheckPages(
-    initialCheckPage(
-      [{conclusion: 'SUCCESS', isRequired: true, name: 'first-check'}],
-      {endCursor: 'cursor-1', hasNextPage: true}
-    ),
-    additionalCheckPage(
-      [{conclusion: 'FAILURE', isRequired: false, name: 'optional-ci'}],
-      LAST_PAGE
+for (const [selection, state] of [
+  ['required', 'FAILURE'],
+  ['ignored', 'IN_PROGRESS'],
+  ['latest', 'FAILURE']
+] as const) {
+  test(`does not admit mixed paginated checks with ${selection} selection`, async () => {
+    const check = CONFIRMED_CI
+    const other = {
+      ...check,
+      id: 'CR_124',
+      databaseId: 124,
+      name: selection === 'latest' ? check.name : 'optional',
+      isRequired: false,
+      conclusion: state === 'IN_PROGRESS' ? null : state,
+      status: state === 'IN_PROGRESS' ? state : 'COMPLETED'
+    }
+    if (selection === 'required') data.inputs.checks = 'required'
+    if (selection === 'ignored') data.inputs.ignored_checks = [other.name]
+    const counts = {checks: {SUCCESS: 1, [state]: 1}}
+    mockCheckPages(
+      initialCheckPage([check], MORE_CHECKS, {counts}),
+      additionalCheckPage([other], LAST_PAGE, {counts})
     )
-  )
-  data.inputs.ignored_checks = ['optional-ci']
 
-  assert.partialDeepStrictEqual(await prechecks(context, octokit, data), {
-    status: true
+    const result = await prechecks(context, octokit, data)
+    assert.equal(result.status, false, result.message)
+    assert.match(
+      result.message,
+      /could not verify.*optional, ignored, and superseded/su
+    )
+    assertCalledWith(setOutputMock, 'commit_status', 'UNAVAILABLE')
+    assertCalledTimes(graphQLOK, 2)
   })
-})
+}
 
 test('accepts healthy required checks spanning several pages', async () => {
+  const counts = {checks: {NEUTRAL: 1, SKIPPED: 1}, statuses: {SUCCESS: 1}}
   mockCheckPages(
-    initialCheckPage(
-      [{conclusion: 'SUCCESS', isRequired: true, name: 'first-check'}],
-      {endCursor: 'cursor-1', hasNextPage: true}
+    initialCheckPage([LEGACY_CI_STATUS], MORE_CHECKS, {counts}),
+    additionalCheckPage(
+      [{...CONFIRMED_CI, conclusion: 'NEUTRAL'}],
+      {endCursor: 'cursor-2', hasNextPage: true},
+      {counts}
     ),
     additionalCheckPage(
-      [{conclusion: 'SUCCESS', isRequired: true, name: 'second-check'}],
-      {endCursor: 'cursor-2', hasNextPage: true}
-    ),
-    additionalCheckPage(
-      [{conclusion: 'SUCCESS', isRequired: true, name: 'third-check'}],
-      LAST_PAGE
+      [{...HIDDEN_CHECK, conclusion: 'SKIPPED', name: 'third-check'}],
+      LAST_PAGE,
+      {counts}
     )
   )
   data.inputs.checks = 'required'
@@ -5163,23 +5186,86 @@ test('accepts healthy required checks spanning several pages', async () => {
 })
 
 test('paginates checks=all even when the aggregate state is successful', async () => {
+  const options = {
+    state: 'SUCCESS',
+    counts: {checks: {SUCCESS: 1}, statuses: {SUCCESS: 1}}
+  }
   mockCheckPages(
-    initialCheckPage(
-      [{conclusion: 'SUCCESS', isRequired: true, name: 'first-check'}],
-      {endCursor: 'cursor-1', hasNextPage: true},
-      'SUCCESS'
-    ),
-    additionalCheckPage(
-      [{conclusion: 'SUCCESS', isRequired: true, name: 'second-check'}],
-      LAST_PAGE
-    )
+    initialCheckPage([LEGACY_CI_STATUS], MORE_CHECKS, options),
+    additionalCheckPage([CONFIRMED_CI], LAST_PAGE, options)
   )
 
   assert.partialDeepStrictEqual(await prechecks(context, octokit, data), {
     status: true
   })
   assertCalledTimes(graphQLOK, 2)
+  for (const {
+    arguments: [query]
+  } of graphQLOK.mock.calls) {
+    assert.match(query, /checkRunCountsByState \{ state count \}/u)
+    assert.match(query, /statusContextCountsByState \{ state count \}/u)
+  }
 })
+
+for (const [description, id, counts] of [
+  ['a repeated check', CONFIRMED_CI.id, {checks: {SUCCESS: 2}}],
+  ['a missing check ID', '', {checks: {SUCCESS: 2}}],
+  ['invalid counts', 'CR_124', {checks: {SUCCESS: -1}}]
+] as const) {
+  test('does not admit paginated checks with ' + description, async () => {
+    mockCheckPages(
+      initialCheckPage([CONFIRMED_CI], MORE_CHECKS, {counts}),
+      additionalCheckPage([{...CONFIRMED_CI, id}], LAST_PAGE, {counts})
+    )
+    await assertChecksUnavailable()
+    assertCalledTimes(graphQLOK, 2)
+  })
+}
+
+for (const reread of [
+  'healthy',
+  'still incomplete',
+  'missing rollup',
+  'changed base'
+]) {
+  test(
+    'reads inconsistent check pages once more before admission: ' + reread,
+    async () => {
+      const counts = {checks: {SUCCESS: 1}, statuses: {SUCCESS: 1}}
+      const first = initialCheckPage([CONFIRMED_CI], MORE_CHECKS, {counts})
+      const incomplete = additionalCheckPage([], LAST_PAGE, {counts})
+      const last = additionalCheckPage([LEGACY_CI_STATUS], LAST_PAGE, {counts})
+      mockCheckPages(
+        first,
+        incomplete,
+        additionalCheckPage(
+          reread === 'missing rollup' ? null : [CONFIRMED_CI],
+          MORE_CHECKS,
+          {
+            counts,
+            baseRefName: reread === 'changed base' ? 'other' : 'main'
+          }
+        ),
+        reread === 'healthy' ? last : incomplete
+      )
+      if (reread === 'healthy') {
+        const result = await prechecks(context, octokit, data)
+        assert.equal(result.status, true, result.message)
+      } else {
+        await assertChecksUnavailable(
+          reread === 'changed base' ? UNVERIFIED_BASE_MESSAGE : undefined
+        )
+      }
+      const cursors = [undefined, MORE_CHECKS.endCursor, null]
+      if (reread === 'healthy' || reread === 'still incomplete')
+        cursors.push(MORE_CHECKS.endCursor)
+      assert.deepEqual(
+        graphQLOK.mock.calls.map(call => call.arguments[1]['cursor']),
+        cursors
+      )
+    }
+  )
+}
 
 test('skip_ci bypasses malformed paginated check data', async () => {
   graphQLOK.mock.mockImplementation(() =>
@@ -5224,11 +5310,8 @@ for (const [name, pageInfo] of [
 
 test('fails closed when a pagination cursor repeats', async () => {
   mockCheckPages(
-    initialCheckPage([], {endCursor: 'cursor-1', hasNextPage: true}),
-    additionalCheckPage([], {
-      endCursor: 'cursor-1',
-      hasNextPage: true
-    })
+    initialCheckPage([], MORE_CHECKS, {counts: {}}),
+    additionalCheckPage([], MORE_CHECKS, {counts: {}})
   )
   data.inputs.checks = 'required'
 
@@ -5300,7 +5383,7 @@ test('fails closed when the initial page omits page information', async () => {
         }
       }
     }
-  }>(initialCheckPage([], LAST_PAGE, 'FAILURE'))
+  }>(initialCheckPage([], LAST_PAGE, {state: 'FAILURE'}))
   delete result.repository.pullRequest.commits.nodes[0]?.commit
     .statusCheckRollup.contexts.pageInfo
   graphQLOK.mock.mockImplementation(() => Promise.resolve(result))
@@ -5310,13 +5393,13 @@ test('fails closed when the initial page omits page information', async () => {
 })
 
 test('fails closed when a paginated response omits page information', async () => {
-  const page = additionalCheckPage([], LAST_PAGE)
+  const page = additionalCheckPage([], LAST_PAGE, {counts: {}})
   const malformedPage = unsafeInvalidValue<{
     node: {statusCheckRollup: {contexts: {pageInfo?: unknown}}}
   }>(page)
   delete malformedPage.node.statusCheckRollup.contexts.pageInfo
   mockCheckPages(
-    initialCheckPage([], {endCursor: 'cursor-1', hasNextPage: true}),
+    initialCheckPage([], MORE_CHECKS, {counts: {}}),
     unsafeInvalidValue<PrechecksGraphqlContextsPageResult>(malformedPage)
   )
   data.inputs.checks = 'required'
@@ -5386,7 +5469,7 @@ test('recovers check data when a check suite App is not viewable by the token', 
       }
     ],
     LAST_PAGE,
-    'SUCCESS'
+    {state: 'SUCCESS'}
   )
   graphQLOK.mock.mockImplementationOnce(() =>
     Promise.reject(
@@ -5479,23 +5562,22 @@ test('fails closed when lower stack App metadata errors include an unrelated Gra
 })
 
 test('recovers paginated check data when a check suite App is not viewable by the token', async () => {
+  const counts = {statuses: {SUCCESS: 1}, checks: {SUCCESS: 1}}
   const page = additionalCheckPage(
     [
       {
         checkSuite: {app: null},
         conclusion: 'SUCCESS',
+        id: 'CR_2',
         isRequired: true,
         name: 'second-check'
       }
     ],
-    LAST_PAGE
+    LAST_PAGE,
+    {counts}
   )
   mockCheckPages(
-    initialCheckPage(
-      [{conclusion: 'SUCCESS', isRequired: true, name: 'first-check'}],
-      {endCursor: 'cursor-1', hasNextPage: true},
-      'SUCCESS'
-    ),
+    initialCheckPage([LEGACY_CI_STATUS], MORE_CHECKS, {counts}),
     inaccessibleAppError(page, [{path: PAGE_QUERY_APP_PATH, type: 'FORBIDDEN'}])
   )
 
@@ -5506,23 +5588,22 @@ test('recovers paginated check data when a check suite App is not viewable by th
 })
 
 test('rejects a failed required check with inaccessible App metadata on a later page', async () => {
+  const counts = {statuses: {SUCCESS: 1}, checks: {FAILURE: 1}}
   const page = additionalCheckPage(
     [
       {
         checkSuite: {app: null},
         conclusion: 'FAILURE',
+        id: 'CR_2',
         isRequired: true,
         name: 'second-check'
       }
     ],
-    LAST_PAGE
+    LAST_PAGE,
+    {counts}
   )
   mockCheckPages(
-    initialCheckPage(
-      [{conclusion: 'SUCCESS', isRequired: true, name: 'first-check'}],
-      {endCursor: 'cursor-1', hasNextPage: true},
-      'SUCCESS'
-    ),
+    initialCheckPage([LEGACY_CI_STATUS], MORE_CHECKS, {counts}),
     inaccessibleAppError(page, [
       {path: [...PAGE_QUERY_APP_PATH, 'databaseId'], type: 'FORBIDDEN'}
     ])

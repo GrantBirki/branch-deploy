@@ -18,17 +18,19 @@ In this repository, the current ruleset requires the following CI checks:
 
 Any other CI checks that run on a pull request are not required and are considered non-required checks.
 
-Branch Deploy v12 evaluates the complete paginated check rollup for the selected commit. When the same GitHub App and check name, or the same legacy status context, appears more than once, the newest run is authoritative. A selected check is healthy when its newest state or conclusion is `SUCCESS`, `SKIPPED`, or `NEUTRAL`. Any other selected state or conclusion blocks deployment, including a newer pending or failing rerun even when an older run passed. This means a skipped or neutral check does not block Branch Deploy by itself; configure the check to fail if your deployment policy requires that work to run successfully. If GitHub returns incomplete, malformed, mismatched, or non-advancing check data, Branch Deploy fails closed and sets `commit_status` to `UNAVAILABLE`.
+Branch Deploy evaluates the check runs and commit statuses on the selected commit. When GitHub returns them on one page (up to 100 results), the newest run for each GitHub App and check name, or the newest status for each legacy context, is authoritative. A selected result must be `SUCCESS`, `SKIPPED`, or `NEUTRAL`. Any other selected state or conclusion blocks deployment, including a newer pending or failing run when an older run passed. If your policy requires the work to run successfully, configure the check to fail instead of skipping it or reporting a neutral result.
+
+With more than 100 results, GitHub can update checks between pages. Branch Deploy compares the results it read with GitHub's counts by state and starts over once if they disagree. It can proceed only when every reported result is successful, skipped, or neutral. A pending or failed result can therefore block deployment even if it appears optional, ignored, or superseded. If the Action cannot verify the results, it stops with `commit_status` set to `UNAVAILABLE`. Checks can still change after verification.
 
 For PR deployments and noops, `checks: all` (the default) and `checks: required` also read the target branch's named status checks from classic protection and active rulesets. Required checks that have not reported yet block deployment. Repositories without required checks still work, and a rule that requires deployment before merge will not block the deployment itself.
 
-If GitHub reports that rulesets are unavailable on the repository's plan, ordinary PRs still check classic protection. Other policy-read errors stop deployment. Required-workflow rules are not treated as named status checks for ordinary PRs. Explicit check lists, `ignored_checks`, `skip_ci`, and stable-branch/SHA deployments retain their usual behavior.
+If GitHub reports that rulesets are unavailable on the repository's plan, ordinary PRs still check classic protection. Other policy-read errors stop deployment. Required-workflow rules are not treated as named status checks for ordinary PRs. The `skip_ci` option and stable-branch or exact-SHA deployments retain their usual behavior.
 
 When a required check names a specific GitHub App, Branch Deploy verifies that App. If the App is hidden in the PR's check data, the Action checks the exact run using the GitHub Checks API. If GitHub cannot verify the source, deployment stops. Legacy commit statuses still work for `any source` rules, but cannot satisfy an App-bound rule; report those checks with the Checks API instead.
 
 ## Using the `checks` Input Option
 
-This section will contain a few examples of how you can use the `checks` option
+These examples assume GitHub returns the checks on one page. The verification rule for more than 100 results applies to every selection below.
 
 ### Example 1: All CI Checks Must Pass
 

@@ -2262,10 +2262,15 @@ const scenarios = [
         ['failing run', 'FAILURE'],
         ['replacement run', 'UNAVAILABLE'],
         ['shifted check pages', 'UNAVAILABLE'],
+        ['healthy checks across two pages', 'SUCCESS', 'all'],
         ['page-one check fails before page two', 'FAILURE', 'all'],
         ['required check fails between pages', 'FAILURE', 'required'],
-        ['only an optional check fails between pages', 'SUCCESS', 'required'],
-        ['optional failure reorders pages once', 'SUCCESS', 'required'],
+        [
+          'only an optional check fails between pages',
+          'UNAVAILABLE',
+          'required'
+        ],
+        ['optional failure reorders pages once', 'UNAVAILABLE', 'required'],
         [
           'optional failure reorders pages on both reads',
           'UNAVAILABLE',
@@ -2314,7 +2319,9 @@ const scenarios = [
           const movedHead = change === 'moved pull request head'
           const shiftedPages = change === 'shifted check pages'
           const paginated = shiftedPages || pagedChecks !== undefined
-          const optional = pagedChecks === 'required' && expected === 'SUCCESS'
+          const healthyPages = change === 'healthy checks across two pages'
+          const optional =
+            change === 'only an optional check fails between pages'
           const optionalReordersPages = change.startsWith(
             'optional failure reorders pages'
           )
@@ -2330,19 +2337,24 @@ const scenarios = [
               name: `ci-${String(i + 1).padStart(3, '0')}`
             }))
             if (optionalConclusion !== undefined) {
-              state.rollupState = optionalConclusion ?? 'PENDING'
               state.rollupContexts = state.rollupContexts.map((run, index) =>
                 index === 1 ? unrelatedCheck : run
               )
             }
             if (movingFailure) {
-              // Keep an older failed run in the counts without treating it as current.
+              // Include a superseded result in the connection-wide counts.
               state.rollupContexts = [
                 ...state.rollupContexts,
                 supersededFailure
               ]
             }
           }
+          // Admit healthy checks, then report the test results after confirmation.
+          const initial = state.rollupContexts
+          state.rollupContexts = initial.map(run => ({
+            ...run,
+            conclusion: 'SUCCESS'
+          }))
           state.confirmationReaction = () => {
             assert.equal(requireMockLock(context, lock)['sticky'], false)
             if (movedHead) {
@@ -2353,9 +2365,10 @@ const scenarios = [
                 }
               }
             } else if (paginated) {
-              const initial = state.rollupContexts
+              state.rollupContexts = initial
               state.beforeCheckPage = start => {
                 pagesAfterConfirmation.push(start)
+                if (healthyPages) return
                 if (optionalReordersPages) {
                   // The optional check fails and sorts first. GitHub's counts change and
                   // page two repeats the passing required check at the end of page one.
@@ -2364,7 +2377,7 @@ const scenarios = [
                   const green =
                     start === 0 &&
                     (pagesAfterConfirmation.length === 1 ||
-                      expected === 'UNAVAILABLE')
+                      change.endsWith('on both reads'))
                   state.rollupState = green ? 'SUCCESS' : 'FAILURE'
                   state.rollupContexts = green
                     ? initial
@@ -2414,9 +2427,12 @@ const scenarios = [
           const result = await runMain(context, inputs)
           assertOutput(context, result, 'commit_status', expected)
           if (pagedChecks !== undefined) {
-            assert.deepEqual(pagesAfterConfirmation, [0, 100, 0, 100])
+            assert.deepEqual(
+              pagesAfterConfirmation,
+              healthyPages ? [0, 100] : [0, 100, 0, 100]
+            )
           }
-          if (optional) {
+          if (healthyPages) {
             assertExit(context, result, 0)
             assertReason(context, result, 'deployment_ready')
             assert.equal(
@@ -2493,7 +2509,8 @@ const scenarios = [
               isRequired
             }
           }),
-          ...Array.from({length: 99}, (_, i) => ({
+          // With all 100 results on one page, we can exclude the other App's failure.
+          ...Array.from({length: 98}, (_, i) => ({
             type: 'status-context' as const,
             context: `optional-${String(i)}`,
             state: 'SUCCESS',
@@ -5759,6 +5776,16 @@ const scenarios = [
             requireRoute(context, 'POST', '/graphql', 1).body,
             /pullRequest\(number:\$number\) \{ baseRefName \}/u
           )
+
+          context.state.rollupContexts = context.state.rollupContexts.map(
+            (run, index) => ({...run, isRequired: index < 100})
+          )
+          const mixed = await runMain(context, {checks: 'required'})
+          assertExit(context, mixed, 1)
+          assertOutput(context, mixed, 'commit_status', 'UNAVAILABLE')
+          assertCommentIncludes(context, 'could not verify that every result')
+          assertNoDeployment(context, mixed)
+          assertNoLockRoutes(context)
         }
       )
   },

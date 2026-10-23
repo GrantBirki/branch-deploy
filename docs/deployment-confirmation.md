@@ -35,7 +35,9 @@ The only reaction (👍 or 👎) that will be considered is the first reaction f
 
 For a pull request deployment with CI enabled, we [check CI](./checks.md) again on the exact commit you confirmed. We continue only if the same selected checks still pass. Repositories without CI and workflows that deploy before merging still work as before. CI can still change after we check.
 
-We stop if a selected check appears, disappears, or is replaced, even by a passing rerun. If checks span multiple pages, we compare what we read with GitHub's check counts. We read once more if the counts disagree, then stop if they still don't match. An unrelated optional failure doesn't block deployment.
+We stop if a selected check appears, disappears, or is replaced, even by a passing rerun. With up to 100 results on one page, an unrelated optional failure doesn't block deployment.
+
+With more than 100 results, we compare what we read with GitHub's counts by state, both before and after confirmation. We start over once if the counts disagree. We can proceed only when every reported result is successful, skipped, or neutral, including optional, ignored, and superseded results.
 
 Once the checks settle, post a fresh `.deploy` or `.noop` and confirm the commit it shows. Don't rerun the deployment workflow.
 
