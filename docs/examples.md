@@ -265,6 +265,8 @@ Use the [Terraform guidance above](#terraform) for pull request previews and dep
 
 Use the [four-job workflow](#hardened-workflow-starting-point) as the branch workflow. It checks out deployment helpers at `context.trusted_sha` and the proposed configuration at Branch Deploy's `sha` output. [Separate checkout directories](trusted-checkouts.md) keep those revisions clear, but code running in either directory can change both. Run pull request code on a different runner from the jobs that can apply changes or post the result.
 
+Set `sticky_locks: true` on the starting Branch Deploy step to keep the lock until merge. On the `deploy` job, use `group: terraform-production`, `queue: max`, and `cancel-in-progress: false` to match the merge workflow below. This puts both applies in the same queue and keeps `.unlock` responsive.
+
 ### `.github/workflows/deploy.yml`
 
 ```yaml
@@ -545,13 +547,15 @@ jobs:
 
 Start with the [four-job workflow above](#hardened-workflow-starting-point). If `.noop` should build the site, add a build job after `validate`. Give it read-only repository access, no Cloudflare token, and no deployment environment. Report the build outcome from `result` on a separate runner.
 
-A [Pages preview URL](https://developers.cloudflare.com/pages/configuration/preview-deployments/) publishes the site. Use `.deploy to development` for that, and reserve `.deploy` for production. Publish from a fresh runner with trusted upload tooling, a fixed project and branch, and a [Pages API token](https://developers.cloudflare.com/pages/how-to/use-direct-upload-with-continuous-integration/#generate-an-api-token) limited to the intended account. Verify the files belong to the approved commit, and keep candidate install and build scripts out of the publish job.
+A [Pages preview URL](https://developers.cloudflare.com/pages/configuration/preview-deployments/) publishes the site. To support `.deploy to development` alongside production, set `environment_targets: development,production` and expose `steps.branch-deploy.outputs.environment` as a job output. Run the development publish job only for `development` and the production job only for `production`, keeping the starter's other `deploy` conditions on both. Pass only the job results expected for that request to `result`.
+
+Give each publish job its matching GitHub environment, a fixed Pages project and branch, and its own [Pages API token](https://developers.cloudflare.com/pages/how-to/use-direct-upload-with-continuous-integration/#generate-an-api-token). The development token must not be able to publish to production. Use separate Cloudflare accounts if needed. On a fresh runner, use trusted upload tooling and verify the files belong to the approved commit. Keep candidate install and build scripts in the build job.
 
 ## Cloudflare Workers
 
 Use the same [separate build, publish, and result jobs](#cloudflare-pages). For `.noop`, build and test the Worker locally in the build job, without a Cloudflare token or access to live bindings.
 
-Use `.deploy to development` to publish a [development Worker](https://developers.cloudflare.com/workers/wrangler/environments/) with bindings isolated from production. In the publish job, use trusted Wrangler tooling and configuration, verify the bundle belongs to the approved commit, and give the Cloudflare token only to the upload step. Run candidate package scripts only in the build job.
+Route `.deploy to development` and production to separate publish jobs as [described above](#cloudflare-pages). Give each job its matching GitHub environment, a fixed [Worker and bindings](https://developers.cloudflare.com/workers/wrangler/environments/), and credentials limited to that target. Use trusted Wrangler tooling and configuration, verify the bundle belongs to the approved commit, and give the token only to the upload step.
 
 ## Multiple Jobs
 
