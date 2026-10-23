@@ -42854,7 +42854,8 @@ async function showLockDetails(request, environment) {
         info('✅ no active deployment locks found');
     }
     saveActionState('bypass', 'true');
-    setActionOutput('continue', 'false');
+    // Outputs are strings: even 'false' is truthy in a bare workflow condition.
+    setActionOutput('continue', '');
     return {
         runResult: 'safe-exit',
         decision: 'complete',
