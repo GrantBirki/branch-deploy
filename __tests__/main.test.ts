@@ -1681,7 +1681,7 @@ test('does not start a deployment if CI turns red while awaiting confirmation', 
   const message = actionStatusMock.mock.calls.at(-1)?.arguments[0].message ?? ''
   assert.match(message, /no deployment was started/i)
   assert.ok(!message.includes(checkName))
-  assert.match(message, /once the checks are passing and visible/i)
+  assert.match(message, /check the workflow run for the reason/i)
   assert.ok(message.includes('https://github.com/corp/test/actions/runs/12345'))
   assertCalledWith(setFailedMock, failure)
 })

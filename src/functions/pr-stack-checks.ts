@@ -28,7 +28,7 @@ interface RequiredChecksRequest {
   readonly stableBranch: string
   readonly stableSha: string
   readonly branch: unknown
-  readonly scope?: 'ordinary'
+  readonly scope?: 'ordinary' | 'named'
 }
 
 function invalid(reason: string): never {
@@ -136,6 +136,24 @@ function rulesetChecks(
 ): readonly PrStackRequiredCheck[] {
   const rule = record(value)
   const type = string(rule['type'])
+  // Only recover a mixed, paginated result when rules name the complete CI policy.
+  // Required workflows, code scanning, and future rule types may add unnamed checks.
+  if (
+    request.scope === 'named' &&
+    ![
+      'creation',
+      'deletion',
+      'non_fast_forward',
+      'pull_request',
+      'required_deployments',
+      'required_linear_history',
+      'required_signatures',
+      'required_status_checks',
+      'update'
+    ].includes(type)
+  ) {
+    invalid(`cannot determine all required check names for rule ${type}`)
+  }
   if (type === 'workflows' && request.scope !== 'ordinary') {
     invalid('required workflows are not supported by this preview')
   }
@@ -177,7 +195,7 @@ export async function loadPrStackRequiredChecks(
     } catch (error) {
       // No rulesets can exist on this plan. Still enforce readable classic checks.
       if (
-        request.scope === 'ordinary' &&
+        request.scope !== undefined &&
         page === 1 &&
         error instanceof Error &&
         'status' in error &&

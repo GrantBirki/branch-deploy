@@ -102,11 +102,11 @@ inputs:
     required: false
     default: ""
   checks:
-    description: 'Select the CI checks required for deployment: "all" (default), "required", or a comma-separated list of check names. If GitHub reports more than 100 results, every reported result must be successful, skipped, or neutral. See docs/checks.md.'
+    description: 'Select the CI checks required for deployment: "all" (default), "required", or a comma-separated list of check names. If results span multiple pages, Branch Deploy must be able to verify the full selection. See docs/checks.md.'
     required: false
     default: "all"
   ignored_checks:
-    description: 'Comma-separated check names to ignore, for example "lint,markdown-formatting". With more than 100 reported results, a pending or failed check can still block deployment even if listed here. See docs/checks.md.'
+    description: 'Comma-separated check names to ignore, for example "lint,markdown-formatting". With more than 100 results, deployment stops if Branch Deploy cannot verify the remaining checks separately. See docs/checks.md.'
     required: false
     default: ""
   skip_reviews:

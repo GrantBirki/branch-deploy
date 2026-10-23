@@ -20,7 +20,11 @@ Any other CI checks that run on a pull request are not required and are consider
 
 Branch Deploy evaluates the check runs and commit statuses on the selected commit. When GitHub returns them on one page (up to 100 results), the newest run for each GitHub App and check name, or the newest status for each legacy context, is authoritative. A selected result must be `SUCCESS`, `SKIPPED`, or `NEUTRAL`. Any other selected state or conclusion blocks deployment, including a newer pending or failing run when an older run passed. If your policy requires the work to run successfully, configure the check to fail instead of skipping it or reporting a neutral result.
 
-With more than 100 results, GitHub can update checks between pages. Branch Deploy compares the results it read with GitHub's counts by state and starts over once if they disagree. It can proceed only when every reported result is successful, skipped, or neutral. A pending or failed result can therefore block deployment even if it appears optional, ignored, or superseded. If the Action cannot verify the results, it stops with `commit_status` set to `UNAVAILABLE`. Checks can still change after verification.
+With more than 100 results, GitHub can update checks between pages. Branch Deploy compares the results with GitHub's counts by state and starts over once if they disagree. If the selected checks passed but another result was pending or failed, matching counts alone can't tell us which check failed.
+
+With `checks: required` or an explicit list of check names, Branch Deploy can read the selected checks directly on the same commit. For example, a required test can pass while an optional lint check stays red. This extra read runs only for mixed results across multiple pages. Checks can still change afterward.
+
+We stop with `commit_status: UNAVAILABLE` if we can't verify the full selection. This includes `checks: all` with mixed results, a required check listed in `ignored_checks`, or branch rules that don't tell us every required check's name. The direct read supports up to 20 names, 100 check suites, and 100 runs per name in each suite. Posting the same command again won't resolve an unchanged limit.
 
 For PR deployments and noops, `checks: all` (the default) and `checks: required` also read the target branch's named status checks from classic protection and active rulesets. Required checks that have not reported yet block deployment. Repositories without required checks still work, and a rule that requires deployment before merge will not block the deployment itself.
 
@@ -30,7 +34,7 @@ When a required check names a specific GitHub App, Branch Deploy verifies that A
 
 ## Using the `checks` Input Option
 
-These examples assume GitHub returns the checks on one page. The verification rule for more than 100 results applies to every selection below.
+These examples assume GitHub returns the checks on one page. When results span multiple pages, the verification limits above also apply.
 
 ### Example 1: All CI Checks Must Pass
 

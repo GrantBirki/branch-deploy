@@ -26,7 +26,8 @@ import {
   legacyPrechecksPullRepository,
   legacyTruthy,
   prechecksGraphqlContextsPageResult,
-  prechecksGraphqlResult
+  prechecksGraphqlResult,
+  prechecksGraphqlSelectedChecksResult
 } from '../trust-boundaries.ts'
 import type {
   BranchDeployContext,
@@ -171,8 +172,14 @@ const UNVERIFIED_CHECK_PAGES = {
   commitStatus: 'UNAVAILABLE',
   kind: 'unverified-pages',
   message:
-    'GitHub returned checks on multiple pages, and the Action could not verify that every result was successful, skipped, or neutral. This includes optional, ignored, and superseded results. Review the checks, then post a new deployment command.'
+    'GitHub returned mixed check results on multiple pages. Branch Deploy could not verify the selected checks separately. Review the check selection and branch rules before posting another deployment command.'
 } as const
+
+const CHECK_RUN_FIELDS = `
+  id databaseId startedAt completedAt checkSuite { app { databaseId } }
+  isRequired(pullRequestNumber:$number) conclusion status name`
+const STATUS_CONTEXT_FIELDS = `
+  id createdAt updatedAt isRequired(pullRequestNumber:$number) state context`
 
 type CommitCheckEvaluation =
   | typeof INCONSISTENT_CHECK_PAGES
@@ -500,25 +507,10 @@ export async function prechecks(
                                 statusContextCountsByState { state count }
                                 nodes {
                                   ... on CheckRun {
-                                    id
-                                    databaseId
-                                    startedAt
-                                    completedAt
-                                    checkSuite {
-                                      app { databaseId }
-                                    }
-                                    isRequired(pullRequestNumber:$number)
-                                    conclusion
-                                    status
-                                    name
+                                    ${CHECK_RUN_FIELDS}
                                   }
                                   ... on StatusContext {
-                                    id
-                                    createdAt
-                                    updatedAt
-                                    isRequired(pullRequestNumber:$number)
-                                    state
-                                    context
+                                    ${STATUS_CONTEXT_FIELDS}
                                   }
                                 }
                                 pageInfo {
@@ -1180,113 +1172,130 @@ async function evaluateCommitChecks({
       pages = await loadAllCheckResults(source, first.statusCheckRollup)
     }
     if ('kind' in pages) return pages
-    const {checkResults, allPagesHealthy} = pages
-
-    // Resolve competing Apps on both reads so identical runs produce the same selection.
-    const required = checks === 'required'
-    const selected = checkSelection(checks, ignoredChecks, required)
-    const competingRuns =
-      selectedChecks === undefined
-        ? undefined
-        : confirmationRunsNeedingApp(checkResults, selected)
-    if (stackRequiredChecks !== null || competingRuns !== undefined) {
-      for (const [index, check] of checkResults.entries()) {
-        if (
-          isCheckRun(check) &&
-          checkIntegrationId(check) === null &&
-          !ignoredChecks.includes(check.name) &&
-          (competingRuns?.has(check) === true ||
-            ((competingRuns === undefined || selected(check)) &&
-              stackRequiredChecks?.some(
-                rule => rule.appId !== null && rule.context === check.name
-              ) === true))
-        ) {
-          const id = check.databaseId
+    let {checkResults} = pages
+    let verifySelection = !pages.allPagesHealthy
+    // A failed selection stops immediately. Only a passing selection on mixed
+    // pages needs a direct read, evaluated with the same required-check and App rules.
+    while (true) {
+      // Resolve competing Apps on both reads so identical runs produce the same selection.
+      const required = checks === 'required'
+      const selected = checkSelection(checks, ignoredChecks, required)
+      const competingRuns =
+        selectedChecks === undefined
+          ? undefined
+          : confirmationRunsNeedingApp(checkResults, selected)
+      if (stackRequiredChecks !== null || competingRuns !== undefined) {
+        for (const [index, check] of checkResults.entries()) {
           if (
-            typeof id !== 'number' ||
-            !Number.isSafeInteger(id) ||
-            id < 1 ||
-            typeof check.id !== 'string' ||
-            check.id === ''
+            isCheckRun(check) &&
+            checkIntegrationId(check) === null &&
+            !ignoredChecks.includes(check.name) &&
+            (competingRuns?.has(check) === true ||
+              ((competingRuns === undefined || selected(check)) &&
+                stackRequiredChecks?.some(
+                  rule => rule.appId !== null && rule.context === check.name
+                ) === true))
           ) {
-            throw new Error(
-              'Cannot verify required check App: missing check run identity'
-            )
-          }
-          const {data: run} = await octokit.rest.checks.get({
-            ...repo,
-            check_run_id: id,
-            headers: API_HEADERS
-          })
-          if (
-            typeof run !== 'object' ||
-            run === null ||
-            !('id' in run) ||
-            run.id !== id ||
-            !('node_id' in run) ||
-            run.node_id !== check.id ||
-            !('head_sha' in run) ||
-            run.head_sha !== commit.oid ||
-            !('name' in run) ||
-            run.name !== check.name ||
-            !('conclusion' in run) ||
-            (typeof run.conclusion === 'string'
-              ? run.conclusion.toUpperCase()
-              : run.conclusion) !== check.conclusion ||
-            !('app' in run) ||
-            typeof run.app !== 'object' ||
-            run.app === null ||
-            !('id' in run.app) ||
-            typeof run.app.id !== 'number' ||
-            !Number.isSafeInteger(run.app.id) ||
-            run.app.id < 1
-          ) {
-            throw new Error(
-              'Cannot verify required check App: check run identity, SHA, name, result, or App did not match'
-            )
-          }
-          checkResults[index] = {
-            ...check,
-            checkSuite: {app: {databaseId: run.app.id}}
+            const id = check.databaseId
+            if (
+              typeof id !== 'number' ||
+              !Number.isSafeInteger(id) ||
+              id < 1 ||
+              typeof check.id !== 'string' ||
+              check.id === ''
+            ) {
+              throw new Error(
+                'Cannot verify required check App: missing check run identity'
+              )
+            }
+            const {data: run} = await octokit.rest.checks.get({
+              ...repo,
+              check_run_id: id,
+              headers: API_HEADERS
+            })
+            if (
+              typeof run !== 'object' ||
+              run === null ||
+              !('id' in run) ||
+              run.id !== id ||
+              !('node_id' in run) ||
+              run.node_id !== check.id ||
+              !('head_sha' in run) ||
+              run.head_sha !== commit.oid ||
+              !('name' in run) ||
+              run.name !== check.name ||
+              !('conclusion' in run) ||
+              (typeof run.conclusion === 'string'
+                ? run.conclusion.toUpperCase()
+                : run.conclusion) !== check.conclusion ||
+              !('app' in run) ||
+              typeof run.app !== 'object' ||
+              run.app === null ||
+              !('id' in run.app) ||
+              typeof run.app.id !== 'number' ||
+              !Number.isSafeInteger(run.app.id) ||
+              run.app.id < 1
+            ) {
+              throw new Error(
+                'Cannot verify required check App: check run identity, SHA, name, result, or App did not match'
+              )
+            }
+            checkResults[index] = {
+              ...check,
+              checkSuite: {app: {databaseId: run.app.id}}
+            }
           }
         }
       }
-    }
 
-    const missing = missingRequiredStackChecks({
-      checks,
-      checkResults,
-      ignoredChecks,
-      requiredChecks: stackRequiredChecks
-    })
-    if (missing !== null) return missing
-    const filterChecksResult = filterChecks(
-      checks,
-      checkResults,
-      ignoredChecks,
-      required,
-      selectedChecks
-    )
+      const missing = missingRequiredStackChecks({
+        checks,
+        checkResults,
+        ignoredChecks,
+        requiredChecks: stackRequiredChecks
+      })
+      if (missing !== null) return missing
+      const filterChecksResult = filterChecks(
+        checks,
+        checkResults,
+        ignoredChecks,
+        required,
+        selectedChecks
+      )
 
-    if (filterChecksResult.status === 'SUCCESS') {
-      if (!allPagesHealthy) return UNVERIFIED_CHECK_PAGES
-      return {
-        commitStatus: 'SUCCESS',
-        filterChecksResult,
-        kind: 'passed'
+      if (filterChecksResult.status === 'SUCCESS') {
+        if (verifySelection) {
+          const current = await readSelectedCheckResults(
+            source,
+            checks,
+            ignoredChecks,
+            stackRequiredChecks,
+            checkResults
+          )
+          if ('kind' in current) return current
+          checkResults = current
+          selectedChecks?.clear()
+          verifySelection = false
+          continue
+        }
+        return {
+          commitStatus: 'SUCCESS',
+          filterChecksResult,
+          kind: 'passed'
+        }
       }
-    }
-    if (filterChecksResult.status === 'MISSING') {
-      return {
-        commitStatus: 'MISSING',
-        filterChecksResult,
-        kind: 'missing'
+      if (filterChecksResult.status === 'MISSING') {
+        return {
+          commitStatus: 'MISSING',
+          filterChecksResult,
+          kind: 'missing'
+        }
       }
-    }
-    return {
-      commitStatus: filterChecksResult.status,
-      filterChecksResult,
-      kind: 'failed'
+      return {
+        commitStatus: filterChecksResult.status,
+        filterChecksResult,
+        kind: 'failed'
+      }
     }
   } catch (error) {
     return {commitStatus: 'UNAVAILABLE', error, kind: 'unavailable'}
@@ -1522,25 +1531,10 @@ async function readCommitCheckPage(
                           statusContextCountsByState { state count }
                           nodes {
                             ... on CheckRun {
-                              id
-                              databaseId
-                              startedAt
-                              completedAt
-                              checkSuite {
-                                app { databaseId }
-                              }
-                              isRequired(pullRequestNumber:$number)
-                              conclusion
-                              status
-                              name
+                              ${CHECK_RUN_FIELDS}
                             }
                             ... on StatusContext {
-                              id
-                              createdAt
-                              updatedAt
-                              isRequired(pullRequestNumber:$number)
-                              state
-                              context
+                              ${STATUS_CONTEXT_FIELDS}
                             }
                           }
                           pageInfo {
@@ -1571,6 +1565,121 @@ async function readCommitCheckPage(
     return UNVERIFIED_BASE
   }
   return page.node
+}
+
+// Mixed pages cannot tell us which check failed. When policy names the checks,
+// read their current runs and legacy statuses together, on the same commit and PR base.
+async function readSelectedCheckResults(
+  {
+    octokit,
+    repo,
+    pullRequestNumber,
+    baseRefName,
+    commit
+  }: CommitCheckPageSource,
+  checks: CommitCheckPolicy['checks'],
+  ignored: readonly string[],
+  required: readonly PrStackRequiredCheck[] | null,
+  reported: readonly RawCheckResult[]
+): Promise<
+  RawCheckResult[] | typeof UNVERIFIED_BASE | typeof UNVERIFIED_CHECK_PAGES
+> {
+  const names = new Set(
+    typeof checks !== 'string'
+      ? checks
+      : checks === 'required'
+        ? required?.map(rule => rule.context)
+        : []
+  )
+  // Bound a single request below GitHub's query limit. Never use a partial list.
+  if (names.size === 0 || names.size > 20) return UNVERIFIED_CHECK_PAGES
+
+  if (checks === 'required') {
+    if (
+      typeof baseRefName !== 'string' ||
+      ignored.some(name => names.has(name)) ||
+      reported.some(
+        check => check.isRequired && !names.has(String(checkName(check)))
+      )
+    ) {
+      return UNVERIFIED_CHECK_PAGES
+    }
+    try {
+      const {data: branch} = await octokit.rest.repos.getBranch({
+        ...repo,
+        branch: baseRefName,
+        headers: API_HEADERS
+      })
+      const policy = await loadPrStackRequiredChecks(octokit, {
+        ...repo,
+        stableBranch: baseRefName,
+        stableSha: branch.commit.sha,
+        branch,
+        scope: 'named'
+      })
+      if (!isDeepStrictEqual(policy, required)) return UNVERIFIED_CHECK_PAGES
+    } catch (error) {
+      core.debug(
+        `Could not verify the named check policy: ${legacyApiError(error).message}`
+      )
+      return UNVERIFIED_CHECK_PAGES
+    }
+  }
+
+  // Filter runs inside each suite; filtering the suites by check name can omit a suite.
+  // Only generated aliases enter the query. Check names are GraphQL variables.
+  const entries = [...names].map((name, i) => [`check${i}`, name] as const)
+  const fields = entries.map(([key], i) => ({
+    status: `s${i}: context(name:$${key}) { ${STATUS_CONTEXT_FIELDS} }`,
+    runs: `r${i}: checkRuns(first:100, filterBy:{checkName:$${key}, checkType:ALL}) {
+      nodes { ${CHECK_RUN_FIELDS} } pageInfo { hasNextPage }
+    }`
+  }))
+  const query = `query BranchDeploySelectedChecks($commitId:ID!, $owner:String!, $name:String!, $number:Int!,
+      ${entries.map(([key]) => `$${key}:String!`).join(', ')}) {
+    repository(owner:$owner, name:$name) { pullRequest(number:$number) { baseRefName } }
+    node(id:$commitId) { ... on Commit { id oid
+      status { ${fields.map(field => field.status).join('\n')} }
+      checkSuites(first:100) { pageInfo {hasNextPage} nodes { ${fields.map(field => field.runs).join('\n')} } }
+    } }
+  }`
+  const {repository, node} = prechecksGraphqlSelectedChecksResult(
+    await graphqlAllowingInaccessibleApps(octokit, query, {
+      owner: repo.owner,
+      name: repo.repo,
+      number: pullRequestNumber,
+      commitId: commit.id,
+      ...Object.fromEntries(entries)
+    })
+  )
+  if (repository.pullRequest.baseRefName !== baseRefName) return UNVERIFIED_BASE
+  if (
+    node.id !== commit.id ||
+    node.oid !== commit.oid ||
+    node.checkSuites.pageInfo.hasNextPage !== false
+  ) {
+    return UNVERIFIED_CHECK_PAGES
+  }
+
+  const results: RawCheckResult[] = []
+  for (const [i, name] of [...names].entries()) {
+    const status = node.status === null ? null : node.status[`s${i}`]
+    if (status !== null) {
+      if (status?.context !== name) return UNVERIFIED_CHECK_PAGES
+      results.push(status)
+    }
+    for (const suite of node.checkSuites.nodes) {
+      const runs = suite[`r${i}`]
+      if (
+        runs?.pageInfo.hasNextPage !== false ||
+        runs.nodes.some(run => run.name !== name)
+      ) {
+        return UNVERIFIED_CHECK_PAGES
+      }
+      results.push(...runs.nodes)
+    }
+  }
+  return results
 }
 
 // A helper function to filter out ignored checks and return the combined status of the remaining checks

@@ -15,7 +15,9 @@ import type {
   PrecheckData,
   PrechecksGraphqlContextsPageResult,
   PrechecksGraphqlResult,
-  RawCheckResult
+  PrechecksGraphqlSelectedChecksResult,
+  RawCheckResult,
+  StatusContextResult
 } from '../../src/types.ts'
 import {
   createActionInputs,
@@ -468,7 +470,11 @@ function stateCounts(counts: Readonly<Record<string, number>> | null = {}) {
 
 function mockCheckPages(
   first: PrechecksGraphqlResult,
-  ...pages: readonly (PrechecksGraphqlContextsPageResult | Error)[]
+  ...pages: readonly (
+    | PrechecksGraphqlContextsPageResult
+    | PrechecksGraphqlSelectedChecksResult
+    | Error
+  )[]
 ): void {
   queueMockImplementation(
     graphQLOK,
@@ -504,7 +510,10 @@ async function prepareConfirmationCiRecheck() {
 
 async function confirmationCi(
   admitted: readonly RawCheckResult[] | null,
-  ...pages: readonly PrechecksGraphqlContextsPageResult[]
+  ...pages: readonly (
+    | PrechecksGraphqlContextsPageResult
+    | PrechecksGraphqlSelectedChecksResult
+  )[]
 ) {
   mockCheckPages(
     initialCheckPage(admitted, LAST_PAGE, {state: 'SUCCESS'}),
@@ -5132,7 +5141,7 @@ for (const [selection, state] of [
   ['ignored', 'IN_PROGRESS'],
   ['latest', 'FAILURE']
 ] as const) {
-  test(`does not admit mixed paginated checks with ${selection} selection`, async () => {
+  test(`stops on mixed pages without a complete named policy (${selection})`, async () => {
     const check = CONFIRMED_CI
     const other = {
       ...check,
@@ -5155,8 +5164,241 @@ for (const [selection, state] of [
     assert.equal(result.status, false, result.message)
     assert.match(
       result.message,
-      /could not verify.*optional, ignored, and superseded/su
+      /could not verify the selected checks separately/su
     )
+    assertCalledWith(setOutputMock, 'commit_status', 'UNAVAILABLE')
+    assertCalledTimes(graphQLOK, 2)
+  })
+}
+
+const MIXED_CHECK_COUNTS = {checks: {SUCCESS: 1, FAILURE: 1}}
+const FAILED_OPTIONAL_CHECK = {
+  ...CONFIRMED_CI,
+  id: 'CR_optional',
+  name: 'optional',
+  isRequired: false,
+  conclusion: 'FAILURE'
+}
+
+function selectedCheckResponse(
+  runs: readonly CheckRunResult[] = [CONFIRMED_CI],
+  status: StatusContextResult | null = null
+): DeepMutable<PrechecksGraphqlSelectedChecksResult> {
+  const pageInfo = {hasNextPage: false}
+  return {
+    repository: {pullRequest: {baseRefName: 'main'}},
+    node: {
+      id: 'commit-node',
+      oid: 'abc123',
+      checkSuites: {
+        pageInfo,
+        nodes: [
+          {
+            r0: {
+              nodes: runs.map(run => structuredClone(run)),
+              pageInfo: {...pageInfo}
+            }
+          }
+        ]
+      },
+      status: status === null ? null : {s0: status}
+    }
+  }
+}
+
+function mockMixedChecks(
+  current: PrechecksGraphqlSelectedChecksResult,
+  selected: readonly CheckRunResult[] = [CONFIRMED_CI]
+) {
+  const options = {counts: {checks: {SUCCESS: selected.length, FAILURE: 1}}}
+  mockCheckPages(
+    initialCheckPage(selected, MORE_CHECKS, options),
+    additionalCheckPage([FAILED_OPTIONAL_CHECK], LAST_PAGE, options),
+    current
+  )
+}
+
+function requireMixedPageCheck(appId: number | null = 15368) {
+  data.inputs.checks = 'required'
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.resolve([{context: CONFIRMED_CI.name, appId}])
+  )
+}
+
+// The paginated observations are identical. Which check failed is established
+// by the current runs and statuses for the policy name, not the aggregate count.
+for (const [state, expected] of [
+  ['SUCCESS', 'SUCCESS'],
+  ['FAILURE', 'FAILURE'],
+  ['pending', 'PENDING'],
+  ['missing', 'MISSING']
+] as const) {
+  test(`mixed pages verify the current required check: ${state}`, async () => {
+    requireMixedPageCheck()
+    const runs =
+      state === 'missing'
+        ? []
+        : [{...CONFIRMED_CI, conclusion: state === 'pending' ? null : state}]
+    mockMixedChecks(selectedCheckResponse(runs))
+    const result = await prechecks(context, octokit, data)
+    assert.equal(result.status, expected === 'SUCCESS', result.message)
+    assertCalledWith(setOutputMock, 'commit_status', expected)
+    const [query, variables] = graphQLOK.mock.calls.at(-1)?.arguments ?? []
+    assert.match(query ?? '', /query BranchDeploySelectedChecks\(/u)
+    assert.deepEqual(variables, {
+      owner: 'corp',
+      name: 'test',
+      number: 123,
+      commitId: 'commit-node',
+      check0: 'ci'
+    })
+    assert.deepEqual(
+      loadPrStackRequiredChecksMock.mock.calls.at(-1)?.arguments[1].scope,
+      'named'
+    )
+  })
+}
+
+for (const [source, expected] of [
+  ['wrong App', 'MISSING'],
+  ['hidden App', 'SUCCESS'],
+  ['bound legacy', 'MISSING'],
+  ['any-source legacy', 'SUCCESS'],
+  ['same-name failing status', 'FAILURE']
+] as const) {
+  test(`mixed pages preserve check source: ${source}`, async () => {
+    requireMixedPageCheck(
+      source === 'any-source legacy' || source === 'same-name failing status'
+        ? null
+        : 15368
+    )
+    const useRun = source === 'wrong App' || source === 'hidden App'
+    const runs = useRun
+      ? [
+          {
+            ...HIDDEN_CHECK,
+            checkSuite: {
+              app: source === 'hidden App' ? null : {databaseId: 999}
+            }
+          }
+        ]
+      : source === 'same-name failing status'
+        ? [CONFIRMED_CI]
+        : []
+    const status = useRun
+      ? null
+      : {
+          ...LEGACY_CI_STATUS,
+          context: 'ci',
+          state: source === 'same-name failing status' ? 'FAILURE' : 'SUCCESS'
+        }
+    octokit.rest.checks.get.mock.mockImplementation(() =>
+      Promise.resolve({data: VISIBLE_CHECK_RUN})
+    )
+    mockMixedChecks(selectedCheckResponse(runs, status))
+    const result = await prechecks(context, octokit, data)
+    assert.equal(result.status, expected === 'SUCCESS', result.message)
+    assertCalledWith(setOutputMock, 'commit_status', expected)
+  })
+}
+
+for (const change of ['same checks', 'failed', 'replacement'] as const) {
+  test(`confirmation verifies selected checks on mixed pages: ${change}`, async () => {
+    requireMixedPageCheck()
+    const options = {counts: MIXED_CHECK_COUNTS}
+    const current = {
+      ...CONFIRMED_CI,
+      ...(change === 'replacement' ? {id: 'CR_new', databaseId: 130} : {}),
+      ...(change === 'failed' ? {conclusion: 'FAILURE'} : {})
+    }
+    const result = await confirmationCi(
+      [CONFIRMED_CI],
+      additionalCheckPage([CONFIRMED_CI], MORE_CHECKS, options),
+      additionalCheckPage([FAILED_OPTIONAL_CHECK], LAST_PAGE, options),
+      selectedCheckResponse([current])
+    )
+    assert.equal(
+      result.commitStatus,
+      change === 'replacement'
+        ? 'UNAVAILABLE'
+        : change === 'failed'
+          ? 'FAILURE'
+          : 'SUCCESS',
+      result.failure
+    )
+    assert.equal(result.failure === undefined, change === 'same checks')
+  })
+}
+
+for (const change of [
+  'base',
+  'node',
+  'commit',
+  'more suites',
+  'more runs',
+  'wrong run name',
+  'wrong status name'
+] as const) {
+  test(`mixed pages cannot use incomplete or unrelated check results: ${change}`, async () => {
+    data.inputs.checks = ['ci']
+    const current = selectedCheckResponse()
+    const runs = current.node.checkSuites.nodes[0]?.['r0']
+    assert.ok(runs)
+    if (change === 'base')
+      current.repository.pullRequest.baseRefName = 'another-base'
+    if (change === 'node') current.node.id = 'other-node'
+    if (change === 'commit') current.node.oid = 'other-commit'
+    if (change === 'more suites')
+      current.node.checkSuites.pageInfo.hasNextPage = true
+    if (change === 'more runs') runs.pageInfo.hasNextPage = true
+    if (change === 'wrong run name')
+      runs.nodes = [{...CONFIRMED_CI, name: 'other-check'}]
+    if (change === 'wrong status name')
+      current.node.status = {s0: {...LEGACY_CI_STATUS, context: 'other-status'}}
+    mockMixedChecks(current)
+    const result = await prechecks(context, octokit, data)
+    assert.equal(result.status, false, result.message)
+    assertCalledWith(setOutputMock, 'commit_status', 'UNAVAILABLE')
+  })
+}
+
+for (const reason of [
+  'too many names',
+  'changed rules',
+  'unknown rules',
+  'ignored requirement',
+  'unlisted requirement'
+] as const) {
+  test(`mixed pages need an unambiguous policy: ${reason}`, async () => {
+    requireMixedPageCheck()
+    let selected: CheckRunResult[] = [CONFIRMED_CI]
+    if (reason === 'too many names') {
+      selected = Array.from({length: 21}, (_, i) => ({
+        ...CONFIRMED_CI,
+        id: String(i),
+        name: 'ci-' + String(i)
+      }))
+      data.inputs.checks = selected.map(check => check.name)
+    }
+    if (reason === 'unlisted requirement') {
+      selected.push({
+        ...CONFIRMED_CI,
+        name: 'required-workflow',
+        id: 'CR_workflow'
+      })
+    }
+    if (reason === 'ignored requirement') data.inputs.ignored_checks = ['ci']
+    loadPrStackRequiredChecksMock.mock.mockImplementation((_, request) => {
+      if (request.scope === 'named') {
+        if (reason === 'unknown rules')
+          throw new Error('Cannot enumerate checks')
+        return Promise.resolve([{context: 'new', appId: null}])
+      }
+      return Promise.resolve([{context: 'ci', appId: null}])
+    })
+    mockMixedChecks(selectedCheckResponse(), selected)
+    const result = await prechecks(context, octokit, data)
+    assert.equal(result.status, false, result.message)
     assertCalledWith(setOutputMock, 'commit_status', 'UNAVAILABLE')
     assertCalledTimes(graphQLOK, 2)
   })

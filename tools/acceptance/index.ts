@@ -2529,6 +2529,100 @@ const scenarios = [
       })
   },
   {
+    name: 'mixed check pages distinguish an optional failure from one that moves to a required check',
+    run: async () => {
+      for (const moveFailure of [
+        'never',
+        'admission',
+        'confirmation'
+      ] as const) {
+        await withMockGitHub(
+          `move paginated failure: ${moveFailure}`,
+          async context => {
+            const {state} = context
+            setClassicRequiredChecks(state, [
+              {context: 'build', app_id: 15368},
+              {context: 'legacy-ci', app_id: null}
+            ])
+            state.rollupState = 'FAILURE'
+            state.rollupContexts = [
+              ...Array.from({length: 100}, (_, index) => ({
+                type: 'check-run' as const,
+                databaseId: index + 1,
+                integrationId: 15368,
+                name: index === 0 ? 'build' : `optional-${String(index)}`,
+                conclusion: index === 1 ? 'FAILURE' : 'SUCCESS',
+                isRequired: index === 0
+              })),
+              {
+                type: 'status-context',
+                context: 'legacy-ci',
+                state: 'SUCCESS',
+                isRequired: true
+              }
+            ]
+            let phase: 'admission' | 'confirmation' = 'admission'
+            state.confirmationReaction = () => {
+              phase = 'confirmation'
+              return '+1'
+            }
+            state.beforeCheckPage = start => {
+              if (start === 100 && moveFailure === phase) {
+                // Page one and the counts still suggest only the optional check failed.
+                // The independent lookup by required name must observe the current failure.
+                state.rollupContexts = state.rollupContexts.map(check =>
+                  check.type === 'status-context'
+                    ? check
+                    : {
+                        ...check,
+                        conclusion: check.isRequired ? 'FAILURE' : 'SUCCESS'
+                      }
+                )
+              }
+            }
+
+            const result = await runMain(context, {
+              checks: 'required',
+              deployment_confirmation: 'true'
+            })
+            assert.equal(
+              context.routeLog.filter(route =>
+                route.body.includes('BranchDeploySelectedChecks')
+              ).length,
+              moveFailure === 'admission' ? 1 : 2,
+              diagnostics(context, result)
+            )
+            if (moveFailure === 'never') {
+              assertExit(context, result, 0)
+              assertOutput(context, result, 'commit_status', 'SUCCESS')
+              assertReason(context, result, 'deployment_ready')
+              assert.equal(
+                requireDeployment(context).sha,
+                ACCEPTANCE_SHAS.feature
+              )
+            } else {
+              assertExit(context, result, 1)
+              assertOutput(context, result, 'commit_status', 'FAILURE')
+              assertReason(context, result, 'prechecks_failed')
+              assert.equal(result.output['continue'], undefined)
+              assertNoDeployment(context, result)
+              assert.equal(state.branches.has(lockBranch('production')), false)
+              if (moveFailure === 'admission') {
+                assertNoLockRoutes(context)
+              } else {
+                assertCommentIncludes(context, 'No deployment was started.')
+                assertCommentIncludes(
+                  context,
+                  'Check the workflow run for the reason before posting another deployment command.'
+                )
+              }
+            }
+          }
+        )
+      }
+    }
+  },
+  {
     name: 'confirmation checks the original fork commit, not the new head',
     run: async () => {
       const confirmed = ACCEPTANCE_SHAS.fork
@@ -5783,7 +5877,10 @@ const scenarios = [
           const mixed = await runMain(context, {checks: 'required'})
           assertExit(context, mixed, 1)
           assertOutput(context, mixed, 'commit_status', 'UNAVAILABLE')
-          assertCommentIncludes(context, 'could not verify that every result')
+          assertCommentIncludes(
+            context,
+            'could not verify the selected checks separately'
+          )
           assertNoDeployment(context, mixed)
           assertNoLockRoutes(context)
         }
