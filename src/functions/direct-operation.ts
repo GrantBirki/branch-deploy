@@ -1,5 +1,5 @@
 import * as core from '../actions-core.ts'
-import {saveActionState} from '../action-io.ts'
+import {saveActionState, setActionOutput} from '../action-io.ts'
 import {legacyLockData, legacyStrictTrue} from '../trust-boundaries.ts'
 import {actionStatus} from './action-status.ts'
 import {API_HEADERS} from './api-headers.ts'
@@ -164,6 +164,8 @@ async function showLockDetails(
   }
 
   saveActionState('bypass', 'true')
+  // Outputs are strings: even 'false' is truthy in a bare workflow condition.
+  setActionOutput('continue', '')
   return {
     runResult: 'safe-exit',
     decision: 'complete',

@@ -31036,7 +31036,11 @@ function debug(message) {
     issueCommand('debug', undefined, message);
 }
 function info(message) {
-    process.stdout.write(`${message}${external_node_os_namespaceObject.EOL}`);
+    // The runner recognizes "::" after leading whitespace and "##[" anywhere on a line.
+    const text = message
+        .replace(/^([\p{Z}\t\v\f\u0085]*)::/gmu, '$1: :')
+        .replaceAll('##[', '# #[');
+    process.stdout.write(`${text}${external_node_os_namespaceObject.EOL}`);
 }
 function warning(message) {
     issueCommand('warning', undefined, message instanceof Error ? message.toString() : message);
@@ -42955,6 +42959,8 @@ async function showLockDetails(request, environment) {
         info('✅ no active deployment locks found');
     }
     saveActionState('bypass', 'true');
+    // Outputs are strings: even 'false' is truthy in a bare workflow condition.
+    setActionOutput('continue', '');
     return {
         runResult: 'safe-exit',
         decision: 'complete',
