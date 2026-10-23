@@ -17,8 +17,7 @@ A trusted checkout separates those concerns:
 - **Working checkout**: the exact commit SHA selected by branch-deploy. Use this
   for the application, infrastructure, or other content you intend to deploy.
 
-This pattern keeps PR-controlled code deployable while preventing that same PR
-from changing the deployment helper code that decides how deployment happens.
+This tells you which revision each file came from. Code you execute in either checkout can still change both directories and affect later steps on that runner.
 
 ## When To Use This Pattern
 
@@ -42,21 +41,9 @@ into checked-out files.
 
 ## Recommended Shape
 
-A hardened workflow usually follows this sequence:
+Use the [four-job workflow](examples.md#hardened-workflow-starting-point) to separate the Branch Deploy request, validation, deployment, and result. In jobs that need both checkouts, use the exact trusted workflow SHA for helpers and Branch Deploy's `sha` output for the candidate. Verify both checkout `HEAD` values before using them.
 
-1. Derive a trusted checkout path from the repository default branch.
-2. Run `grantbirki/branch-deploy` from the default-branch workflow.
-3. Validate `steps.branch-deploy.outputs.sha` as an exact commit SHA.
-4. Derive a working checkout path from that SHA.
-5. Check out trusted helper code at `github.sha`.
-6. Check out working deployment code at `steps.branch-deploy.outputs.sha`.
-7. Verify both checkout `HEAD` values before running deployment commands.
-8. Run deployment commands from the working checkout.
-9. Run helper scripts from the trusted checkout.
-
-The important rule is simple: deployment helper code should come from the
-trusted checkout, while deployable project content should come from the working
-checkout.
+Run pull request scripts on a fresh runner with only the access they need. Start another clean runner for any job that can publish, report the result, or release a lock. Moving credentials to a later step on the same runner does not isolate them from earlier code.
 
 ## Checkout Path Safety
 
@@ -107,9 +94,7 @@ with:
 
 ## Deployment Output Files
 
-Avoid writing generated deployment output into the working checkout when a
-trusted helper will read it later. Instead, create an output file under
-`RUNNER_TEMP` and pass that absolute path to the trusted helper:
+Within a trusted job, create an output file under `RUNNER_TEMP` and pass its absolute path to the trusted helper. This avoids an accidental path collision. Code running on that runner can still change the file. For a separate result job, report trusted job outcomes instead of reading a file supplied by the pull request.
 
 ```yaml
 - name: prepare deployment output path
@@ -165,16 +150,7 @@ per-run concurrency group or no concurrency group so they stay responsive.
 
 ## Full Terraform Example
 
-For a complete sanitized workflow set using this pattern with Terraform, see
-[Terraform with Trusted Checkouts](examples.md#terraform-with-trusted-checkouts).
-
-That example includes:
-
-- a branch deploy workflow with trusted and working checkouts
-- a merge deploy workflow using `merge_deploy_mode`
-- an unlock-on-merge workflow
-- a trusted deployment message template
-- a trusted helper script for inserting Terraform output into the template
+See [Terraform with Trusted Checkouts](examples.md#terraform-with-trusted-checkouts) for the branch, merge, and lock-cleanup workflows. Before giving a plan access to providers or remote state, review the [Terraform plan guidance](security_hardening_guides/terraform-plans.md).
 
 Related docs:
 
