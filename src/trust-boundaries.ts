@@ -14,6 +14,7 @@ import type {
   LockData,
   PrechecksGraphqlContextsPageResult,
   PrechecksGraphqlResult,
+  PrechecksGraphqlSelectedChecksResult,
   PullRequestPayload
 } from './types.ts'
 
@@ -221,6 +222,12 @@ export function prechecksGraphqlContextsPageResult(
   value: unknown
 ): PrechecksGraphqlContextsPageResult {
   return value as PrechecksGraphqlContextsPageResult
+}
+
+export function prechecksGraphqlSelectedChecksResult(
+  value: unknown
+): PrechecksGraphqlSelectedChecksResult {
+  return value as PrechecksGraphqlSelectedChecksResult
 }
 
 export function legacyPrechecksPullData(

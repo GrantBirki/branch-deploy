@@ -481,6 +481,31 @@ function rollupContextResponse(context: MockRollupContext): unknown {
   }
 }
 
+function selectedCheckContexts(
+  contexts: readonly MockRollupContext[],
+  variables: Record<string, unknown>
+): Record<string, unknown> {
+  const suite: Record<string, unknown> = {}
+  const status: Record<string, unknown> = {}
+  for (const [key, name] of Object.entries(variables)) {
+    if (!key.startsWith('check')) continue
+    const index = key.slice('check'.length)
+    const runs = contexts.filter(
+      context => context.type === 'check-run' && context.name === name
+    )
+    suite[`r${index}`] = {
+      pageInfo: {hasNextPage: runs.length > 100},
+      nodes: runs.slice(0, 100).map(rollupContextResponse)
+    }
+    const legacy = contexts.find(
+      context => context.type === 'status-context' && context.context === name
+    )
+    status[`s${index}`] =
+      legacy === undefined ? null : rollupContextResponse(legacy)
+  }
+  return {status, checkSuites: {pageInfo: {hasNextPage: false}, nodes: [suite]}}
+}
+
 type MockPrechecksPull = MockPullRequestChecks & {
   readonly pullRequest: MockPullRequest
 }
@@ -765,9 +790,11 @@ function routeGraphql(
       value: prechecksGraphql(pull, state.checksByCommit)
     }
   }
+  const selectedChecks = normalizedQuery.includes('BranchDeploySelectedChecks')
   if (
-    normalizedQuery.includes('node(id:$commitId)') &&
-    normalizedQuery.includes('statusCheckRollup')
+    selectedChecks ||
+    (normalizedQuery.includes('node(id:$commitId)') &&
+      normalizedQuery.includes('statusCheckRollup'))
   ) {
     const number = requireNumber(variables, 'number')
     const pull = prechecksPull(state, number)
@@ -779,20 +806,22 @@ function routeGraphql(
     if (pull === undefined || checks === undefined) {
       throw new Error('unexpected paginated prechecks GraphQL variables')
     }
-    const cursor =
-      variables['cursor'] === null
-        ? 0
-        : Number(requireString(variables, 'cursor'))
+    const results = selectedChecks
+      ? selectedCheckContexts(checks.rollupContexts, variables)
+      : {
+          statusCheckRollup: checkRollup(
+            checks,
+            variables['cursor'] === null
+              ? 0
+              : Number(requireString(variables, 'cursor'))
+          )
+        }
     return {
       status: 200,
       value: {
         data: {
           repository: {pullRequest: {baseRefName: prechecksBaseRef(pull)}},
-          node: {
-            id: commitId,
-            oid,
-            statusCheckRollup: checkRollup(checks, cursor)
-          }
+          node: {id: commitId, oid, ...results}
         }
       }
     }

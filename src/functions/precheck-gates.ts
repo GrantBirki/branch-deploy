@@ -121,8 +121,9 @@ export function evaluatePrecheckGates({
   }
 
   const checksUnavailableMessage =
-    unavailableCheckMessage ??
-    `### ⚠️ Cannot proceed with deployment\n\n- commitStatus: \`UNAVAILABLE\`\n\n> The Action could not verify all CI checks for this pull request, so no deployment was started. Retry the command after GitHub's check data is available, or explicitly configure \`skip_ci\` for this environment.`
+    '### ⚠️ Cannot proceed with deployment\n\n' +
+    (unavailableCheckMessage ??
+      `- commitStatus: \`UNAVAILABLE\`\n\n> The Action could not verify all CI checks for this pull request, so no deployment was started. Retry the command after GitHub's check data is available, or explicitly configure \`skip_ci\` for this environment.`)
 
   if (commitStatus === 'UNAVAILABLE' && commitOid === undefined) {
     return reject(checksUnavailableMessage)

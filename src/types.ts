@@ -381,6 +381,23 @@ export interface PrechecksGraphqlContextsPageResult {
   }
 }
 
+interface CompleteCheckPage<T> {
+  readonly nodes: readonly T[]
+  readonly pageInfo: {readonly hasNextPage: boolean}
+}
+
+export interface PrechecksGraphqlSelectedChecksResult {
+  readonly repository: {readonly pullRequest: {readonly baseRefName: string}}
+  readonly node: {
+    readonly id: string
+    readonly oid: string
+    readonly checkSuites: CompleteCheckPage<
+      Readonly<Record<string, CompleteCheckPage<CheckRunResult>>>
+    >
+    readonly status: Readonly<Record<string, StatusContextResult | null>> | null
+  }
+}
+
 export type PrechecksGraphqlCommitNode = NonNullable<
   PrechecksGraphqlResult['repository']['pullRequest']['commits']
 >['nodes'] extends readonly (infer Node)[] | undefined
