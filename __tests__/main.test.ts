@@ -3,7 +3,11 @@ import {afterEach, beforeEach, mock, test, type Mock} from 'node:test'
 import {isDeepStrictEqual} from 'node:util'
 import {COLORS} from '../src/functions/colors.ts'
 import {parseCompletionContext} from '../src/functions/result-context.ts'
-import type {BranchDeployOctokit, OperationResultV1} from '../src/types.ts'
+import type {
+  BranchDeployOctokit,
+  OperationResultV1,
+  PrecheckSuccess
+} from '../src/types.ts'
 import type {PrStackSnapshot} from '../src/functions/pr-stacks.ts'
 import {decodedJsonValue} from '../src/trust-boundaries.ts'
 import {unsafeInvalidValue} from './unsafe-fixtures.ts'
@@ -80,6 +84,7 @@ const lockMock = createMock<LockModule['lock']>()
 const nakedCommandCheckMock =
   createMock<NakedCommandCheckModule['nakedCommandCheck']>()
 const prechecksMock = createMock<PrechecksModule['prechecks']>()
+const recheckCiMock = createMock<NonNullable<PrecheckSuccess['recheckCi']>>()
 const prStackSnapshotMatchesMock =
   createMock<PrStacksModule['prStackSnapshotMatches']>()
 const reactEmoteMock = createMock<ReactEmoteModule['reactEmote']>()
@@ -500,6 +505,7 @@ beforeEach(() => {
     lockMock,
     nakedCommandCheckMock,
     prechecksMock,
+    recheckCiMock,
     prStackSnapshotMatchesMock,
     reactEmoteMock,
     resultOperationMock,
@@ -615,7 +621,10 @@ beforeEach(() => {
     })
   )
   timestampMock.mock.mockImplementation(() => '2025-01-01T00:00:00.000Z')
-  prechecksMock.mock.mockImplementation(() =>
+  recheckCiMock.mock.mockImplementation(() =>
+    Promise.resolve({commitStatus: 'SUCCESS'})
+  )
+  prechecksMock.mock.mockImplementation((_context, _octokit, {inputs}) =>
     Promise.resolve({
       ref: 'test-ref',
       status: true,
@@ -624,9 +633,8 @@ beforeEach(() => {
       sha: mock_sha,
       baseRef: 'main',
       isFork: false,
-      ...(process.env['INPUT_ENABLE_PR_STACKS'] === 'true'
-        ? {expectNoStack: true}
-        : {})
+      ...(inputs.deployment_confirmation ? {recheckCi: recheckCiMock} : {}),
+      ...(inputs.enable_pr_stacks ? {expectNoStack: true} : {})
     })
   )
   prStackSnapshotMatchesMock.mock.mockImplementation(() =>
@@ -659,6 +667,7 @@ afterEach(() => {
 
 test('successfully runs the action', async () => {
   assert.strictEqual(await run(), 'success')
+  assertNotCalled(recheckCiMock)
   assertNotCalled(prStackSnapshotMatchesMock)
   assertOperationResult({
     decision: 'continue',
@@ -1484,6 +1493,8 @@ test('successfully runs the action with deployment confirmation', async () => {
   )
 
   assert.strictEqual(await run(), 'success')
+  assertCalledTimes(prechecksMock, 1)
+  assertCalledTimes(recheckCiMock, 1)
   assertCalledWith(setOutputMock, 'deployment_id', 123)
   assertCalledWith(setOutputMock, 'comment_body', '.deploy')
   assertCalledWith(setOutputMock, 'triggered', 'true')
@@ -1571,6 +1582,7 @@ test('rejects the deployment when deployment confirmation is set, but does not s
   )
 
   assert.strictEqual(await run(), 'failure')
+  assertNotCalled(recheckCiMock)
   assertOperationResult({
     decision: 'failure',
     reason_code: 'confirmation_rejected',
@@ -1614,6 +1626,7 @@ test('reports a timed-out confirmation and warns if non-sticky lock cleanup thro
   )
 
   assert.strictEqual(await run(), 'failure')
+  assertNotCalled(recheckCiMock)
   assertOperationResult({
     decision: 'failure',
     reason_code: 'confirmation_timed_out',
@@ -1627,6 +1640,104 @@ test('reports a timed-out confirmation and warns if non-sticky lock cleanup thro
     warningMock,
     'failed to release the non-sticky deployment lock after confirmation did not complete: cleanup unavailable'
   )
+})
+
+test('does not start a deployment if CI turns red while awaiting confirmation', async () => {
+  setEnv('INPUT_DEPLOYMENT_CONFIRMATION', 'true')
+  setEnv('INPUT_SKIP_COMPLETING', 'true')
+  const checkName = '[review details](https://example.invalid/check)'
+  const failure = `CI for PR #123 at abc123: ${checkName} did not pass.`
+  const createComment = mock.method(octokit.rest.issues, 'createComment')
+  recheckCiMock.mock.mockImplementation(() => {
+    assertCalledTimes(deploymentConfirmationMock, 1)
+    return Promise.resolve({commitStatus: 'FAILURE', failure})
+  })
+
+  assert.strictEqual(await run(), 'failure')
+  assertOperationResult({
+    decision: 'failure',
+    reason_code: 'prechecks_failed',
+    operation: 'deploy',
+    deployment_type: 'branch',
+    environment: 'production',
+    ref: 'test-ref',
+    sha: mock_sha
+  })
+  assertCalledTimes(recheckCiMock, 1)
+  assertCalledWith(setOutputMock, 'commit_status', 'FAILURE')
+  assert.strictEqual(pullRefReads, 0)
+  assertNotCalled(createComment)
+  assertNotCalledWith(setOutputMock, 'continue', 'true')
+  assertNotCalledWith(setOutputMock, 'context', String)
+  assertNotCalled(createDeploymentMock)
+  assertCalledWith(saveStateMock, 'bypass', 'true')
+  assertCalledWith(
+    unlockIfUnchangedMock,
+    octokit,
+    githubContext,
+    'production',
+    'lock-commit-sha'
+  )
+  const message = actionStatusMock.mock.calls.at(-1)?.arguments[0].message ?? ''
+  assert.match(message, /no deployment was started/i)
+  assert.ok(!message.includes(checkName))
+  assert.match(message, /once the checks are passing and visible/i)
+  assert.ok(message.includes('https://github.com/corp/test/actions/runs/12345'))
+  assertCalledWith(setFailedMock, failure)
+})
+
+test('does not announce a deployment if the PR head moves during the CI recheck', async () => {
+  setEnv('INPUT_DEPLOYMENT_CONFIRMATION', 'true')
+  const createComment = mock.method(octokit.rest.issues, 'createComment')
+  recheckCiMock.mock.mockImplementation(() => {
+    liveRefSha = 'new-commit'
+    return Promise.resolve({commitStatus: 'SUCCESS'})
+  })
+
+  assert.strictEqual(await run(), 'failure')
+  assertCalledWith(setOutputMock, 'reason_code', 'ref_changed')
+  assertNotCalled(createComment)
+  assertNotCalled(createDeploymentMock)
+  assertCalledTimes(unlockIfUnchangedMock, 1)
+  const message = actionStatusMock.mock.calls.at(-1)?.arguments[0].message ?? ''
+  assert.match(message, /no deployment was started/i)
+})
+
+test('asks for a new command if passing checks were replaced during confirmation', async () => {
+  setEnv('INPUT_DEPLOYMENT_CONFIRMATION', 'true')
+  recheckCiMock.mock.mockImplementation(() =>
+    Promise.resolve({
+      commitStatus: 'UNAVAILABLE',
+      failure: 'CI checks changed',
+      checksChanged: true
+    })
+  )
+
+  assert.strictEqual(await run(), 'failure')
+  const message = actionStatusMock.mock.calls.at(-1)?.arguments[0].message ?? ''
+  assert.match(message, /new deployment command and confirm the commit/i)
+  assertNotCalled(createDeploymentMock)
+})
+
+test('preserves the CI refusal and a sticky lock if it cannot post the refusal', async () => {
+  setEnv('INPUT_DEPLOYMENT_CONFIRMATION', 'true')
+  setEnv('INPUT_STICKY_LOCKS', 'true')
+  recheckCiMock.mock.mockImplementation(() =>
+    Promise.resolve({commitStatus: 'UNAVAILABLE', failure: 'Cannot read CI.'})
+  )
+  actionStatusMock.mock.mockImplementation(() =>
+    Promise.reject(new Error('comment unavailable'))
+  )
+
+  assert.strictEqual(await run(), 'failure')
+  assertCalledWith(setOutputMock, 'reason_code', 'prechecks_failed')
+  assert.match(
+    String(warningMock.mock.calls.at(-1)?.arguments[0]),
+    /comment unavailable/
+  )
+  assertCalledTimes(setFailedMock, 1)
+  assertNotCalled(unlockIfUnchangedMock)
+  assertNotCalled(createDeploymentMock)
 })
 
 test('warns when non-sticky confirmation cleanup returns a bad status', async () => {

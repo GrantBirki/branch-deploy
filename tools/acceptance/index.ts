@@ -1085,6 +1085,7 @@ const scenarios = [
         assertOutput(context, mainResult, 'continue', 'true')
         assertOutput(context, mainResult, 'noop', 'false')
         assertOutput(context, mainResult, 'deployment_id', '3000')
+        assert.deepEqual(prechecksQueryNumbers(context), [1])
         const deployment = requireDeployment(context)
         assert.equal(deployment.environment, 'production')
         assert.equal(deployment.ref, 'feature-branch')
@@ -2229,8 +2230,18 @@ const scenarios = [
     name: 'confirmation confirmed',
     run: () =>
       withMockGitHub('confirmation confirmed', async context => {
-        setTriggerComment(context.state, '.deploy')
-        context.state.confirmationReaction = '+1'
+        const {state} = context
+        setTriggerComment(state, '.deploy')
+        // This deployment is a prerequisite for merging, not the other way around.
+        state.pullRequest = {...state.pullRequest, merged: false}
+        state.mergeStateStatus = 'BLOCKED'
+        state.branchRules = [
+          {
+            type: 'required_deployments',
+            parameters: {required_deployment_environments: ['production']}
+          }
+        ]
+        state.confirmationReaction = '+1'
 
         const result = await runMain(context, {
           deployment_confirmation: 'true',
@@ -2240,8 +2251,325 @@ const scenarios = [
         assertExit(context, result, 0)
         assertReason(context, result, 'deployment_ready')
         assertCommentIncludes(context, 'Deployment confirmed by __octocat__')
-        assert.equal(context.state.deployments.length, 1)
+        assert.equal(requireDeployment(context).environment, 'production')
+        assert.deepEqual(prechecksQueryNumbers(context), [1, 1])
       })
+  },
+  {
+    name: 'confirmation verifies selected checks and the head before announcing a deployment',
+    run: async () => {
+      for (const [change, expected, pagedChecks, optionalConclusion] of [
+        ['failing run', 'FAILURE'],
+        ['replacement run', 'UNAVAILABLE'],
+        ['shifted check pages', 'UNAVAILABLE'],
+        ['page-one check fails before page two', 'FAILURE', 'all'],
+        ['required check fails between pages', 'FAILURE', 'required'],
+        ['only an optional check fails between pages', 'SUCCESS', 'required'],
+        ['optional failure reorders pages once', 'SUCCESS', 'required'],
+        [
+          'optional failure reorders pages on both reads',
+          'UNAVAILABLE',
+          'required'
+        ],
+        ['failure moves between pages on both reads', 'UNAVAILABLE', 'all'],
+        [
+          'required check fails with an optional failure already visible',
+          'FAILURE',
+          'required',
+          'FAILURE'
+        ],
+        [
+          'failure moves between pages with an optional check pending',
+          'UNAVAILABLE',
+          'required',
+          null
+        ],
+        ['moved pull request head', 'SUCCESS']
+      ] as const) {
+        await withMockGitHub(change, async context => {
+          const {state} = context
+          const lock = lockBranch('production')
+          const check = {
+            conclusion: 'SUCCESS',
+            databaseId: 10,
+            isRequired: true,
+            name: 'untrusted-check-name \`[link](#untrusted-check-link)\`',
+            type: 'check-run'
+          } as const
+          const supersededFailure = {
+            ...check,
+            conclusion: 'FAILURE',
+            databaseId: 1,
+            name: 'ci-003'
+          } as const
+          const unrelatedCheck = {
+            ...check,
+            conclusion: optionalConclusion ?? null,
+            databaseId: 103,
+            isRequired: false,
+            name: 'unrelated-check'
+          } as const
+          state.pullRequest = {...state.pullRequest, merged: false}
+          state.rollupContexts = [check]
+          const movedHead = change === 'moved pull request head'
+          const shiftedPages = change === 'shifted check pages'
+          const paginated = shiftedPages || pagedChecks !== undefined
+          const optional = pagedChecks === 'required' && expected === 'SUCCESS'
+          const optionalReordersPages = change.startsWith(
+            'optional failure reorders pages'
+          )
+          const movingFailure = change.startsWith('failure moves between pages')
+          const pagesAfterConfirmation: number[] = []
+          if (paginated) {
+            state.rollupContexts = Array.from({length: 101}, (_, i) => ({
+              ...check,
+              databaseId: i + 2,
+              isRequired: optionalReordersPages
+                ? i !== 100
+                : !optional || i !== 0,
+              name: `ci-${String(i + 1).padStart(3, '0')}`
+            }))
+            if (optionalConclusion !== undefined) {
+              state.rollupState = optionalConclusion ?? 'PENDING'
+              state.rollupContexts = state.rollupContexts.map((run, index) =>
+                index === 1 ? unrelatedCheck : run
+              )
+            }
+            if (movingFailure) {
+              // Keep an older failed run in the counts without treating it as current.
+              state.rollupContexts = [
+                ...state.rollupContexts,
+                supersededFailure
+              ]
+            }
+          }
+          state.confirmationReaction = () => {
+            assert.equal(requireMockLock(context, lock)['sticky'], false)
+            if (movedHead) {
+              state.beforeCheckPage = () => {
+                state.pullRequest = {
+                  ...state.pullRequest,
+                  headSha: ACCEPTANCE_SHAS.default
+                }
+              }
+            } else if (paginated) {
+              const initial = state.rollupContexts
+              state.beforeCheckPage = start => {
+                pagesAfterConfirmation.push(start)
+                if (optionalReordersPages) {
+                  // The optional check fails and sorts first. GitHub's counts change and
+                  // page two repeats the passing required check at the end of page one.
+                  const last = initial.at(-1)
+                  assert.equal(last?.type, 'check-run')
+                  const green =
+                    start === 0 &&
+                    (pagesAfterConfirmation.length === 1 ||
+                      expected === 'UNAVAILABLE')
+                  state.rollupState = green ? 'SUCCESS' : 'FAILURE'
+                  state.rollupContexts = green
+                    ? initial
+                    : [
+                        {...last, conclusion: 'FAILURE'},
+                        ...initial.slice(0, 100)
+                      ]
+                  return
+                }
+                if (start !== 100 && !movingFailure) return
+                if (shiftedPages) {
+                  // A new passing check sorts first. Page two repeats check 100, with the rollup still green.
+                  state.rollupContexts = [
+                    {...check, databaseId: 102, name: 'aaa-new-check'},
+                    ...state.rollupContexts
+                  ]
+                } else {
+                  // Check 1 fails after we read page one. If check 101 just recovered,
+                  // neither page includes the current failure, even if another check isn't green.
+                  const failingCheck = movingFailure && start === 0 ? 100 : 0
+                  state.rollupState = 'FAILURE'
+                  state.rollupContexts = state.rollupContexts.map(
+                    (run, index) =>
+                      run === supersededFailure || run === unrelatedCheck
+                        ? run
+                        : {
+                            ...run,
+                            conclusion:
+                              index === failingCheck ? 'FAILURE' : 'SUCCESS'
+                          }
+                  )
+                }
+              }
+            } else {
+              const conclusion = expected === 'FAILURE' ? 'FAILURE' : 'SUCCESS'
+              state.rollupState = conclusion
+              state.rollupContexts = [{...check, conclusion, databaseId: 11}]
+            }
+            return '+1'
+          }
+
+          const inputs = {
+            checks: pagedChecks ?? 'all',
+            deployment_confirmation: 'true',
+            skip_completing: 'true'
+          }
+          const result = await runMain(context, inputs)
+          assertOutput(context, result, 'commit_status', expected)
+          if (pagedChecks !== undefined) {
+            assert.deepEqual(pagesAfterConfirmation, [0, 100, 0, 100])
+          }
+          if (optional) {
+            assertExit(context, result, 0)
+            assertReason(context, result, 'deployment_ready')
+            assert.equal(
+              requireDeployment(context).sha,
+              ACCEPTANCE_SHAS.feature
+            )
+            return
+          }
+          assertExit(context, result, 1)
+          assertReason(
+            context,
+            result,
+            movedHead ? 'ref_changed' : 'prechecks_failed'
+          )
+          assert.equal(result.output['continue'], undefined)
+          assert.equal(result.output['context'], undefined)
+          assertNoDeployment(context, result)
+          assert.equal(state.branches.has(lock), false)
+          const comments = state.comments
+            .map(comment => comment.body)
+            .join('\n')
+          assert.match(comments, /Deployment confirmed by __octocat__/u)
+          assert.match(comments, /No deployment was started\./u)
+          assert.doesNotMatch(
+            comments,
+            /Deployment Triggered|untrusted-check-/u
+          )
+          const requests = context.routeLog.length
+          const post = await runPost(context, result, inputs, 'failure')
+          assertExit(context, post, 0)
+          assert.equal(context.routeLog.length, requests)
+
+          if (change === 'replacement run') {
+            const comment = {body: '.deploy', id: 1001}
+            state.comments.push(comment)
+            state.confirmationReaction = '+1'
+            const fresh = await runMain(context, inputs, 'octocat', comment.id)
+            assertExit(context, fresh, 0)
+            assertReason(context, fresh, 'deployment_ready')
+            assert.equal(
+              requireDeployment(context).sha,
+              ACCEPTANCE_SHAS.feature
+            )
+          }
+        })
+      }
+    }
+  },
+  {
+    name: 'confirmation allows a passing required check when a different App reports a same-named failure',
+    run: () =>
+      withMockGitHub('same check name, two hidden Apps', async context => {
+        const {state} = context
+        state.pullRequest = {...state.pullRequest, merged: false}
+        state.rollupState = 'FAILURE'
+        state.rollupContexts = [
+          ...[123, 122].map(id => {
+            const isRequired = id === 123
+            const conclusion = isRequired ? 'SUCCESS' : 'FAILURE'
+            state.checkRuns.set(id, {
+              id,
+              node_id: `CR_${String(id)}`,
+              name: 'ci',
+              head_sha: ACCEPTANCE_SHAS.feature,
+              conclusion: conclusion.toLowerCase(),
+              app: {id: isRequired ? 15368 : 456}
+            })
+            return {
+              type: 'check-run' as const,
+              name: 'ci',
+              conclusion,
+              databaseId: id,
+              integrationId: null,
+              isRequired
+            }
+          }),
+          ...Array.from({length: 99}, (_, i) => ({
+            type: 'status-context' as const,
+            context: `optional-${String(i)}`,
+            state: 'SUCCESS',
+            isRequired: false
+          }))
+        ]
+        state.confirmationReaction = '+1'
+
+        const result = await runMain(context, {
+          checks: 'required',
+          deployment_confirmation: 'true'
+        })
+        assertExit(context, result, 0)
+        assertReason(context, result, 'deployment_ready')
+        assert.equal(requireDeployment(context).sha, ACCEPTANCE_SHAS.feature)
+      })
+  },
+  {
+    name: 'confirmation checks the original fork commit, not the new head',
+    run: async () => {
+      const confirmed = ACCEPTANCE_SHAS.fork
+      const newHead = ACCEPTANCE_SHAS.feature
+      const checks = (conclusion: 'SUCCESS' | 'FAILURE') => ({
+        rollupAvailable: true,
+        rollupState: conclusion,
+        rollupContexts: [
+          {
+            conclusion,
+            isRequired: true,
+            name: 'build',
+            type: 'check-run' as const
+          }
+        ]
+      })
+      for (const [originalStatus, newStatus] of [
+        ['FAILURE', 'SUCCESS'],
+        ['SUCCESS', 'FAILURE']
+      ] as const) {
+        await withMockGitHub(
+          `fork CI ${originalStatus} vs ${newStatus}`,
+          async context => {
+            const {state} = context
+            setForkPullRequest(state)
+            state.pullRequest = {...state.pullRequest, merged: false}
+            state.checksByCommit.set(confirmed, checks('SUCCESS'))
+            state.confirmationReaction = () => {
+              state.checksByCommit.set(confirmed, checks(originalStatus))
+              state.checksByCommit.set(newHead, checks(newStatus))
+              state.pullRequest = {...state.pullRequest, headSha: newHead}
+              return '+1'
+            }
+
+            const result = await runMain(context, {
+              allow_forks: 'true',
+              deployment_confirmation: 'true'
+            })
+            assertOutput(context, result, 'sha', confirmed)
+            assertOutput(context, result, 'commit_status', originalStatus)
+            assert.equal(state.pullRequest.headSha, newHead)
+            assert.equal(
+              routeVariables(context, 'POST', '/graphql', 1)['commitId'],
+              `C_${confirmed}`
+            )
+            if (originalStatus === 'FAILURE') {
+              assertExit(context, result, 1)
+              assertReason(context, result, 'prechecks_failed')
+              assertNoDeployment(context, result)
+            } else {
+              assertExit(context, result, 0)
+              assertReason(context, result, 'deployment_ready')
+              assert.equal(requireDeployment(context).sha, confirmed)
+            }
+          }
+        )
+      }
+    }
   },
   {
     name: 'confirmation finds actor reaction on page two',
@@ -3480,7 +3808,7 @@ const scenarios = [
                   context.state.pullRequestStackResponses,
                   responses.slice(expectedReads)
                 )
-                assert.deepEqual(prechecksQueryNumbers(context), [1])
+                assert.deepEqual(prechecksQueryNumbers(context), [1, 1])
                 assert.deepEqual(stackQueryRoutes(context), [])
                 assert.deepEqual(context.state.prStackResponses, [
                   previewResponse
@@ -4653,7 +4981,7 @@ const scenarios = [
           context.routeLog.some(
             route =>
               route.path === '/graphql' &&
-              route.body.includes('C_acceptance_1') &&
+              route.body.includes(`C_${lower.pullRequest.headSha}`) &&
               route.body.includes('"cursor":"100"')
           ),
           diagnostics(context, result)
@@ -5421,7 +5749,7 @@ const scenarios = [
           )
           assert.equal(
             routeVariables(context, 'POST', '/graphql', 1)['commitId'],
-            'C_acceptance'
+            `C_${ACCEPTANCE_SHAS.feature}`
           )
           assert.equal(
             routeVariables(context, 'POST', '/graphql', 1)['cursor'],
@@ -5460,17 +5788,26 @@ const scenarios = [
   },
   {
     name: 'no CI checks with approval',
-    run: () =>
-      withMockGitHub('no CI checks with approval', async context => {
-        setTriggerComment(context.state, '.deploy')
-        context.state.rollupState = null
+    run: async () => {
+      for (const confirm of [false, true]) {
+        await withMockGitHub('no CI checks with approval', async context => {
+          context.state.rollupState = null
+          context.state.confirmationReaction = '+1'
 
-        const result = await runMain(context)
+          const result = await runMain(context, {
+            deployment_confirmation: String(confirm)
+          })
 
-        assertExit(context, result, 0)
-        assertReason(context, result, 'deployment_ready')
-        assert.equal(context.state.deployments.length, 1)
-      })
+          assertExit(context, result, 0)
+          assertReason(context, result, 'deployment_ready')
+          assert.equal(requireDeployment(context).sha, ACCEPTANCE_SHAS.feature)
+          assert.deepEqual(
+            prechecksQueryNumbers(context),
+            confirm ? [1, 1] : [1]
+          )
+        })
+      }
+    }
   },
   {
     name: 'skip ci bypasses failing rollup',

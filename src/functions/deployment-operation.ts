@@ -741,7 +741,7 @@ async function continueDeployment(
   lease: DeploymentLockLease,
   progress: OperationProgress
 ): Promise<OperationOutcome> {
-  const {context} = request
+  const {context, octokit, reactionId} = request
   const {environment, environmentResult, precheck} = ready
   const githubRunId = parseInt(process.env['GITHUB_RUN_ID'] ?? '')
   const deploymentType: OperationDeploymentType = precheck.noopMode
@@ -761,6 +761,45 @@ async function continueDeployment(
     logUrl
   )
   if (confirmationFailure !== null) return confirmationFailure
+
+  if (precheck.recheckCi !== undefined) {
+    const {commitStatus, failure, checksChanged} = await precheck.recheckCi()
+    setActionOutput('commit_status', commitStatus)
+    if (failure !== undefined) {
+      const recovery =
+        checksChanged === true
+          ? 'The selected CI checks changed while we waited. Post a new deployment command and confirm the commit it shows.'
+          : 'Branch Deploy could not verify that all selected CI checks still pass. Once the checks are passing and visible to Branch Deploy, post a new deployment command.'
+      const message = dedent(`
+        ### Deployment stopped after confirmation
+
+        No deployment was started. ${recovery}
+
+        [View the workflow run](${logUrl}) for details.
+      `)
+      saveActionState('bypass', 'true')
+      await lease.cleanup('after the CI recheck stopped the deployment')
+      try {
+        await actionStatus({context, octokit, reactionId, message})
+      } catch (error) {
+        core.warning(
+          `failed to report CI after confirmation: ${legacyApiError(error).message}`
+        )
+      }
+      core.setFailed(failure)
+      return terminal(request, {
+        runResult: 'failure',
+        decision: 'failure',
+        reasonCode: 'prechecks_failed',
+        deploymentType,
+        environment,
+        ref: precheck.ref,
+        sha: precheck.sha
+      })
+    }
+  }
+
+  // The ref can move while we recheck CI. Verify it before announcing the deployment.
   const earlyRefFailure = await changedRefOutcome(
     request,
     ready,

@@ -8,6 +8,7 @@ import {
 import type {
   MockBranch,
   MockCommit,
+  MockCommitChecks,
   MockDeployment,
   MockDeploymentStatus,
   MockFault,
@@ -191,6 +192,7 @@ export function createMockState(): MockGitHubState {
     blobs: new Map(),
     branchRules: [],
     branches,
+    checksByCommit: new Map(),
     comments: [
       {
         body: '.deploy',
@@ -398,7 +400,8 @@ function pullResponse(state: MockGitHubState): unknown {
   }
 }
 
-function checkRollup(state: MockPullRequestChecks, start = 0): unknown {
+function checkRollup(state: MockCommitChecks, start = 0): unknown {
+  state.beforeCheckPage?.(start)
   if (!state.rollupAvailable) {
     return undefined
   }
@@ -408,6 +411,15 @@ function checkRollup(state: MockPullRequestChecks, start = 0): unknown {
   return {
     state: state.rollupState,
     contexts: {
+      // GitHub reports counts for the entire connection on each page.
+      checkRunCountsByState: rollupStateCounts(
+        state.rollupContexts,
+        'check-run'
+      ),
+      statusContextCountsByState: rollupStateCounts(
+        state.rollupContexts,
+        'status-context'
+      ),
       nodes: state.rollupContexts
         .slice(start, start + 100)
         .map(rollupContextResponse),
@@ -420,6 +432,22 @@ function checkRollup(state: MockPullRequestChecks, start = 0): unknown {
       }
     }
   }
+}
+
+function rollupStateCounts(
+  contexts: readonly MockRollupContext[],
+  type: MockRollupContext['type']
+): readonly {state: string; count: number}[] {
+  const counts = new Map<string, number>()
+  for (const context of contexts) {
+    if (context.type !== type) continue
+    const state =
+      context.type === 'check-run'
+        ? (context.conclusion ?? 'IN_PROGRESS')
+        : context.state
+    counts.set(state, (counts.get(state) ?? 0) + 1)
+  }
+  return Array.from(counts, ([state, count]) => ({state, count}))
 }
 
 function rollupContextResponse(context: MockRollupContext): unknown {
@@ -437,6 +465,7 @@ function rollupContextResponse(context: MockRollupContext): unknown {
             : {databaseId: context.integrationId ?? 1}
       },
       conclusion: context.conclusion,
+      status: context.conclusion === null ? 'IN_PROGRESS' : 'COMPLETED',
       isRequired: context.isRequired,
       name: context.name
     }
@@ -471,13 +500,11 @@ function prechecksBaseRef(pull: MockPrechecksPull): string {
   return pull.baseRefResponses.shift() ?? pull.pullRequest.baseRef
 }
 
-function prechecksCommitId(state: MockGitHubState, number: number): string {
-  return number === state.pullRequest.number
-    ? 'C_acceptance'
-    : `C_acceptance_${String(number)}`
-}
-
-function prechecksGraphql(state: MockPrechecksPull, commitId: string): unknown {
+function prechecksGraphql(
+  state: MockPrechecksPull,
+  checksByCommit: MockGitHubState['checksByCommit']
+): unknown {
+  const oid = state.graphqlCommitOid ?? state.pullRequest.headSha
   return {
     data: {
       repository: {
@@ -492,9 +519,11 @@ function prechecksGraphql(state: MockPrechecksPull, commitId: string): unknown {
             nodes: [
               {
                 commit: {
-                  id: commitId,
-                  oid: state.graphqlCommitOid ?? state.pullRequest.headSha,
-                  statusCheckRollup: checkRollup(state)
+                  id: `C_${oid}`,
+                  oid,
+                  statusCheckRollup: checkRollup(
+                    checksByCommit.get(oid) ?? state
+                  )
                 }
               }
             ]
@@ -733,7 +762,7 @@ function routeGraphql(
     }
     return {
       status: 200,
-      value: prechecksGraphql(pull, prechecksCommitId(state, number))
+      value: prechecksGraphql(pull, state.checksByCommit)
     }
   }
   if (
@@ -742,22 +771,27 @@ function routeGraphql(
   ) {
     const number = requireNumber(variables, 'number')
     const pull = prechecksPull(state, number)
-    if (
-      pull === undefined ||
-      requireString(variables, 'commitId') !== prechecksCommitId(state, number)
-    ) {
+    const commitId = requireString(variables, 'commitId')
+    const oid = commitId.slice(2)
+    const checks =
+      state.checksByCommit.get(oid) ??
+      (pull?.pullRequest.headSha === oid ? pull : undefined)
+    if (pull === undefined || checks === undefined) {
       throw new Error('unexpected paginated prechecks GraphQL variables')
     }
-    const cursor = requireString(variables, 'cursor')
+    const cursor =
+      variables['cursor'] === null
+        ? 0
+        : Number(requireString(variables, 'cursor'))
     return {
       status: 200,
       value: {
         data: {
           repository: {pullRequest: {baseRefName: prechecksBaseRef(pull)}},
           node: {
-            id: prechecksCommitId(state, number),
-            oid: pull.graphqlCommitOid ?? pull.pullRequest.headSha,
-            statusCheckRollup: checkRollup(pull, Number(cursor))
+            id: commitId,
+            oid,
+            statusCheckRollup: checkRollup(checks, cursor)
           }
         }
       }
@@ -1168,7 +1202,9 @@ function routeIssues(
           const reaction = createReaction(
             state,
             commentId,
-            state.confirmationReaction
+            typeof state.confirmationReaction === 'function'
+              ? state.confirmationReaction()
+              : state.confirmationReaction
           )
           return {
             status: 200,

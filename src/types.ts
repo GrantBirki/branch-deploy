@@ -260,6 +260,12 @@ export interface PrecheckFailure {
   readonly status: false
 }
 
+export interface ConfirmationCiResult {
+  readonly commitStatus: string | null
+  readonly failure?: string
+  readonly checksChanged?: true
+}
+
 export interface PrecheckSuccess {
   readonly baseRef: string
   readonly expectNoStack?: boolean
@@ -268,6 +274,7 @@ export interface PrecheckSuccess {
   readonly isFork: boolean
   readonly message: string
   readonly noopMode: boolean
+  readonly recheckCi?: () => Promise<ConfirmationCiResult>
   readonly ref: string
   readonly sha: string
   readonly stack?: PrStackSnapshot
@@ -287,6 +294,7 @@ export interface CheckRunResult {
   readonly isRequired: boolean
   readonly name: string
   readonly startedAt?: string
+  readonly status?: string
 }
 
 export interface LegacyIncompleteCheckRunResult {
@@ -320,7 +328,14 @@ export interface OperationOutcome {
   readonly sha?: string | null
 }
 
+type CheckStateCounts = readonly {
+  readonly state: string
+  readonly count: number
+}[]
+
 export interface StatusCheckContexts {
+  readonly checkRunCountsByState?: CheckStateCounts | null
+  readonly statusContextCountsByState?: CheckStateCounts | null
   readonly nodes: readonly RawCheckResult[]
   readonly pageInfo: {
     readonly endCursor: string | null

@@ -125,14 +125,18 @@ export type MockRollupContext =
       readonly updatedAt?: string
     }
 
-export interface MockPullRequestChecks {
+export interface MockCommitChecks {
+  beforeCheckPage?: (start: number) => void
+  rollupAvailable: boolean
+  rollupContexts: readonly MockRollupContext[]
+  rollupState: string | null
+}
+
+export interface MockPullRequestChecks extends MockCommitChecks {
   baseRefResponses: string[]
   graphqlCommitOid: string | null
   mergeStateStatus: string
   reviewDecision: string | null
-  rollupAvailable: boolean
-  rollupContexts: readonly MockRollupContext[]
-  rollupState: string | null
 }
 
 export interface MockStackMember extends MockPullRequestChecks {
@@ -151,11 +155,12 @@ export interface MockGitHubState extends MockPullRequestChecks {
   checkRuns: Map<number, unknown>
   branchRules: readonly unknown[]
   branches: Map<string, MockBranch>
+  checksByCommit: Map<string, MockCommitChecks>
   comments: MockComment[]
   commits: Map<string, MockCommit>
   commitsToTrees: Map<string, string>
   comparisonBehindBy: number
-  confirmationReaction: '+1' | '-1' | null
+  confirmationReaction: '+1' | '-1' | (() => '+1' | '-1') | null
   deployments: MockDeployment[]
   deploymentResponseSha: string | null
   failInitialReaction: boolean

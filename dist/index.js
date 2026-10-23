@@ -39385,6 +39385,8 @@ async function lock(request) {
     }));
 }
 
+// EXTERNAL MODULE: external "node:util"
+var external_node_util_ = __nccwpck_require__(7975);
 ;// CONCATENATED MODULE: ./src/functions/valid-permissions.ts
 
 
@@ -39902,8 +39904,6 @@ function evaluatePrecheckGates({ allowDraftDeploy, allowShaDeployments, commitOi
     return reject(`### ⚠️ Cannot proceed with deployment\n\n- reviewDecision: \`${String(reviewDecision)}\`\n- commitStatus: \`${String(commitStatus)}\`\n\n> This is usually caused by missing PR approvals or CI checks failing`);
 }
 
-// EXTERNAL MODULE: external "node:util"
-var external_node_util_ = __nccwpck_require__(7975);
 ;// CONCATENATED MODULE: ./src/functions/pr-stacks.ts
 
 
@@ -40347,10 +40347,15 @@ async function loadPrStackRequiredChecks(octokit, request) {
 
 
 
+
 const UNVERIFIED_BASE = {
     commitStatus: 'UNAVAILABLE',
     kind: 'base-unverified',
     message: '### ⚠️ Cannot proceed with deployment\n\nThe pull request base branch changed or could not be verified while checking reviews and CI. Confirm the target branch, then post a new deployment command.'
+};
+const INCONSISTENT_CHECK_PAGES = {
+    commitStatus: 'UNAVAILABLE',
+    kind: 'inconsistent-pages'
 };
 // Runs precheck logic before the branch deployment can proceed
 // :param context: The context of the event
@@ -40684,15 +40689,20 @@ async function prechecks(context, octokit, data) {
     else if (legacyTruthy(isDraft) && allowDraftDeploy) {
         info(`📓 deployment requested on a ${COLORS.highlight}draft${COLORS.reset} pull request from an ${COLORS.highlight}allowed${COLORS.reset} environment`);
     }
-    const checkEvaluation = await evaluateCommitChecks({
+    const checkPolicy = {
         checks,
         environment: data.environment,
         ignoredChecks,
         octokit,
-        pullRequestNumber: context.issue.number,
         repo: context.repo,
-        result,
-        skipCi,
+        skipCi
+    };
+    const confirmationTargets = data.inputs.deployment_confirmation && isPullRequestDeployment && !skipCi
+        ? []
+        : undefined;
+    const checkEvaluation = await evaluateCommitChecks({
+        ...checkPolicy,
+        ...pullRequestCheckTarget(result, context.issue.number, confirmationTargets),
         stackRequiredChecks
     });
     const commitStatus = checkEvaluation.commitStatus;
@@ -40721,9 +40731,9 @@ async function prechecks(context, octokit, data) {
             query,
             stack,
             allowDraftDeploy,
-            ignoredChecks,
+            checkPolicy,
+            confirmationTargets,
             isFork,
-            skipCi,
             skipReviews,
             stackRequiredChecks,
             userIsAdmin
@@ -40880,6 +40890,16 @@ async function prechecks(context, octokit, data) {
         noopMode: noopMode,
         sha: sha,
         baseRef,
+        ...(confirmationTargets === undefined
+            ? {}
+            : {
+                recheckCi: () => recheckConfirmationCi(checkPolicy, confirmationTargets, stackRequiredChecks === null
+                    ? null
+                    : {
+                        stableBranch: stack?.stableBranch ?? baseRef,
+                        ...(stack === null ? { scope: 'ordinary' } : {})
+                    })
+            }),
         isFork: isFork,
         ...(expectNoStack ? { expectNoStack: true } : {}),
         ...(stack === null ? {} : { stack })
@@ -40916,7 +40936,7 @@ function requireStackPolicyData(result, expectedSha, expectedBaseRef) {
         throw new Error('The stack pull request policy data is incomplete or stale');
     }
 }
-async function checkStackPrerequisites({ context, data, octokit, query, stack, allowDraftDeploy, ignoredChecks, isFork, skipCi, skipReviews, stackRequiredChecks, userIsAdmin }) {
+async function checkStackPrerequisites({ context, data, octokit, query, stack, allowDraftDeploy, checkPolicy, confirmationTargets, isFork, skipReviews, stackRequiredChecks, userIsAdmin }) {
     try {
         for (const pull of stack.pullRequests) {
             if (pull.number === context.issue.number)
@@ -40929,14 +40949,8 @@ async function checkStackPrerequisites({ context, data, octokit, query, stack, a
             }));
             requireStackPolicyData(result, pull.headSha, pull.baseRef);
             const check = await evaluateCommitChecks({
-                checks: data.inputs.checks,
-                environment: data.environment,
-                ignoredChecks,
-                octokit,
-                pullRequestNumber: pull.number,
-                repo: context.repo,
-                result,
-                skipCi,
+                ...checkPolicy,
+                ...pullRequestCheckTarget(result, pull.number, confirmationTargets),
                 stackRequiredChecks
             });
             const gate = evaluatePrecheckGates({
@@ -40977,17 +40991,111 @@ async function checkStackPrerequisites({ context, data, octokit, query, stack, a
     }
     return null;
 }
-async function evaluateCommitChecks({ checks, environment, ignoredChecks, octokit, pullRequestNumber, repo, result, skipCi, stackRequiredChecks }) {
+function pullRequestCheckTarget(result, pullRequestNumber, confirmationTargets) {
+    const { baseRefName, commits } = result.repository.pullRequest;
+    const target = {
+        pullRequestNumber,
+        baseRefName,
+        commit: commits?.nodes?.[0]?.commit
+    };
+    if (confirmationTargets === undefined)
+        return target;
+    const selectedChecks = new Map();
+    confirmationTargets.push({ ...target, selectedChecks });
+    return { ...target, selectedChecks };
+}
+async function recheckConfirmationCi(policy, targets, base) {
+    let stackRequiredChecks = null;
+    if (base !== null) {
+        try {
+            const { data: branch } = await policy.octokit.rest.repos.getBranch({
+                ...policy.repo,
+                branch: base.stableBranch,
+                headers: API_HEADERS
+            });
+            stackRequiredChecks = await loadPrStackRequiredChecks(policy.octokit, {
+                ...policy.repo,
+                ...base,
+                stableSha: branch.commit.sha,
+                branch
+            });
+        }
+        catch (error) {
+            const failure = 'Could not verify the required CI checks for the base branch.';
+            debug(`${failure} ${legacyApiError(error).message}`);
+            return { commitStatus: 'UNAVAILABLE', failure };
+        }
+    }
+    // The commit_status output describes the selected PR, even if a lower
+    // pull request in its stack prevents the deployment.
+    let commitStatus = 'UNAVAILABLE';
+    for (const target of targets) {
+        const selectedChecks = new Map();
+        const request = {
+            ...policy,
+            ...target,
+            afterConfirmation: true,
+            selectedChecks,
+            stackRequiredChecks
+        };
+        let check = await evaluateCommitChecks(request);
+        if (check.kind === 'inconsistent-pages') {
+            // Start at page one; combining pages from different reads could hide a failure.
+            info('CI changed between pages after confirmation. Reading the checks once more.');
+            check = await evaluateCommitChecks(request);
+        }
+        const selectedPr = target === targets[0];
+        if (selectedPr)
+            commitStatus = check.commitStatus;
+        const subject = `CI for PR #${target.pullRequestNumber} at \`${String(target.commit?.oid)}\``;
+        if (check.kind === 'passed' || check.kind === 'no-checks') {
+            // Confirmation covers these results, not a replacement run that also passed.
+            if ((0,external_node_util_.isDeepStrictEqual)(target.selectedChecks, selectedChecks))
+                continue;
+            return {
+                commitStatus: selectedPr ? 'UNAVAILABLE' : commitStatus,
+                checksChanged: true,
+                failure: `${subject}: the selected checks changed after confirmation.`
+            };
+        }
+        if (check.kind === 'unavailable') {
+            debug(`Could not recheck CI after confirmation: ${String(check.error)}`);
+        }
+        const detail = check.kind === 'failed' || check.kind === 'missing'
+            ? check.filterChecksResult.message
+            : 'the check results or pull request base could not be verified';
+        return {
+            commitStatus,
+            failure: `${subject}: ${detail}`
+        };
+    }
+    return { commitStatus };
+}
+async function evaluateCommitChecks({ checks, environment, ignoredChecks, octokit, pullRequestNumber, repo, commit, baseRefName, afterConfirmation, selectedChecks, skipCi, stackRequiredChecks }) {
     if (skipCi) {
         info(`⏩ CI checks have been ${COLORS.highlight}disabled${COLORS.reset} for the ${COLORS.highlight}${environment}${COLORS.reset} environment`);
         return { commitStatus: 'skip_ci', kind: 'skipped' };
     }
     try {
-        const commit = result.repository.pullRequest.commits?.nodes?.[0]?.commit;
         if (commit === undefined) {
             throw new Error('The GraphQL response did not include a commit');
         }
-        const statusCheckRollup = commit.statusCheckRollup;
+        const source = {
+            octokit,
+            pullRequestNumber,
+            repo,
+            baseRefName,
+            commit,
+            afterConfirmation: afterConfirmation === true
+        };
+        // A fork's head may advance during confirmation. Read CI on the commit
+        // we admitted, not on the pull request's latest commit.
+        const current = source.afterConfirmation
+            ? await readCommitCheckPage(source, null)
+            : commit;
+        if ('kind' in current)
+            return current;
+        const { statusCheckRollup } = current;
         const explicitChecks = Array.isArray(checks) && checks.length > 0;
         if (explicitChecks && statusCheckRollup === null) {
             const filterChecksResult = filterChecks(checks, [], ignoredChecks, false);
@@ -41013,23 +41121,25 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
             throw new Error('The GraphQL response did not include a check rollup');
         }
         const checkResults = await loadAllCheckResults({
-            octokit,
-            pullRequestNumber,
-            repo,
-            baseRefName: result.repository.pullRequest.baseRefName,
-            commit,
+            ...source,
             statusCheckRollup
         });
         if ('kind' in checkResults)
             return checkResults;
-        // Resolve identities before grouping reruns, or a newer hidden result could
-        // escape the earlier known App's group. Never resolve from display URLs.
-        if (stackRequiredChecks !== null) {
+        // Resolve competing Apps on both reads so identical runs produce the same selection.
+        const required = checks === 'required';
+        const selected = checkSelection(checks, ignoredChecks, required);
+        const competingRuns = selectedChecks === undefined
+            ? undefined
+            : confirmationRunsNeedingApp(checkResults, selected);
+        if (stackRequiredChecks !== null || competingRuns !== undefined) {
             for (const [index, check] of checkResults.entries()) {
                 if (isCheckRun(check) &&
                     checkIntegrationId(check) === null &&
                     !ignoredChecks.includes(check.name) &&
-                    stackRequiredChecks.some(required => required.appId !== null && required.context === check.name)) {
+                    (competingRuns?.has(check) === true ||
+                        ((competingRuns === undefined || selected(check)) &&
+                            stackRequiredChecks?.some(rule => rule.appId !== null && rule.context === check.name) === true))) {
                     const id = check.databaseId;
                     if (typeof id !== 'number' ||
                         !Number.isSafeInteger(id) ||
@@ -41081,7 +41191,7 @@ async function evaluateCommitChecks({ checks, environment, ignoredChecks, octoki
         });
         if (missing !== null)
             return missing;
-        const filterChecksResult = filterChecks(checks, checkResults, ignoredChecks, checks === 'required');
+        const filterChecksResult = filterChecks(checks, checkResults, ignoredChecks, required, selectedChecks);
         if (filterChecksResult.status === 'SUCCESS') {
             return {
                 commitStatus: 'SUCCESS',
@@ -41165,20 +41275,88 @@ function missingRequiredStackChecks({ checks, checkResults, ignoredChecks, requi
         kind: 'missing'
     };
 }
-async function loadAllCheckResults({ octokit, pullRequestNumber, repo, baseRefName, commit, statusCheckRollup }) {
+async function loadAllCheckResults({ statusCheckRollup, ...source }) {
     const checkResults = [...statusCheckRollup.contexts.nodes];
     let pageInfo = statusCheckRollup.contexts.pageInfo;
-    if (!pageInfo) {
-        throw new Error('The GraphQL response did not include check page info');
+    const seenCursors = new Set();
+    let expected;
+    // Only an explicit false proves we reached the last page, even if its checks pass.
+    while (pageInfo?.hasNextPage !== false) {
+        if (pageInfo?.hasNextPage !== true) {
+            throw new Error('The check response did not include valid page info');
+        }
+        const cursor = pageInfo.endCursor;
+        if (typeof cursor !== 'string' || cursor === '') {
+            throw new Error('The check page has no end cursor');
+        }
+        if (seenCursors.has(cursor)) {
+            throw new Error('The check page cursor did not advance');
+        }
+        seenCursors.add(cursor);
+        const page = await readCommitCheckPage(source, cursor);
+        if ('kind' in page)
+            return page;
+        if (page.statusCheckRollup === null) {
+            throw new Error('The paginated check rollup is unavailable');
+        }
+        if (source.afterConfirmation) {
+            expected ??= reportedCheckStateCounts(statusCheckRollup.contexts);
+            const counts = reportedCheckStateCounts(page.statusCheckRollup.contexts);
+            // A state change can reorder checks across the cursor. Discard this entire read.
+            if (!(0,external_node_util_.isDeepStrictEqual)(counts, expected))
+                return INCONSISTENT_CHECK_PAGES;
+        }
+        checkResults.push(...page.statusCheckRollup.contexts.nodes);
+        pageInfo = page.statusCheckRollup.contexts.pageInfo;
     }
-    if (!pageInfo.hasNextPage) {
-        return checkResults;
+    if (source.afterConfirmation) {
+        // An overlapping page can hide a check inserted before its cursor.
+        const ids = checkResults.map(confirmationCheckNodeId);
+        if (new Set(ids).size !== ids.length) {
+            throw new Error('A check appeared twice while reading CI after confirmation');
+        }
+        if (expected !== undefined) {
+            // Count raw results, not just required or latest checks. GitHub reports
+            // these totals for the whole connection on each page, not a locked snapshot.
+            const observed = new Map();
+            for (const check of checkResults) {
+                const key = isCheckRun(check)
+                    ? `check:${String(check.conclusion ?? check.status)}`
+                    : `status:${String(checkStatus(check))}`;
+                observed.set(key, (observed.get(key) ?? 0) + 1);
+            }
+            if (!(0,external_node_util_.isDeepStrictEqual)(observed, expected)) {
+                return INCONSISTENT_CHECK_PAGES;
+            }
+        }
     }
+    return checkResults;
+}
+function reportedCheckStateCounts(contexts) {
+    const counts = new Map();
+    for (const [kind, states] of [
+        ['check', contexts.checkRunCountsByState],
+        ['status', contexts.statusContextCountsByState]
+    ]) {
+        if (states === undefined || states === null) {
+            throw new Error('GitHub did not report CI state counts');
+        }
+        for (const { state, count } of states) {
+            if (!Number.isSafeInteger(count) || count < 0) {
+                throw new Error('GitHub reported an invalid CI state count');
+            }
+            if (count > 0)
+                counts.set(`${kind}:${state}`, count);
+        }
+    }
+    return counts;
+}
+async function readCommitCheckPage({ octokit, pullRequestNumber, repo, baseRefName, commit, afterConfirmation }, cursor) {
     if (commit.id === undefined || commit.id === '') {
         throw new Error('The GraphQL response did not include a commit node ID');
     }
     // isRequired is relative to the pull request's current base, even on a pinned commit.
-    const query = `query($commitId:ID!, $cursor:String!, $owner:String!, $name:String!, $number:Int!) {
+    const query = `query($commitId:ID!, $cursor:String, $owner:String!, $name:String!, $number:Int!, $afterConfirmation:Boolean!) {
                   repository(owner:$owner, name:$name) {
                     pullRequest(number:$number) { baseRefName }
                   }
@@ -41189,6 +41367,8 @@ async function loadAllCheckResults({ octokit, pullRequestNumber, repo, baseRefNa
                       statusCheckRollup {
                         state
                         contexts(first:100, after:$cursor) {
+                          checkRunCountsByState @include(if:$afterConfirmation) { state count }
+                          statusContextCountsByState @include(if:$afterConfirmation) { state count }
                           nodes {
                             ... on CheckRun {
                               id
@@ -41200,6 +41380,7 @@ async function loadAllCheckResults({ octokit, pullRequestNumber, repo, baseRefNa
                               }
                               isRequired(pullRequestNumber:$number)
                               conclusion
+                              status @include(if:$afterConfirmation)
                               name
                             }
                             ... on StatusContext {
@@ -41220,42 +41401,24 @@ async function loadAllCheckResults({ octokit, pullRequestNumber, repo, baseRefNa
                     }
                   }
                 }`;
-    const seenCursors = new Set();
-    while (pageInfo.hasNextPage) {
-        const cursor = pageInfo.endCursor;
-        if (cursor === null || cursor === '') {
-            throw new Error('The check page has no end cursor');
-        }
-        if (seenCursors.has(cursor)) {
-            throw new Error('The check page cursor did not advance');
-        }
-        seenCursors.add(cursor);
-        const page = prechecksGraphqlContextsPageResult(await graphqlAllowingInaccessibleApps(octokit, query, {
-            commitId: commit.id,
-            cursor,
-            owner: repo.owner,
-            name: repo.repo,
-            number: pullRequestNumber
-        }));
-        if (!page.node) {
-            throw new Error('The paginated commit node is unavailable');
-        }
-        if (page.node.id !== commit.id || page.node.oid !== commit.oid) {
-            throw new Error('The paginated check data belongs to another commit');
-        }
-        if (page.repository?.pullRequest?.baseRefName !== baseRefName) {
-            return UNVERIFIED_BASE;
-        }
-        if (page.node.statusCheckRollup === null) {
-            throw new Error('The paginated check rollup is unavailable');
-        }
-        checkResults.push(...page.node.statusCheckRollup.contexts.nodes);
-        pageInfo = page.node.statusCheckRollup.contexts.pageInfo;
-        if (!pageInfo) {
-            throw new Error('The paginated check response has no page info');
-        }
+    const page = prechecksGraphqlContextsPageResult(await graphqlAllowingInaccessibleApps(octokit, query, {
+        commitId: commit.id,
+        cursor,
+        afterConfirmation,
+        owner: repo.owner,
+        name: repo.repo,
+        number: pullRequestNumber
+    }));
+    if (!page.node) {
+        throw new Error('The paginated commit node is unavailable');
     }
-    return checkResults;
+    if (page.node.id !== commit.id || page.node.oid !== commit.oid) {
+        throw new Error('The paginated check data belongs to another commit');
+    }
+    if (page.repository?.pullRequest?.baseRefName !== baseRefName) {
+        return UNVERIFIED_BASE;
+    }
+    return page.node;
 }
 // A helper function to filter out ignored checks and return the combined status of the remaining checks
 // :param checks: the checks input option
@@ -41265,16 +41428,8 @@ async function loadAllCheckResults({ octokit, pullRequestNumber, repo, baseRefNa
 // :returns: An object containing a message (if a failure occurs), and a string representing the status of the checks
 // example: {message: '...', status: 'SUCCESS'}
 // The status will be one of the following: 'SUCCESS', 'FAILURE', 'MISSING'
-function filterChecks(checks, checkResults, ignoredChecks, required) {
-    const healthyCheckStatuses = ['SUCCESS', 'SKIPPED', 'NEUTRAL'];
-    checkResults = latestCheckResults(checkResults, check => {
-        const name = checkName(check);
-        const included = typeof checks === 'string' ||
-            checks.length === 0 ||
-            checks.some(checkName => checkName === name);
-        const ignored = ignoredChecks.some(ignoredCheck => ignoredCheck === name);
-        return included && !ignored && (!required || check.isRequired);
-    });
+function filterChecks(checks, checkResults, ignoredChecks, required, selectedChecks) {
+    checkResults = latestCheckResults(checkResults, checkSelection(checks, ignoredChecks, required));
     const checksDisplay = typeof checks === 'string' ? checks : checks.join(',');
     debug(`filterChecks() - checks: ${checksDisplay}`);
     debug(`filterChecks() - ignoredChecks: ${ignoredChecks.join(',')}`);
@@ -41323,8 +41478,20 @@ function filterChecks(checks, checkResults, ignoredChecks, required) {
         // If required is true, only keep checks that are required
         return !isIgnored && (required ? check.isRequired : true);
     });
+    if (selectedChecks !== undefined) {
+        for (const check of filteredChecks) {
+            const id = confirmationCheckNodeId(check);
+            // A status and a check run may have the same name. Their node IDs identify
+            // the records, not immutable conclusions or, for a status, its publisher.
+            const kind = isCheckRun(check) ? 'check' : 'status';
+            selectedChecks.set(id, `${kind}:${String(checkName(check))}`);
+        }
+    }
     // Determine if all remaining checks are in a healthy state
-    const unhealthyChecks = filteredChecks.filter(check => !healthyCheckStatuses.some(status => status === checkStatus(check)));
+    const unhealthyChecks = filteredChecks.filter(check => {
+        const status = checkStatus(check);
+        return status !== 'SUCCESS' && status !== 'SKIPPED' && status !== 'NEUTRAL';
+    });
     // If no checks remain after filtering, default to SUCCESS
     if (filteredChecks.length === 0) {
         const message = 'filterChecks() - after filtering, no checks remain - this will result in a SUCCESS state as it is treated as if no checks are defined';
@@ -41341,6 +41508,16 @@ function filterChecks(checks, checkResults, ignoredChecks, required) {
             ? 'one or more checks are pending'
             : 'one or more checks did not pass',
         status: allPending ? 'PENDING' : 'FAILURE'
+    };
+}
+function checkSelection(checks, ignoredChecks, required) {
+    return check => {
+        const name = checkName(check);
+        const included = typeof checks === 'string' ||
+            checks.length === 0 ||
+            checks.some(checkName => checkName === name);
+        const ignored = ignoredChecks.some(ignoredCheck => ignoredCheck === name);
+        return included && !ignored && (!required || check.isRequired);
     };
 }
 function isCheckRun(check) {
@@ -41394,6 +41571,46 @@ function checkDatabaseId(check) {
 }
 function checkNodeId(check) {
     return 'id' in check ? check.id : undefined;
+}
+function confirmationCheckNodeId(check) {
+    const id = checkNodeId(check);
+    if (typeof id !== 'string' || id === '') {
+        throw new Error('Cannot identify a CI check for deployment confirmation');
+    }
+    return id;
+}
+function confirmationRunsNeedingApp(reported, selected) {
+    const runs = reported.filter(isCheckRun);
+    const relevant = runs.filter(selected);
+    const visible = relevant.filter(run => checkIntegrationId(run) !== null);
+    const hidden = relevant.filter(run => checkIntegrationId(run) === null);
+    const latest = latestCheckResults(visible, selected).filter(isCheckRun);
+    const competingRuns = new Set();
+    for (const chosen of [...latest, ...hidden]) {
+        const app = checkIntegrationId(chosen);
+        const chosenId = chosen.databaseId ?? 0;
+        for (const run of runs) {
+            if (run.name !== chosen.name || run === chosen)
+                continue;
+            const otherApp = checkIntegrationId(run);
+            if (app !== null && otherApp !== null)
+                continue;
+            // An older optional run cannot supersede the selected one, even if its App
+            // is hidden. Identify only the chosen run if both would otherwise be anonymous.
+            const id = run.databaseId ?? 0;
+            if (Number.isSafeInteger(id) &&
+                id > 0 &&
+                Number.isSafeInteger(chosenId) &&
+                id < chosenId) {
+                if (app === null && otherApp === null)
+                    competingRuns.add(chosen);
+            }
+            else {
+                competingRuns.add(chosen).add(run);
+            }
+        }
+    }
+    return competingRuns;
 }
 function latestCheckResults(checkResults, participatesInPolicy) {
     const latest = new Map();
@@ -42170,7 +42387,7 @@ async function createDeployment(request, ready, lease, deploymentType, deploymen
     });
 }
 async function continueDeployment(request, ready, lease, progress) {
-    const { context } = request;
+    const { context, octokit, reactionId } = request;
     const { environment, environmentResult, precheck } = ready;
     const githubRunId = parseInt(process.env['GITHUB_RUN_ID'] ?? '');
     const deploymentType = precheck.noopMode
@@ -42183,6 +42400,41 @@ async function continueDeployment(request, ready, lease, progress) {
     const confirmationFailure = await confirmDeployment(request, ready, lease, deploymentType, githubRunId, logUrl);
     if (confirmationFailure !== null)
         return confirmationFailure;
+    if (precheck.recheckCi !== undefined) {
+        const { commitStatus, failure, checksChanged } = await precheck.recheckCi();
+        setActionOutput('commit_status', commitStatus);
+        if (failure !== undefined) {
+            const recovery = checksChanged === true
+                ? 'The selected CI checks changed while we waited. Post a new deployment command and confirm the commit it shows.'
+                : 'Branch Deploy could not verify that all selected CI checks still pass. Once the checks are passing and visible to Branch Deploy, post a new deployment command.';
+            const message = dedent(`
+        ### Deployment stopped after confirmation
+
+        No deployment was started. ${recovery}
+
+        [View the workflow run](${logUrl}) for details.
+      `);
+            saveActionState('bypass', 'true');
+            await lease.cleanup('after the CI recheck stopped the deployment');
+            try {
+                await actionStatus({ context, octokit, reactionId, message });
+            }
+            catch (error) {
+                warning(`failed to report CI after confirmation: ${legacyApiError(error).message}`);
+            }
+            setFailed(failure);
+            return terminal(request, {
+                runResult: 'failure',
+                decision: 'failure',
+                reasonCode: 'prechecks_failed',
+                deploymentType,
+                environment,
+                ref: precheck.ref,
+                sha: precheck.sha
+            });
+        }
+    }
+    // The ref can move while we recheck CI. Verify it before announcing the deployment.
     const earlyRefFailure = await changedRefOutcome(request, ready, lease, deploymentType);
     if (earlyRefFailure !== null)
         return earlyRefFailure;

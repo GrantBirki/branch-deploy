@@ -10,6 +10,7 @@ import type {PrStackRequiredCheck} from '../../src/functions/pr-stack-checks.ts'
 import {COLORS} from '../../src/functions/colors.ts'
 import type {
   BranchDeployContext,
+  CheckRunResult,
   GraphqlResponseErrorLike,
   PrecheckData,
   PrechecksGraphqlContextsPageResult,
@@ -144,11 +145,18 @@ type TestStatusCheckRollup = Exclude<
 
 const LAST_PAGE = {endCursor: null, hasNextPage: false} as const
 
+const LEGACY_CI_STATUS = {
+  context: 'legacy-ci',
+  id: 'SC_2',
+  isRequired: true,
+  state: 'SUCCESS'
+} as const satisfies RawCheckResult
+
 function checkRollup(state: string): TestStatusCheckRollup {
   return {
     state,
     contexts: {
-      nodes: [{context: 'legacy-ci', isRequired: true, state}],
+      nodes: [{...LEGACY_CI_STATUS, state}],
       pageInfo: LAST_PAGE
     }
   }
@@ -388,9 +396,10 @@ function mockApprovedCi(
 }
 
 function initialCheckPage(
-  nodes: readonly RawCheckResult[],
+  nodes: readonly RawCheckResult[] | null,
   pageInfo: {readonly endCursor: string | null; readonly hasNextPage: boolean},
-  state = 'FAILURE'
+  state = 'FAILURE',
+  mergeStateStatus = 'CLEAN'
 ): PrechecksGraphqlResult {
   return {
     repository: {
@@ -402,12 +411,13 @@ function initialCheckPage(
               commit: {
                 id: 'commit-node',
                 oid: 'abc123',
-                statusCheckRollup: {contexts: {nodes, pageInfo}, state}
+                statusCheckRollup:
+                  nodes === null ? null : {contexts: {nodes, pageInfo}, state}
               }
             }
           ]
         },
-        mergeStateStatus: 'CLEAN',
+        mergeStateStatus,
         reviewDecision: 'APPROVED',
         reviews: {totalCount: 1}
       }
@@ -416,25 +426,50 @@ function initialCheckPage(
 }
 
 function additionalCheckPage(
-  nodes: readonly RawCheckResult[],
-  pageInfo: {readonly endCursor: string | null; readonly hasNextPage: boolean},
+  nodes: readonly RawCheckResult[] | null,
+  pageInfo: {
+    readonly endCursor: string | null
+    readonly hasNextPage: boolean
+  } = LAST_PAGE,
   overrides: {
     readonly baseRefName?: string
+    readonly counts?: {
+      readonly checks?: Readonly<Record<string, number>> | null
+      readonly statuses?: Readonly<Record<string, number>>
+    }
     readonly id?: string
     readonly oid?: string
+    readonly state?: string
   } = {}
 ): PrechecksGraphqlContextsPageResult {
+  const counts = overrides.counts
+  const stateCountsFields =
+    counts === undefined
+      ? {}
+      : {
+          checkRunCountsByState: stateCounts(counts.checks),
+          statusContextCountsByState: stateCounts(counts.statuses)
+        }
   return {
     repository: {pullRequest: {baseRefName: overrides.baseRefName ?? 'main'}},
     node: {
       id: overrides.id ?? 'commit-node',
       oid: overrides.oid ?? 'abc123',
-      statusCheckRollup: {
-        contexts: {nodes, pageInfo},
-        state: 'FAILURE'
-      }
+      statusCheckRollup:
+        nodes === null
+          ? null
+          : {
+              contexts: {nodes, pageInfo, ...stateCountsFields},
+              state: overrides.state ?? 'FAILURE'
+            }
     }
   }
+}
+
+function stateCounts(counts: Readonly<Record<string, number>> | null = {}) {
+  return counts === null
+    ? null
+    : Object.entries(counts).map(([state, count]) => ({state, count}))
 }
 
 function mockCheckPages(
@@ -463,6 +498,23 @@ async function assertChecksUnavailable(
     status: false
   })
   assertCalledWith(setOutputMock, 'commit_status', 'UNAVAILABLE')
+}
+
+async function prepareConfirmationCiRecheck() {
+  data.inputs.deployment_confirmation = true
+  const result = await prechecks(context, octokit, data)
+  assert.equal(result.status, true, result.message)
+  assert.ok(result.recheckCi, 'confirmation must recheck CI before proceeding')
+  return result.recheckCi
+}
+
+async function confirmationCi(
+  admitted: readonly RawCheckResult[] | null,
+  ...pages: readonly PrechecksGraphqlContextsPageResult[]
+) {
+  mockCheckPages(initialCheckPage(admitted, LAST_PAGE, 'SUCCESS'), ...pages)
+  const recheckCi = await prepareConfirmationCiRecheck()
+  return recheckCi()
 }
 
 const STACK_STABLE_SHA = '1'.repeat(40)
@@ -569,6 +621,7 @@ const STACK_TEST_CHECK = {
 
 const STACK_SECURITY_CHECK = {
   context: 'security',
+  id: 'SC_security',
   isRequired: true,
   state: 'SUCCESS'
 } as const satisfies RawCheckResult
@@ -1688,6 +1741,7 @@ function mockLowerStackCheckPages(baseRefName: string): void {
       assert.deepStrictEqual(variables, {
         commitId: 'stack-commit-' + STACK_LOWER_SHA,
         cursor: 'next-check-page',
+        afterConfirmation: false,
         owner: 'corp',
         name: 'test',
         number: 121
@@ -1965,6 +2019,181 @@ test('ordinary explicit and ignored checks keep the configured overrides', async
   assertCalledTimes(loadPrStackRequiredChecksMock, 1)
 })
 
+for (const state of ['FAILURE', 'PENDING'] as const) {
+  test(
+    'confirmation sees a previously passing check become ' + state,
+    async () => {
+      const check = LEGACY_CI_STATUS
+      const counts = {statuses: {[state]: 1, EXPECTED: 0}}
+      data.inputs.checks = [check.context]
+      const result = await confirmationCi(
+        [check],
+        additionalCheckPage([], MORE_CHECKS, {counts}),
+        additionalCheckPage([{...check, state}], LAST_PAGE, {counts})
+      )
+      assert.equal(result.commitStatus, state)
+      assert.ok(result.failure)
+      const recheckCalls = graphQLOK.mock.calls.slice(1)
+      assert.match(recheckCalls[0]?.arguments[0] ?? '', /\$cursor:\s*String,/u)
+      assert.deepEqual(
+        recheckCalls.map(call => call.arguments[1]),
+        [null, MORE_CHECKS.endCursor].map(cursor => ({
+          commitId: 'commit-node',
+          cursor,
+          afterConfirmation: true,
+          owner: 'corp',
+          name: 'test',
+          number: 123
+        }))
+      )
+      assertCalledTimes(loadPrStackRequiredChecksMock, 0)
+    }
+  )
+}
+
+for (const checks of [null, [STACK_SECURITY_CHECK]]) {
+  const scenario = checks === null ? 'no CI' : 'deploy-before-merge'
+  test(
+    'confirmation still allows ' + scenario + ' when merging is blocked',
+    async () => {
+      mockCheckPages(
+        initialCheckPage(checks, LAST_PAGE, 'SUCCESS', 'BLOCKED'),
+        additionalCheckPage(checks)
+      )
+      const recheckCi = await prepareConfirmationCiRecheck()
+      assert.deepEqual(await recheckCi(), {
+        commitStatus: checks === null ? null : 'SUCCESS'
+      })
+    }
+  )
+}
+
+for (const [mode, expected] of [
+  ['required', 'UNAVAILABLE'],
+  ['all', 'SUCCESS'],
+  [[LEGACY_CI_STATUS.context], 'SUCCESS']
+] as const) {
+  test(
+    'confirmation when a check becomes optional with checks=' +
+      JSON.stringify(mode),
+    async () => {
+      data.inputs.checks = typeof mode === 'string' ? mode : [...mode]
+      const check = LEGACY_CI_STATUS
+      const result = await confirmationCi(
+        [check],
+        additionalCheckPage([{...check, isRequired: false}])
+      )
+      assert.equal(result.commitStatus, expected, result.failure)
+      assert.equal(result.checksChanged === true, expected === 'UNAVAILABLE')
+    }
+  )
+}
+
+test('confirmation finds a new base-branch requirement even when admission found no CI', async () => {
+  data.inputs.stable_branch = 'release'
+  data.inputs.allow_non_default_target_branch_deployments = true
+  mockCheckPages(
+    initialCheckPage(null, LAST_PAGE, 'SUCCESS'),
+    additionalCheckPage(null)
+  )
+  const recheckCi = await prepareConfirmationCiRecheck()
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.resolve([{context: 'security', appId: null}])
+  )
+
+  const result = await recheckCi()
+  assert.equal(result.commitStatus, 'MISSING')
+  assert.match(result.failure ?? '', /security/u)
+  assert.partialDeepStrictEqual(
+    loadPrStackRequiredChecksMock.mock.calls[1]?.arguments[1],
+    {stableBranch: 'main', scope: 'ordinary'}
+  )
+})
+
+test('confirmation stops if the required CI policy becomes unreadable', async () => {
+  mockCheckPages(initialCheckPage([], LAST_PAGE, 'SUCCESS'))
+  const recheckCi = await prepareConfirmationCiRecheck()
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.reject(new Error('Cannot read the base branch rules'))
+  )
+
+  const result = await recheckCi()
+  assert.equal(result.commitStatus, 'UNAVAILABLE')
+  assert.match(result.failure ?? '', /required CI checks/u)
+  assertCalledTimes(graphQLOK, 1)
+})
+
+for (const [description, response] of [
+  ['unreadable checks', new Error('Cannot read checks')],
+  ['another commit', additionalCheckPage([], LAST_PAGE, {oid: 'other'})],
+  ['another base', additionalCheckPage([], LAST_PAGE, {baseRefName: 'other'})]
+] as const) {
+  test('confirmation fails closed on ' + description, async () => {
+    mockCheckPages(initialCheckPage([], LAST_PAGE, 'SUCCESS'), response)
+
+    const recheckCi = await prepareConfirmationCiRecheck()
+    const result = await recheckCi()
+    assert.equal(result.commitStatus, 'UNAVAILABLE')
+    assert.ok(result.failure)
+  })
+}
+
+for (const change of [{state: 'PENDING'}, {id: 'SC_replacement'}] as const) {
+  test(
+    'confirmation stops for the lower stack PR with ' + JSON.stringify(change),
+    async () => {
+      mockNativeStack()
+      const recheckCi = await prepareConfirmationCiRecheck()
+      graphQLOK.mock.mockImplementation((_query, variables) => {
+        const pull = NATIVE_STACK.pullRequests.find(
+          member => member.number === variables['number']
+        )
+        assert.ok(pull)
+        const reported = [
+          {...LEGACY_CI_STATUS, ...(pull.number === 122 ? change : {})}
+        ]
+        return Promise.resolve(
+          additionalCheckPage(reported, LAST_PAGE, {
+            baseRefName: pull.baseRef,
+            id: 'stack-commit-' + pull.headSha,
+            oid: pull.headSha
+          })
+        )
+      })
+
+      const result = await recheckCi()
+      assert.equal(result.commitStatus, 'SUCCESS')
+      assert.match(result.failure ?? '', /#122/u)
+      assert.match(
+        result.failure ?? '',
+        'state' in change ? /pending/iu : /checks changed/iu
+      )
+    }
+  )
+}
+
+for (const mode of [
+  'no confirmation',
+  'skip_ci',
+  'stable branch',
+  'explicit SHA'
+]) {
+  test('does not add a confirmation CI recheck for ' + mode, async () => {
+    data.inputs.deployment_confirmation = mode !== 'no confirmation'
+    data.inputs.skipCi = mode === 'skip_ci' ? data.environment : ''
+    data.environmentObj.stable_branch_used = mode === 'stable branch'
+    if (mode === 'explicit SHA') {
+      data.inputs.allow_sha_deployments = true
+      data.environmentObj.sha = 'def456'
+    }
+
+    const result = await prechecks(context, octokit, data)
+    assert.equal(result.status, true, result.message)
+    assert.equal(result.recheckCi, undefined)
+    if (mode === 'no confirmation') assertCalledTimes(graphQLOK, 1)
+  })
+}
+
 const HIDDEN_CHECK = {
   id: 'CR_123',
   databaseId: 123,
@@ -1981,6 +2210,500 @@ const VISIBLE_CHECK_RUN = {
   conclusion: 'success',
   app: {id: 15368}
 } as const
+
+const CONFIRMED_CI = {
+  ...HIDDEN_CHECK,
+  id: 'CR_125',
+  databaseId: 125,
+  checkSuite: {app: {databaseId: VISIBLE_CHECK_RUN.app.id}}
+} as const
+const MORE_CHECKS = {hasNextPage: true, endCursor: 'more'} as const
+const PAGINATED_CHECKS = Array.from({length: 101}, (_, index) => {
+  const name = 'ci-' + String(index + 1).padStart(3, '0')
+  return {
+    ...CONFIRMED_CI,
+    databaseId: index + 1,
+    id: 'CR_' + name,
+    isRequired: index === 0,
+    name
+  }
+})
+
+// The failing check at each page request, or null if all current checks pass.
+// A retry must start at page one. Only ci-001 is required.
+const CONFIRMATION_PAGE_FAILURES = {
+  unchanged: [null, null],
+  inserted: [null, 'insert'],
+  requiredFails: [null, 1, 1, 1],
+  optionalFails: [null, 2, 2, 2],
+  failureMoves: [101, 1, 1, 1],
+  rollupKeepsChanging: [null, 1, null, 1],
+  failureKeepsMoving: [101, 1, 101, 1]
+} as const
+
+for (const [change, selection, expected, optional = 'SUCCESS'] of [
+  ['unchanged', 'all', 'SUCCESS'],
+  ['inserted', 'all', 'UNAVAILABLE'],
+  ['requiredFails', 'required', 'FAILURE'],
+  ['requiredFails', 'required', 'FAILURE', 'FAILURE'],
+  ['requiredFails', 'named', 'FAILURE'],
+  ['requiredFails', 'ignore optional', 'FAILURE'],
+  ['optionalFails', 'required', 'SUCCESS'],
+  ['optionalFails', 'ignore optional', 'SUCCESS'],
+  ['failureMoves', 'all', 'FAILURE'],
+  ['failureMoves', 'empty checks', 'FAILURE'],
+  ['failureMoves', 'named', 'FAILURE'],
+  ['failureMoves', 'required', 'FAILURE', 'IN_PROGRESS'],
+  ['unchanged', 'required', 'SUCCESS', 'IN_PROGRESS'],
+  ['rollupKeepsChanging', 'required', 'UNAVAILABLE'],
+  ['failureKeepsMoving', 'all', 'UNAVAILABLE']
+] as const) {
+  test(`confirmation reads paginated checks: ${change}, ${selection}, optional ${optional}`, async () => {
+    const checks: CheckRunResult[] = [...PAGINATED_CHECKS]
+    if (selection === 'empty checks') data.inputs.checks = []
+    if (selection === 'ignore optional') data.inputs.ignored_checks = ['ci-002']
+    if (selection === 'required') data.inputs.checks = 'required'
+    if (selection === 'named') data.inputs.checks = ['ci-001']
+
+    // Counts include superseded runs, even when they don't decide the deployment.
+    if (change === 'failureMoves' && selection === 'named') {
+      const optional = {...HIDDEN_CHECK, name: 'optional', isRequired: false}
+      checks.push(
+        {...optional, id: 'CR_122', databaseId: 122, conclusion: 'FAILURE'},
+        optional
+      )
+    }
+
+    const reads = CONFIRMATION_PAGE_FAILURES[change]
+    const pages = reads.map((failedCheck, index) => {
+      const first = index % 2 === 0
+      const inserted = failedCheck === 'insert'
+      // Insert a check before the cursor and remove the last one: counts stay
+      // consistent, so detecting the repeated check still matters.
+      const nodes = inserted ? [CONFIRMED_CI, ...checks.slice(0, -1)] : checks
+      const byState: Record<string, number> = {}
+      const current = nodes.map(check => {
+        let state = check.conclusion ?? 'IN_PROGRESS'
+        if (check.databaseId === failedCheck) state = 'FAILURE'
+        else if (check.databaseId === 2) state = optional
+        byState[state] = (byState[state] ?? 0) + 1
+        return {
+          ...check,
+          ...(state === 'IN_PROGRESS'
+            ? {status: state, conclusion: null}
+            : {status: 'COMPLETED', conclusion: state})
+        }
+      })
+      return additionalCheckPage(
+        first ? current.slice(0, 100) : current.slice(100),
+        first ? MORE_CHECKS : LAST_PAGE,
+        {
+          counts: {checks: byState},
+          state:
+            byState['FAILURE'] !== undefined
+              ? 'FAILURE'
+              : byState['IN_PROGRESS'] !== undefined
+                ? 'PENDING'
+                : 'SUCCESS'
+        }
+      )
+    })
+    mockCheckPages(
+      initialCheckPage(checks.slice(0, 100), MORE_CHECKS, 'SUCCESS'),
+      additionalCheckPage(checks.slice(100), LAST_PAGE, {state: 'SUCCESS'}),
+      ...pages
+    )
+    const recheckCi = await prepareConfirmationCiRecheck()
+    const result = await recheckCi()
+    assert.equal(result.commitStatus, expected, result.failure)
+    assert.equal(Boolean(result.failure), expected !== 'SUCCESS')
+    assert.deepEqual(
+      graphQLOK.mock.calls.slice(2).map(call => call.arguments[1]['cursor']),
+      reads.map((_, index) => (index % 2 === 0 ? null : MORE_CHECKS.endCursor))
+    )
+    assertCalledTimes(getCheckRunMock, 0)
+  })
+}
+
+for (const reread of ['consistent', 'still changing'] as const) {
+  test(`confirmation discards overlapping pages when counts change: reread is ${reread}`, async () => {
+    const required = CONFIRMED_CI
+    const optional = {
+      ...HIDDEN_CHECK,
+      name: 'optional',
+      isRequired: false,
+      conclusion: 'FAILURE'
+    }
+    const counts = {checks: {SUCCESS: 1, FAILURE: 1}}
+    const first = additionalCheckPage([required], MORE_CHECKS, {
+      state: 'SUCCESS',
+      counts: {checks: {SUCCESS: 2}}
+    })
+    const last = additionalCheckPage([required], LAST_PAGE, {counts})
+    data.inputs.checks = 'required'
+    // The optional check failed and moved ahead of the cursor. GitHub returned
+    // the required check on both pages; only a fresh read can tell what failed.
+    const result = await confirmationCi(
+      [required],
+      first,
+      last,
+      reread === 'consistent'
+        ? additionalCheckPage([optional], MORE_CHECKS, {counts})
+        : first,
+      last
+    )
+    const more = MORE_CHECKS.endCursor
+    assert.deepEqual(
+      graphQLOK.mock.calls.slice(1).map(call => call.arguments[1]['cursor']),
+      [null, more, null, more]
+    )
+    const passed = reread === 'consistent'
+    assert.equal(result.commitStatus, passed ? 'SUCCESS' : 'UNAVAILABLE')
+    assert.equal(Boolean(result.failure), !passed)
+  })
+}
+
+test('confirmation rereads when the pages omit a failed status but show an optional pending status', async () => {
+  const required = LEGACY_CI_STATUS
+  const optional = {
+    ...required,
+    context: 'optional',
+    id: 'SC_optional',
+    isRequired: false
+  }
+  const pending = {
+    ...optional,
+    context: 'waiting',
+    id: 'SC_pending',
+    state: 'PENDING'
+  }
+  const counts = {statuses: {FAILURE: 1, SUCCESS: 1, PENDING: 1}}
+  const last = additionalCheckPage([optional], LAST_PAGE, {counts})
+  data.inputs.checks = 'required'
+  // The failure moves from the unread page to the page we just read. GitHub
+  // reports one failure throughout, but we don't actually see it until the reread.
+  const result = await confirmationCi(
+    [required],
+    additionalCheckPage([required, pending], MORE_CHECKS, {counts}),
+    last,
+    additionalCheckPage(
+      [{...required, state: 'FAILURE'}, pending],
+      MORE_CHECKS,
+      {counts}
+    ),
+    last
+  )
+  assert.equal(result.commitStatus, 'FAILURE', result.failure)
+  assert.ok(result.failure)
+  assertCalledTimes(graphQLOK, 5)
+})
+
+for (const count of [undefined, null, -1, 1.5]) {
+  test(`confirmation stops when paginated counts by state are ${String(count)}`, async () => {
+    const options = {
+      state: 'SUCCESS',
+      ...(count === undefined
+        ? {}
+        : {counts: {checks: count === null ? null : {SUCCESS: count}}})
+    }
+    const first = additionalCheckPage([CONFIRMED_CI], MORE_CHECKS, options)
+    const last = additionalCheckPage([], LAST_PAGE, options)
+    const result = await confirmationCi([CONFIRMED_CI], first, last)
+    assert.equal(result.commitStatus, 'UNAVAILABLE', result.failure)
+    assert.ok(result.failure)
+    assertCalledTimes(graphQLOK, 3)
+  })
+}
+
+test('confirmation keeps the same passing checks in any order, ignoring an unselected failure', async () => {
+  const check = CONFIRMED_CI
+  const ignored = {...HIDDEN_CHECK, name: 'ignored'}
+  data.inputs.ignored_checks = [ignored.name]
+  const result = await confirmationCi(
+    [LEGACY_CI_STATUS, check, ignored],
+    additionalCheckPage([
+      {...check, conclusion: 'NEUTRAL'},
+      LEGACY_CI_STATUS,
+      {...ignored, conclusion: 'FAILURE'}
+    ])
+  )
+  assert.deepEqual(result, {commitStatus: 'SUCCESS'})
+  assertCalledTimes(getCheckRunMock, 0)
+})
+
+for (const [description, admitted, reported] of [
+  ['a new check appears', [], [CONFIRMED_CI]],
+  ['the last check disappears', [CONFIRMED_CI], null],
+  [
+    'one of two checks disappears',
+    [LEGACY_CI_STATUS, CONFIRMED_CI],
+    [CONFIRMED_CI]
+  ],
+  [
+    'a passing check is replaced',
+    [CONFIRMED_CI],
+    [{...CONFIRMED_CI, id: 'CR_126', databaseId: 126}]
+  ],
+  [
+    'a passing legacy status is replaced',
+    [LEGACY_CI_STATUS],
+    [{...LEGACY_CI_STATUS, id: 'SC_3'}]
+  ],
+  [
+    'a check changes name',
+    [CONFIRMED_CI],
+    [{...CONFIRMED_CI, name: 'changed'}]
+  ],
+  [
+    'a legacy status replaces a check',
+    [CONFIRMED_CI],
+    [{...LEGACY_CI_STATUS, context: CONFIRMED_CI.name}]
+  ]
+] as const) {
+  test('confirmation needs fresh approval when ' + description, async () => {
+    const result = await confirmationCi(admitted, additionalCheckPage(reported))
+    assert.equal(result.commitStatus, 'UNAVAILABLE', result.failure)
+    assert.equal(result.checksChanged, true)
+    assert.match(result.failure ?? '', /#123.*abc123/u)
+  })
+}
+
+for (const [description, check, expected] of [
+  [
+    'failed',
+    {...CONFIRMED_CI, conclusion: 'FAILURE', id: 'CR_replacement'},
+    'FAILURE'
+  ],
+  ['missing', null, 'MISSING']
+] as const) {
+  test(
+    'confirmation reports ' +
+      description +
+      ' required CI before it reports changed checks',
+    async () => {
+      data.inputs.checks = [CONFIRMED_CI.name]
+      const result = await confirmationCi(
+        [CONFIRMED_CI],
+        additionalCheckPage(check === null ? null : [check])
+      )
+      assert.equal(result.commitStatus, expected, result.failure)
+      assert.ok(result.failure)
+      assert.equal(result.checksChanged, undefined)
+    }
+  )
+}
+
+test('confirmation cannot match a selected check that lost its node ID', async () => {
+  const {id: _, ...check} = HIDDEN_CHECK
+  const result = await confirmationCi(
+    [HIDDEN_CHECK],
+    additionalCheckPage([check])
+  )
+  assert.equal(result.commitStatus, 'UNAVAILABLE', result.failure)
+  assert.ok(result.failure)
+})
+
+for (const [description, pageInfo] of [
+  ['hasNextPage is missing', {}],
+  ['hasNextPage is null', {hasNextPage: null}],
+  ['a next cursor is not a string', {hasNextPage: true, endCursor: 7}]
+] as const) {
+  test(
+    'confirmation does not mistake a partial matching check list for complete CI when ' +
+      description,
+    async () => {
+      const checks = [LEGACY_CI_STATUS]
+      const result = await confirmationCi(
+        checks,
+        additionalCheckPage([], MORE_CHECKS),
+        additionalCheckPage(
+          checks,
+          unsafeInvalidValue<typeof LAST_PAGE>(pageInfo)
+        )
+      )
+      assert.equal(result.commitStatus, 'UNAVAILABLE', result.failure)
+      assert.ok(result.failure)
+      assertCalledTimes(graphQLOK, 3)
+    }
+  )
+}
+
+for (const [description, id, appId, expected, lookups, selectedId = 125] of [
+  ['older, no App access needed', 124, null, 'SUCCESS', []],
+  ['newer, same App', 126, VISIBLE_CHECK_RUN.app.id, 'MISSING', [126]],
+  ['newer, different App', 126, 456, 'SUCCESS', [126]],
+  ['newer, unreadable App', 126, null, 'UNAVAILABLE', [126]],
+  ['optional run cannot be ordered', null, null, 'UNAVAILABLE', []],
+  ['selected run cannot be ordered', 124, null, 'UNAVAILABLE', [124], 125.5]
+] as const) {
+  test(
+    'confirmation with an optional hidden run of the same name: ' + description,
+    async () => {
+      const required = {...CONFIRMED_CI, databaseId: selectedId}
+      loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+        Promise.resolve([{context: required.name, appId: null}])
+      )
+      const optional = {
+        ...HIDDEN_CHECK,
+        id: 'CR_' + String(id),
+        databaseId: id,
+        isRequired: false,
+        conclusion: 'FAILURE'
+      }
+      data.inputs.checks = 'required'
+      if (appId !== null) {
+        getCheckRunMock.mock.mockImplementation(() =>
+          Promise.resolve({
+            data: {
+              ...VISIBLE_CHECK_RUN,
+              id,
+              node_id: optional.id,
+              app: {id: appId},
+              conclusion: 'failure'
+            }
+          })
+        )
+      }
+      const older = {...required, id: 'CR_123', databaseId: 123}
+      const result = await confirmationCi(
+        [required],
+        additionalCheckPage([older, optional, required])
+      )
+      assert.equal(result.commitStatus, expected, result.failure)
+      assert.equal(Boolean(result.failure), expected !== 'SUCCESS')
+      assert.deepEqual(
+        getCheckRunMock.mock.calls.map(call => call.arguments[0]?.check_run_id),
+        lookups
+      )
+    }
+  )
+}
+
+test('confirmation accepts unchanged runs when REST identifies the newer run as the same App', async () => {
+  const checks = [
+    {...CONFIRMED_CI, databaseId: 120, id: 'CR_120'},
+    HIDDEN_CHECK
+  ]
+  getCheckRunMock.mock.mockImplementation(() =>
+    Promise.resolve({data: VISIBLE_CHECK_RUN})
+  )
+
+  const result = await confirmationCi(
+    checks,
+    additionalCheckPage(checks, LAST_PAGE, {state: 'SUCCESS'})
+  )
+  assert.deepEqual(result, {commitStatus: 'SUCCESS'})
+  assert.deepEqual(
+    getCheckRunMock.mock.calls.map(call => call.arguments[0]?.check_run_id),
+    [HIDDEN_CHECK.databaseId, HIDDEN_CHECK.databaseId]
+  )
+})
+
+test('confirmation accepts required test when only an older lint result is marked required', async () => {
+  data.inputs.checks = 'required'
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.resolve([{context: 'test', appId: null}])
+  )
+  const lint = {...CONFIRMED_CI, name: 'lint', databaseId: 120, id: 'CR_120'}
+  const checks = [
+    {...CONFIRMED_CI, name: 'test'},
+    lint,
+    {...lint, databaseId: 123, id: 'CR_123', isRequired: false}
+  ]
+
+  const result = await confirmationCi(
+    checks,
+    additionalCheckPage(checks, LAST_PAGE, {state: 'SUCCESS'})
+  )
+  assert.deepEqual(result, {commitStatus: 'SUCCESS'})
+})
+
+for (const [scenario, optionalApp, selectedId, expectedCalls] of [
+  ['only the selected App is hidden', CONFIRMED_CI.checkSuite, 123, []],
+  ['both Apps are hidden', HIDDEN_CHECK.checkSuite, 123, [123]],
+  ['the selected run cannot be ordered', HIDDEN_CHECK.checkSuite, null, []]
+] as const) {
+  test(
+    'confirmation with an older optional check when ' + scenario,
+    async () => {
+      const required = {...HIDDEN_CHECK, databaseId: selectedId}
+      const optional = {
+        ...required,
+        id: 'CR_122',
+        databaseId: 122,
+        checkSuite: optionalApp,
+        isRequired: false,
+        conclusion: 'FAILURE'
+      }
+      data.inputs.checks = 'required'
+      getCheckRunMock.mock.mockImplementation(() =>
+        Promise.resolve({data: VISIBLE_CHECK_RUN})
+      )
+      // The Apps share a check name. Pagination must not collapse the older
+      // optional failure into the newer required success before resolving the App.
+      const firstPage = [required, ...PAGINATED_CHECKS.slice(2)]
+      const counts = {checks: {SUCCESS: 100, FAILURE: 1}}
+      const result = await confirmationCi(
+        [required],
+        additionalCheckPage(firstPage, MORE_CHECKS, {counts}),
+        additionalCheckPage([optional], LAST_PAGE, {counts})
+      )
+      assert.equal(
+        result.commitStatus,
+        selectedId === null ? 'UNAVAILABLE' : 'SUCCESS',
+        result.failure
+      )
+      assert.equal(Boolean(result.failure), selectedId === null)
+      assert.deepEqual(
+        getCheckRunMock.mock.calls.map(call => call.arguments[0]?.check_run_id),
+        expectedCalls
+      )
+    }
+  )
+}
+
+test('confirmation verifies only the required hidden run when policy starts requiring its App', async () => {
+  const check = HIDDEN_CHECK
+  const older = {...check, databaseId: 122, id: 'CR_122', isRequired: false}
+  data.inputs.checks = 'required'
+  mockCheckPages(
+    initialCheckPage([check], LAST_PAGE, 'SUCCESS'),
+    additionalCheckPage([check, older])
+  )
+  const recheckCi = await prepareConfirmationCiRecheck()
+  assertCalledTimes(getCheckRunMock, 0)
+  loadPrStackRequiredChecksMock.mock.mockImplementation(() =>
+    Promise.resolve([{context: check.name, appId: VISIBLE_CHECK_RUN.app.id}])
+  )
+  getCheckRunMock.mock.mockImplementation(() =>
+    Promise.resolve({data: VISIBLE_CHECK_RUN})
+  )
+  assert.deepEqual(await recheckCi(), {commitStatus: 'SUCCESS'})
+  assert.deepEqual(
+    getCheckRunMock.mock.calls.map(call => call.arguments[0]?.check_run_id),
+    [check.databaseId]
+  )
+})
+
+for (const id of [LEGACY_CI_STATUS.id, '']) {
+  test(
+    'confirmation cannot verify the full check list when an optional status has ' +
+      (id === '' ? 'no node ID' : 'a repeated node ID'),
+    async () => {
+      const optional = {...LEGACY_CI_STATUS, isRequired: false}
+      const counts = {checks: {SUCCESS: 1}, statuses: {SUCCESS: 2}}
+      data.inputs.checks = 'required'
+      const result = await confirmationCi(
+        [CONFIRMED_CI],
+        additionalCheckPage([CONFIRMED_CI, optional], MORE_CHECKS, {counts}),
+        additionalCheckPage([{...optional, id}], LAST_PAGE, {counts})
+      )
+      assert.equal(result.commitStatus, 'UNAVAILABLE', result.failure)
+      assert.ok(result.failure)
+      assertCalledTimes(getCheckRunMock, 0)
+    }
+  )
+}
 
 function setAppCheckPolicy(
   reported: readonly RawCheckResult[],
@@ -4348,6 +5071,7 @@ test('rejects a required failing check after the first 100 contexts', async () =
   assert.deepStrictEqual(graphQLOK.mock.calls[1]?.arguments[1], {
     commitId: 'commit-node',
     cursor: 'cursor-1',
+    afterConfirmation: false,
     owner: 'corp',
     name: 'test',
     number: 123
