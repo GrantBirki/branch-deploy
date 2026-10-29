@@ -7,7 +7,7 @@ import {COLORS} from './colors.ts'
 import {constructValidBranchName} from './valid-branch-name.ts'
 import {dedent} from './dedent.ts'
 import {environmentTargets} from './environment-targets.ts'
-import {formatLockReason} from './format-lock-reason.ts'
+import {formatLockComment} from './format-lock-comment.ts'
 import {lock} from './lock.ts'
 import {LOCK_METADATA} from './lock-metadata.ts'
 import {timeDiff} from './time-diff.ts'
@@ -131,11 +131,11 @@ async function showLockDetails(
       context,
       octokit,
       reactionId,
-      message: [
+      message: formatLockComment(
         lockMessageHeader,
-        formatLockReason(lockData.reason),
+        lockData.reason,
         lockMessageDetails
-      ].join('\n\n'),
+      ),
       result: 'alternate-success'
     })
     core.info(

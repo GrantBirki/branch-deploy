@@ -35463,19 +35463,27 @@ const truncatedMessageStart = 'The message is too large to be posted as a commen
 const truncatedMessageEnd = '\n</details>';
 // The maximum length of an issue comment body
 const maxCommentLength = 65536;
+function retainedCommentLength(length) {
+    return length <= maxCommentLength
+        ? length
+        : maxCommentLength -
+            truncatedMessageStart.length -
+            truncatedMessageEnd.length;
+}
 // Helper function to truncate the body of a comment if it is too long. If the message is too long,
 // it will be truncated and wrapped in a details tag. If the message is short enough, it will be
 // returned as is.
 // :param message: The message to be truncated (String)
 function truncateCommentBody(message) {
     // If the message is short enough, return it as is
-    if (message.length <= maxCommentLength) {
+    const retainedLength = retainedCommentLength(message.length);
+    if (retainedLength === message.length) {
         debug('comment body is within length limit');
         return message;
     }
     // if we make it here, the message is too long, so truncate it
     warning(`✂️ truncating - comment body is too long - current: ${COLORS.highlight}${message.length}${COLORS.reset} characters - max: ${COLORS.highlight}${maxCommentLength}${COLORS.reset} characters`);
-    const truncated = message.substring(0, maxCommentLength - truncatedMessageStart.length - truncatedMessageEnd.length);
+    const truncated = message.substring(0, retainedLength);
     // return the truncated message wrapped in a details tag
     return truncatedMessageStart + truncated + truncatedMessageEnd;
 }
@@ -38671,19 +38679,25 @@ function timeDiff(firstDate, secondDate) {
     return `${days}d:${hours}h:${minutes}m:${seconds}s`;
 }
 
-;// CONCATENATED MODULE: ./src/functions/format-lock-reason.ts
-// Keep the reason outside the metadata list so a code block cannot loosen the list.
-function formatLockReason(reason) {
+;// CONCATENATED MODULE: ./src/functions/format-lock-comment.ts
+
+function formatLockComment(header, reason, details) {
     const text = String(reason);
+    const prefix = `${header}\n\n__Reason__:`;
+    const suffix = `\n\n${details}`;
     if (/^[\w .-]+$/u.test(text)) {
-        return `__Reason__: \`${text}\``;
+        const inline = `${prefix} \`${text}\``;
+        // A cut before the closing backtick exposes the reason as Markdown.
+        if (inline.length <= retainedCommentLength(inline.length + suffix.length)) {
+            return inline + suffix;
+        }
     }
     const codeBlock = text
         .replace(/\r\n?/g, '\n')
         .split('\n')
         .map(line => `    ${line}`)
         .join('\n');
-    return `__Reason__:\n\n${codeBlock}`;
+    return `${prefix}\n\n${codeBlock}${suffix}`;
 }
 
 ;// CONCATENATED MODULE: ./src/functions/lock.ts
@@ -39054,14 +39068,6 @@ async function checkLockOwner(octokit, context, lockData, sticky, reactionId, le
     else {
         header = 'proceed with deployment';
     }
-    // dynamic reason text
-    let reasonText = '';
-    if (legacyTruthy(lockData.reason)) {
-        reasonText = formatLockReason(lockData.reason);
-    }
-    else {
-        debug('no reason detected');
-    }
     // dynamic lock text
     let lockText = '';
     let environmentText = '';
@@ -39100,9 +39106,14 @@ async function checkLockOwner(octokit, context, lockData, sticky, reactionId, le
 
   > If you need to release the lock, please comment \`${lockData.unlock_command}\`
   `);
-    const comment = [commentHeader, reasonText, commentDetails]
-        .filter(part => part !== '')
-        .join('\n\n');
+    let comment;
+    if (legacyTruthy(lockData.reason)) {
+        comment = formatLockComment(commentHeader, lockData.reason, commentDetails);
+    }
+    else {
+        debug('no reason detected');
+        comment = `${commentHeader}\n\n${commentDetails}`;
+    }
     // Set the action status with the comment
     await actionStatus({ context, octokit, reactionId, message: comment });
     // Set the bypass state to true so that the post run logic will not run
@@ -42932,11 +42943,7 @@ async function showLockDetails(request, environment) {
             context,
             octokit,
             reactionId,
-            message: [
-                lockMessageHeader,
-                formatLockReason(lockData.reason),
-                lockMessageDetails
-            ].join('\n\n'),
+            message: formatLockComment(lockMessageHeader, lockData.reason, lockMessageDetails),
             result: 'alternate-success'
         });
         info(`🔒 the deployment lock is currently claimed by ${COLORS.highlight}${lockData.created_by}`);
