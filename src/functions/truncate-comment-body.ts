@@ -7,13 +7,22 @@ const truncatedMessageEnd = '\n</details>'
 // The maximum length of an issue comment body
 const maxCommentLength = 65536
 
+export function retainedCommentLength(length: number): number {
+  return length <= maxCommentLength
+    ? length
+    : maxCommentLength -
+        truncatedMessageStart.length -
+        truncatedMessageEnd.length
+}
+
 // Helper function to truncate the body of a comment if it is too long. If the message is too long,
 // it will be truncated and wrapped in a details tag. If the message is short enough, it will be
 // returned as is.
 // :param message: The message to be truncated (String)
 export function truncateCommentBody(message: string): string {
   // If the message is short enough, return it as is
-  if (message.length <= maxCommentLength) {
+  const retainedLength = retainedCommentLength(message.length)
+  if (retainedLength === message.length) {
     core.debug('comment body is within length limit')
     return message
   }
@@ -23,10 +32,7 @@ export function truncateCommentBody(message: string): string {
     `✂️ truncating - comment body is too long - current: ${COLORS.highlight}${message.length}${COLORS.reset} characters - max: ${COLORS.highlight}${maxCommentLength}${COLORS.reset} characters`
   )
 
-  const truncated = message.substring(
-    0,
-    maxCommentLength - truncatedMessageStart.length - truncatedMessageEnd.length
-  )
+  const truncated = message.substring(0, retainedLength)
 
   // return the truncated message wrapped in a details tag
   return truncatedMessageStart + truncated + truncatedMessageEnd

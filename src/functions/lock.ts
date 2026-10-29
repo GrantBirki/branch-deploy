@@ -8,7 +8,7 @@ import {timeDiff} from './time-diff.ts'
 import {LOCK_METADATA} from './lock-metadata.ts'
 import {COLORS} from './colors.ts'
 import {API_HEADERS} from './api-headers.ts'
-import {formatLockReason} from './format-lock-reason.ts'
+import {formatLockComment} from './format-lock-comment.ts'
 import {getActionInput, saveActionState, setActionOutput} from '../action-io.ts'
 import {
   issueCommentContext,
@@ -583,14 +583,6 @@ async function checkLockOwner(
     header = 'proceed with deployment'
   }
 
-  // dynamic reason text
-  let reasonText = ''
-  if (legacyTruthy(lockData.reason)) {
-    reasonText = formatLockReason(lockData.reason)
-  } else {
-    core.debug('no reason detected')
-  }
-
   // dynamic lock text
   let lockText = ''
   let environmentText = ''
@@ -632,9 +624,13 @@ async function checkLockOwner(
 
   > If you need to release the lock, please comment \`${lockData.unlock_command}\`
   `)
-  const comment = [commentHeader, reasonText, commentDetails]
-    .filter(part => part !== '')
-    .join('\n\n')
+  let comment: string
+  if (legacyTruthy(lockData.reason)) {
+    comment = formatLockComment(commentHeader, lockData.reason, commentDetails)
+  } else {
+    core.debug('no reason detected')
+    comment = `${commentHeader}\n\n${commentDetails}`
+  }
 
   // Set the action status with the comment
   await actionStatus({context, octokit, reactionId, message: comment})
