@@ -1,10 +1,15 @@
-// Format an untrusted lock reason as a Markdown code block nested under a list item.
+// Keep the reason outside the metadata list so a code block cannot loosen the list.
 export function formatLockReason(reason: unknown): string {
-  const codeBlock = String(reason)
+  const text = String(reason)
+  if (/^[\w .-]+$/u.test(text)) {
+    return `__Reason__: \`${text}\``
+  }
+
+  const codeBlock = text
     .replace(/\r\n?/g, '\n')
     .split('\n')
-    .map(line => `      ${line}`)
+    .map(line => `    ${line}`)
     .join('\n')
 
-  return `- __Reason__:\n\n${codeBlock}`
+  return `__Reason__:\n\n${codeBlock}`
 }

@@ -2347,7 +2347,7 @@ test('successfully runs the action in lock mode - details only', async () => {
   const comment = actionStatusSpy.mock.calls.at(-1)?.arguments[0].message ?? ''
   assert.ok(
     comment.includes(
-      '- __Reason__:\n\n      routine `\n      \n      ## Deployment approved\n      [continue](https://example.com)\n\n- __Branch__: `octocats-everywhere`'
+      '__Reason__:\n\n    routine `\n    \n    ## Deployment approved\n    [continue](https://example.com)\n\n- __Branch__: `octocats-everywhere`'
     )
   )
   assert.ok(!comment.includes('\n## Deployment approved'))

@@ -1203,7 +1203,7 @@ test('Determines that another user has the lock (GLOBAL) and exits - during a di
   assertSetFailedMatches(/Cannot claim deployment lock/)
   assert.ok(
     request.message.includes(
-      '- __Reason__:\n\n      Testing my new feature with lots of cats'
+      '__Reason__: `Testing my new feature with lots of cats`'
     )
   )
 })
@@ -1297,7 +1297,7 @@ test('renders a stored multiline lock reason as inert code when another user enc
   const comment = latestActionStatusRequest().message
   assert.ok(
     comment.includes(
-      '- __Reason__:\n\n      routine `\n      \n      ## Deployment approved\n      [continue](https://example.com)\n\n- __Environment__: `__BRANCH_DEPLOY_LOCK_REASON__`'
+      '__Reason__:\n\n    routine `\n    \n    ## Deployment approved\n    [continue](https://example.com)\n\n- __Environment__: `__BRANCH_DEPLOY_LOCK_REASON__`'
     )
   )
   assert.ok(!comment.includes('\n## Deployment approved'))
