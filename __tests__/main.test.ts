@@ -1262,6 +1262,75 @@ for (const failure of [
   })
 }
 
+test('marks a created deployment as an error when its initial status fails', async () => {
+  const statusError = new Error('initial status unavailable')
+  const events: string[] = []
+  const createStatus = mock.method(
+    octokit.rest.repos,
+    'createDeploymentStatus',
+    (
+      options: Parameters<typeof octokit.rest.repos.createDeploymentStatus>[0]
+    ) => {
+      events.push(String(options?.state))
+      if (options?.state === 'in_progress') return Promise.reject(statusError)
+      return Promise.resolve(
+        unsafeInvalidValue<
+          Awaited<ReturnType<typeof octokit.rest.repos.createDeploymentStatus>>
+        >({data: {id: 456, url: 'https://api.github.com/deployment-status'}})
+      )
+    }
+  )
+  unlockIfUnchangedMock.mock.mockImplementation(() => {
+    events.push('unlock')
+    return Promise.resolve(true)
+  })
+
+  assert.strictEqual(await run(), undefined)
+  assert.deepStrictEqual(events, ['in_progress', 'error', 'unlock'])
+  assert.deepStrictEqual(
+    createStatus.mock.calls.map(call => call.arguments[0]?.state),
+    ['in_progress', 'error']
+  )
+  assert.strictEqual(
+    createStatus.mock.calls.at(-1)?.arguments[0]?.deployment_id,
+    123
+  )
+  assertCalledWith(saveStateMock, 'bypass', 'true')
+  assertCalledWith(setFailedMock, statusError.message)
+  assertNotCalledWith(setOutputMock, 'continue', 'true')
+  assertCalledTimes(unlockIfUnchangedMock, 1)
+})
+
+test('preserves the initial status error when recording the deployment error also fails', async () => {
+  const createStatus = mock.method(
+    octokit.rest.repos,
+    'createDeploymentStatus',
+    (
+      options: Parameters<typeof octokit.rest.repos.createDeploymentStatus>[0]
+    ) =>
+      Promise.reject(
+        new Error(
+          options?.state === 'in_progress'
+            ? 'initial status unavailable'
+            : 'error status unavailable'
+        )
+      )
+  )
+
+  assert.strictEqual(await run(), undefined)
+  assert.deepStrictEqual(
+    createStatus.mock.calls.map(call => call.arguments[0]?.state),
+    ['in_progress', 'error']
+  )
+  assertCalledWith(
+    warningMock,
+    'failed to mark the unstarted deployment as an error: error status unavailable'
+  )
+  assertCalledWith(setFailedMock, 'initial status unavailable')
+  assertNotCalledWith(setOutputMock, 'continue', 'true')
+  assertCalledTimes(unlockIfUnchangedMock, 1)
+})
+
 test('successfully deploys without acquiring a lock when locking is disabled', async () => {
   setEnv('INPUT_DISABLE_LOCK', 'true')
 
@@ -3023,6 +3092,35 @@ test('successfully runs in unlockOnMergeMode', async () => {
   assertCalledWith(infoMock, `🏃 running in 'unlock on merge' mode`)
   assertCalledWith(saveStateMock, 'bypass', 'true')
   assertNotCalled(validDeploymentOrderMock)
+})
+
+for (const [input, value] of [
+  ['INPUT_GITHUB_TOKEN', ''],
+  ['INPUT_RESULT_MODE', 'maybe'],
+  ['INPUT_DEPLOYMENT_CONFIRMATION_TIMEOUT', 'invalid']
+] as const) {
+  test(`persists post dispatch before rejecting ${input}`, async () => {
+    setEnv(input, value)
+
+    assert.strictEqual(await run(), undefined)
+    assertCalledWith(saveStateMock, 'isPost', 'true')
+    assertCalledWith(saveStateMock, 'bypass', 'true')
+    assertCalledTimes(setFailedMock, 1)
+    assertNotCalled(getOctokitMock)
+    assertNotCalledWith(setOutputMock, 'continue', 'true')
+  })
+}
+
+test('persists post dispatch before a GitHub client initialization error', async () => {
+  getOctokitMock.mock.mockImplementation(() => {
+    throw new Error('client unavailable')
+  })
+
+  assert.strictEqual(await run(), undefined)
+  assertCalledWith(saveStateMock, 'isPost', 'true')
+  assertCalledWith(saveStateMock, 'bypass', 'true')
+  assertCalledWith(setFailedMock, 'client unavailable')
+  assertNotCalledWith(setOutputMock, 'continue', 'true')
 })
 
 test('handles an input validation error and exits', async () => {

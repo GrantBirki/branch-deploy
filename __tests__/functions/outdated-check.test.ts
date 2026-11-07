@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import {beforeEach, mock, test} from 'node:test'
 import {COLORS} from '../../src/functions/colors.ts'
+import {API_HEADERS} from '../../src/functions/api-headers.ts'
 import {createContext} from '../test-helpers.ts'
 import {
   assertCalledWith,
@@ -184,4 +185,47 @@ test('checks the mergeStateStatus and finds that it is BEHIND', async () => {
     debugMock,
     'mergeStateStatus is BEHIND - exiting isOutdated logic early'
   )
+})
+
+test('checks the default branch even when the pull request is behind a different base branch', async () => {
+  data.outdated_mode = 'default_branch'
+  data.mergeStateStatus = 'BEHIND'
+
+  assert.deepStrictEqual(await isOutdated(context, octokit, data), {
+    branch: 'stable-branch',
+    outdated: false
+  })
+  assertCalledWith(compareCommitsMock, {
+    owner: 'corp',
+    repo: 'test',
+    base: 'beefdead',
+    head: 'abc123',
+    headers: API_HEADERS
+  })
+})
+
+test('keeps the BEHIND shortcut when the default and pull request base have the same commit', async () => {
+  data.outdated_mode = 'default_branch'
+  data.mergeStateStatus = 'BEHIND'
+  data.baseBranch = data.stableBaseBranch
+
+  assert.deepStrictEqual(await isOutdated(context, octokit, data), {
+    branch: 'stable-branch',
+    outdated: true
+  })
+  assert.strictEqual(compareCommitsMock.mock.callCount(), 0)
+})
+
+test('still rejects a default branch deployment when the comparison also finds missing stable commits', async () => {
+  data.outdated_mode = 'default_branch'
+  data.mergeStateStatus = 'BEHIND'
+  compareCommitsMock.mock.mockImplementation(() =>
+    Promise.resolve({data: {behind_by: 1}})
+  )
+
+  assert.deepStrictEqual(await isOutdated(context, octokit, data), {
+    branch: 'stable-branch',
+    outdated: true
+  })
+  assert.strictEqual(compareCommitsMock.mock.callCount(), 1)
 })

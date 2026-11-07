@@ -69,9 +69,11 @@ export async function isOutdated(
     readonly branch: string | undefined
     readonly outdated: boolean
   }> {
-    // if the mergeStateStatus is BEHIND, then we know the PR is behind the base branch
-    // in this case we can skip the commit comparison
-    if (data.mergeStateStatus === 'BEHIND') {
+    // BEHIND describes the PR's target base, not a separate stable branch.
+    if (
+      data.mergeStateStatus === 'BEHIND' &&
+      baseBranch.data.commit.sha === data.baseBranch.data.commit.sha
+    ) {
       core.debug(`mergeStateStatus is BEHIND - exiting isOutdated logic early`)
       return {outdated: true, branch: baseBranch.data.name}
     }

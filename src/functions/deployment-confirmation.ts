@@ -154,7 +154,8 @@ export async function deploymentConfirmation(
       const decision = await findConfirmationReaction(
         context,
         octokit,
-        commentId
+        commentId,
+        deadline
       )
       if (decision === 'confirmed') {
         await octokit.rest.issues.updateComment({
@@ -218,7 +219,8 @@ export async function deploymentConfirmation(
 async function findConfirmationReaction(
   context: BranchDeployContext,
   octokit: DeploymentConfirmationOctokit,
-  commentId: number
+  commentId: number,
+  deadline: number
 ): Promise<'confirmed' | 'rejected' | null> {
   let page = 1
   while (true) {
@@ -229,6 +231,8 @@ async function findConfirmationReaction(
       page,
       headers: API_HEADERS
     })
+
+    if (Date.now() >= deadline) return null
 
     for (const reaction of reactions.data) {
       if (reaction.user === null) {
