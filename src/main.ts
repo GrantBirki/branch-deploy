@@ -65,14 +65,14 @@ function terminal(
 export async function run(): Promise<RunResult> {
   let operation: Operation = 'none'
   try {
+    // Failed input validation must still dispatch the runner's post invocation to post.
+    saveActionState('isPost', 'true')
     core.info(
       `🛸 grantbirki/branch-deploy ${COLORS.info}${VERSION}${COLORS.reset}`
     )
     core.debug(`context: ${JSON.stringify(context)}`)
 
     if (Number(process.env['GITHUB_RUN_ATTEMPT']) > 1) {
-      // Also dispatch failed or malformed rerun inputs to post, never back to main.
-      saveActionState('isPost', 'true')
       if (
         getActionInput('allow_reruns') === '' ||
         !getBooleanActionInput('allow_reruns')
@@ -96,7 +96,6 @@ export async function run(): Promise<RunResult> {
       getBooleanActionInput('result_mode')
     ) {
       operation = 'result'
-      saveActionState('isPost', 'true')
       saveActionState('bypass', 'true')
       const resultOctokit = github.getOctokit(token, {
         userAgent: `grantbirki/branch-deploy@${VERSION}`,
@@ -115,7 +114,6 @@ export async function run(): Promise<RunResult> {
       userAgent: `grantbirki/branch-deploy@${VERSION}`,
       additionalPlugins: [retry]
     })
-    saveActionState('isPost', 'true')
     saveActionState('actionsToken', token)
 
     if (inputs.unlockOnMergeMode) {

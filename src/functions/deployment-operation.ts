@@ -702,15 +702,35 @@ async function createDeployment(
   core.debug(`deployment.created_at: ${String(deployment.created_at)}`)
   core.debug(`deployment.updated_at: ${String(deployment.updated_at)}`)
   core.debug(`deployment.statuses_url: ${String(deployment.statuses_url)}`)
-  await createDeploymentStatus(
-    octokit,
-    context,
-    precheck.ref,
-    'in_progress',
-    legacyDeploymentId(deployment.id),
-    environment,
-    environmentResult.environmentUrl
-  )
+  try {
+    await createDeploymentStatus(
+      octokit,
+      context,
+      precheck.ref,
+      'in_progress',
+      legacyDeploymentId(deployment.id),
+      environment,
+      environmentResult.environmentUrl
+    )
+  } catch (error) {
+    // Main will bypass post completion, so close the record before releasing its lock.
+    try {
+      await createDeploymentStatus(
+        octokit,
+        context,
+        precheck.ref,
+        'error',
+        deployment.id,
+        environment,
+        environmentResult.environmentUrl
+      )
+    } catch (statusError) {
+      core.warning(
+        `failed to mark the unstarted deployment as an error: ${legacyApiError(statusError).message}`
+      )
+    }
+    throw error
+  }
   core.info(
     `🧑‍🚀 commit sha to deploy: ${COLORS.highlight}${precheck.sha}${COLORS.reset}`
   )

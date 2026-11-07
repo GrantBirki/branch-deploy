@@ -610,6 +610,45 @@ test('stops without sleeping when a reaction request reaches the deadline', asyn
   assert.deepStrictEqual(timeoutDelays, [])
 })
 
+test('does not accept confirmation returned after the deadline', async testContext => {
+  const initialTime = new Date('2024-10-21T19:11:18Z').getTime()
+  testContext.mock.timers.enable({apis: ['Date'], now: initialTime})
+  listReactionsMock.mock.mockImplementation(() => {
+    testContext.mock.timers.setTime(initialTime + 60_001)
+    return Promise.resolve({
+      data: [{user: {login: 'monalisa'}, content: '+1'}]
+    })
+  })
+
+  assert.strictEqual(
+    await deploymentConfirmation(context, octokit, data),
+    'timed_out'
+  )
+  assert.ok(latestUpdateCommentRequest().body.includes('timed out'))
+  assert.deepStrictEqual(timeoutDelays, [])
+})
+
+test('stops pagination when the confirmation deadline is reached', async testContext => {
+  const initialTime = new Date('2024-10-21T19:11:18Z').getTime()
+  testContext.mock.timers.enable({apis: ['Date'], now: initialTime})
+  listReactionsMock.mock.mockImplementationOnce(() => {
+    testContext.mock.timers.setTime(initialTime + 60_000)
+    return Promise.resolve({
+      data: Array.from({length: 100}, () => ({
+        user: {login: 'someone-else'},
+        content: '+1'
+      }))
+    })
+  })
+
+  assert.strictEqual(
+    await deploymentConfirmation(context, octokit, data),
+    'timed_out'
+  )
+  assertCalledTimes(listReactionsMock, 1)
+  assert.deepStrictEqual(timeoutDelays, [])
+})
+
 test('renders arbitrary confirmation metadata as valid fenced JSON', async () => {
   const body = 'quote " slash \\ newline\nUnicode 🚀 and ````` backticks'
   data = {
