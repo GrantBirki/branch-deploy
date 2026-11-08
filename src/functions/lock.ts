@@ -307,27 +307,42 @@ async function createLock(
   } catch (error) {
     const status = legacyApiError(error).status
     if (status !== 409 && status !== 422) {
-      throw error
-    }
-    if (!(await checkBranch(octokit, context, branchName))) {
-      throw error
-    }
-    try {
-      const branch = await octokit.rest.repos.getBranch({
-        ...context.repo,
-        branch: branchName,
-        headers: API_HEADERS
-      })
-      const lockRefSha = branch.data.commit.sha
-      const existingLock = await checkLockFile(octokit, context, lockRefSha)
-      return existingLock === false
-        ? {kind: 'ambiguous'}
-        : {kind: 'existing', lockData: existingLock, lockRefSha}
-    } catch (readError) {
-      if (readError instanceof InvalidLockFileError) {
-        return {kind: 'ambiguous'}
+      // A failed response can still leave the ref published. Only our exact
+      // immutable commit proves that this acquisition actually succeeded.
+      let observedSha: string
+      try {
+        observedSha = (
+          await octokit.rest.repos.getBranch({
+            ...context.repo,
+            branch: branchName,
+            headers: API_HEADERS
+          })
+        ).data.commit.sha
+      } catch {
+        throw error
       }
-      throw readError
+      if (observedSha !== commit.data.sha) throw error
+    } else {
+      if (!(await checkBranch(octokit, context, branchName))) {
+        throw error
+      }
+      try {
+        const branch = await octokit.rest.repos.getBranch({
+          ...context.repo,
+          branch: branchName,
+          headers: API_HEADERS
+        })
+        const lockRefSha = branch.data.commit.sha
+        const existingLock = await checkLockFile(octokit, context, lockRefSha)
+        return existingLock === false
+          ? {kind: 'ambiguous'}
+          : {kind: 'existing', lockData: existingLock, lockRefSha}
+      } catch (readError) {
+        if (readError instanceof InvalidLockFileError) {
+          return {kind: 'ambiguous'}
+        }
+        throw readError
+      }
     }
   }
 

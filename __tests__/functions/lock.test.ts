@@ -844,6 +844,84 @@ test('rethrows a non-conflict ref creation error without reporting success', asy
   )
 })
 
+for (const failure of [
+  new Error('connection closed after ref creation'),
+  new BigBadError('response lost after ref creation')
+]) {
+  test(`records an acquired lock after ${failure.message}`, async () => {
+    let published = false
+    const createRef = createMock<LockOctokit['rest']['git']['createRef']>(
+      () => {
+        published = true
+        return Promise.reject(failure)
+      }
+    )
+    const octokit = createLockOctokit({
+      git: {createRef},
+      repos: {
+        getBranch: createMock<GetBranch>(parameters => {
+          if (parameters?.branch === 'main') {
+            return Promise.resolve({
+              data: {
+                commit: {
+                  sha: 'base-commit-sha',
+                  commit: {tree: {sha: 'base-tree-sha'}}
+                }
+              }
+            })
+          }
+          return published
+            ? Promise.resolve({data: {commit: {sha: 'commit-sha'}}})
+            : Promise.reject(new NotFoundError('Reference does not exist'))
+        }),
+        getContent: mockGetContent(new NotFoundError('file not found'))
+      }
+    })
+
+    assert.deepStrictEqual(await lock(lockRequest({octokit})), createdLock)
+    assertCalledTimes(createRef, 1)
+    assertCalledWith(saveStateMock, 'lock_ref_sha', 'commit-sha')
+    assertCalledWith(infoMock, '✅ deployment lock obtained')
+  })
+}
+
+for (const inspectionFailure of [
+  new NotFoundError('ref was not created'),
+  new BigBadError('ref could not be inspected')
+]) {
+  test(`preserves the original ref error when ${inspectionFailure.message}`, async () => {
+    const failure = new Error('ref creation response failed')
+    const octokit = createLockOctokit({
+      git: {
+        createRef: createMock<LockOctokit['rest']['git']['createRef']>(() =>
+          Promise.reject(failure)
+        )
+      },
+      repos: {
+        getBranch: mockGetBranch(
+          new NotFoundError('Reference does not exist'),
+          {
+            data: {
+              commit: {
+                sha: 'base-commit-sha',
+                commit: {tree: {sha: 'base-tree-sha'}}
+              }
+            }
+          },
+          inspectionFailure
+        ),
+        getContent: mockGetContent(new NotFoundError('file not found'))
+      }
+    })
+
+    await assert.rejects(
+      lock(lockRequest({octokit})),
+      candidate => candidate === failure
+    )
+    assertNotCalled(saveStateMock)
+  })
+}
+
 test('rejects a default-branch response without a tree SHA', async () => {
   const createRef = createMock<LockOctokit['rest']['git']['createRef']>(() =>
     Promise.resolve({status: 201})

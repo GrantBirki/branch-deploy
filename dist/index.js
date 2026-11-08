@@ -36702,7 +36702,7 @@ async function deploymentConfirmation(context, octokit, data) {
     while (firstPoll || Date.now() < deadline) {
         firstPoll = false;
         try {
-            const decision = await findConfirmationReaction(context, octokit, commentId);
+            const decision = await findConfirmationReaction(context, octokit, commentId, deadline);
             if (decision === 'confirmed') {
                 await octokit.rest.issues.updateComment({
                     ...context.repo,
@@ -36747,7 +36747,7 @@ async function deploymentConfirmation(context, octokit, data) {
     setFailed(`⏱️ deployment confirmation timed out after ${COLORS.highlight}${data.deployment_confirmation_timeout}${COLORS.reset} seconds`);
     return 'timed_out';
 }
-async function findConfirmationReaction(context, octokit, commentId) {
+async function findConfirmationReaction(context, octokit, commentId, deadline) {
     let page = 1;
     while (true) {
         const reactions = await octokit.rest.reactions.listForIssueComment({
@@ -36757,6 +36757,8 @@ async function findConfirmationReaction(context, octokit, commentId) {
             page,
             headers: API_HEADERS
         });
+        if (Date.now() >= deadline)
+            return null;
         for (const reaction of reactions.data) {
             if (reaction.user === null) {
                 debug('ignoring reaction from an unknown user');
@@ -39090,28 +39092,44 @@ async function createLock(octokit, context, ref, reason, sticky, environment, gl
     catch (error) {
         const status = legacyApiError(error).status;
         if (status !== 409 && status !== 422) {
-            throw error;
-        }
-        if (!(await checkBranch(octokit, context, branchName))) {
-            throw error;
-        }
-        try {
-            const branch = await octokit.rest.repos.getBranch({
-                ...context.repo,
-                branch: branchName,
-                headers: API_HEADERS
-            });
-            const lockRefSha = branch.data.commit.sha;
-            const existingLock = await checkLockFile(octokit, context, lockRefSha);
-            return existingLock === false
-                ? { kind: 'ambiguous' }
-                : { kind: 'existing', lockData: existingLock, lockRefSha };
-        }
-        catch (readError) {
-            if (readError instanceof InvalidLockFileError) {
-                return { kind: 'ambiguous' };
+            // A failed response can still leave the ref published. Only our exact
+            // immutable commit proves that this acquisition actually succeeded.
+            let observedSha;
+            try {
+                observedSha = (await octokit.rest.repos.getBranch({
+                    ...context.repo,
+                    branch: branchName,
+                    headers: API_HEADERS
+                })).data.commit.sha;
             }
-            throw readError;
+            catch {
+                throw error;
+            }
+            if (observedSha !== commit.data.sha)
+                throw error;
+        }
+        else {
+            if (!(await checkBranch(octokit, context, branchName))) {
+                throw error;
+            }
+            try {
+                const branch = await octokit.rest.repos.getBranch({
+                    ...context.repo,
+                    branch: branchName,
+                    headers: API_HEADERS
+                });
+                const lockRefSha = branch.data.commit.sha;
+                const existingLock = await checkLockFile(octokit, context, lockRefSha);
+                return existingLock === false
+                    ? { kind: 'ambiguous' }
+                    : { kind: 'existing', lockData: existingLock, lockRefSha };
+            }
+            catch (readError) {
+                if (readError instanceof InvalidLockFileError) {
+                    return { kind: 'ambiguous' };
+                }
+                throw readError;
+            }
         }
     }
     info(`🔒 created lock branch: ${COLORS.highlight}${branchName}`);
@@ -39828,9 +39846,9 @@ async function isOutdated(context, octokit, data) {
     // :param prBranch: The PR branch to compare
     // :return: An object containing a boolean value indicating if the PR branch is behind the base branch or not, and a string containing the name of the branch that is behind
     async function compareBranches(baseBranch, prBranch) {
-        // if the mergeStateStatus is BEHIND, then we know the PR is behind the base branch
-        // in this case we can skip the commit comparison
-        if (data.mergeStateStatus === 'BEHIND') {
+        // BEHIND describes the PR's target base, not a separate stable branch.
+        if (data.mergeStateStatus === 'BEHIND' &&
+            baseBranch.data.commit.sha === data.baseBranch.data.commit.sha) {
             debug(`mergeStateStatus is BEHIND - exiting isOutdated logic early`);
             return { outdated: true, branch: baseBranch.data.name };
         }
@@ -42730,7 +42748,19 @@ async function createDeployment(request, ready, lease, deploymentType, deploymen
     debug(`deployment.created_at: ${String(deployment.created_at)}`);
     debug(`deployment.updated_at: ${String(deployment.updated_at)}`);
     debug(`deployment.statuses_url: ${String(deployment.statuses_url)}`);
-    await createDeploymentStatus(octokit, context, precheck.ref, 'in_progress', legacyDeploymentId(deployment.id), environment, environmentResult.environmentUrl);
+    try {
+        await createDeploymentStatus(octokit, context, precheck.ref, 'in_progress', legacyDeploymentId(deployment.id), environment, environmentResult.environmentUrl);
+    }
+    catch (error) {
+        // Main will bypass post completion, so close the record before releasing its lock.
+        try {
+            await createDeploymentStatus(octokit, context, precheck.ref, 'error', deployment.id, environment, environmentResult.environmentUrl);
+        }
+        catch (statusError) {
+            warning(`failed to mark the unstarted deployment as an error: ${legacyApiError(statusError).message}`);
+        }
+        throw error;
+    }
     info(`🧑‍🚀 commit sha to deploy: ${COLORS.highlight}${precheck.sha}${COLORS.reset}`);
     info(`🚀 ${COLORS.success}deployment started!${COLORS.reset}`);
     setActionOutput('continue', 'true');
@@ -45391,11 +45421,11 @@ function main_terminal(operation, outcome) {
 async function run() {
     let operation = 'none';
     try {
+        // Failed input validation must still dispatch the runner's post invocation to post.
+        saveActionState('isPost', 'true');
         info(`🛸 grantbirki/branch-deploy ${COLORS.info}${src_version_VERSION}${COLORS.reset}`);
         debug(`context: ${JSON.stringify(github_context)}`);
         if (Number(process.env['GITHUB_RUN_ATTEMPT']) > 1) {
-            // Also dispatch failed or malformed rerun inputs to post, never back to main.
-            saveActionState('isPost', 'true');
             if (getActionInput('allow_reruns') === '' ||
                 !getBooleanActionInput('allow_reruns')) {
                 saveActionState('bypass', 'true');
@@ -45412,7 +45442,6 @@ async function run() {
         if (getActionInput('result_mode') !== '' &&
             getBooleanActionInput('result_mode')) {
             operation = 'result';
-            saveActionState('isPost', 'true');
             saveActionState('bypass', 'true');
             const resultOctokit = getOctokit(token, {
                 userAgent: `grantbirki/branch-deploy@${src_version_VERSION}`,
@@ -45429,7 +45458,6 @@ async function run() {
             userAgent: `grantbirki/branch-deploy@${src_version_VERSION}`,
             additionalPlugins: [retry]
         });
-        saveActionState('isPost', 'true');
         saveActionState('actionsToken', token);
         if (inputs.unlockOnMergeMode) {
             operation = 'unlock_on_merge';
