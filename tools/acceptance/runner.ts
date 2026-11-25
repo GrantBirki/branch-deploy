@@ -14,6 +14,7 @@ export interface RunActionRequest {
   readonly actor: string
   readonly commentId?: number
   readonly environment?: Readonly<Record<string, string>>
+  readonly event?: 'push'
   readonly inputs: Readonly<Record<string, string>>
   readonly mode: 'main' | 'post'
   readonly port: number
@@ -120,6 +121,7 @@ function pullRequestPayload(state: MockGitHubState): Record<string, unknown> {
 }
 
 function eventNameForMode(request: RunActionRequest): string {
+  if (request.event !== undefined) return request.event
   return request.inputs['unlock_on_merge_mode'] === 'true'
     ? 'pull_request'
     : 'issue_comment'
@@ -128,6 +130,9 @@ function eventNameForMode(request: RunActionRequest): string {
 function eventPayloadForMode(
   request: RunActionRequest
 ): Record<string, unknown> {
+  if (request.event === 'push') {
+    return {repository: repositoryPayload(request.state)}
+  }
   return eventNameForMode(request) === 'pull_request'
     ? pullRequestPayload(request.state)
     : issueCommentPayload(request.state, request.actor, request.commentId)
@@ -188,9 +193,9 @@ function baseEnvironment(
   env['GITHUB_JOB'] = 'acceptance'
   env['GITHUB_OUTPUT'] = join(workspace, 'output')
   env['GITHUB_REF'] =
-    eventName === 'pull_request'
-      ? 'refs/heads/main'
-      : 'refs/heads/feature-branch'
+    eventName === 'issue_comment'
+      ? 'refs/heads/feature-branch'
+      : `refs/heads/${request.state.repositoryDefaultBranch}`
   env['GITHUB_REPOSITORY'] = `${request.state.owner}/${request.state.repo}`
   env['GITHUB_RUN_ATTEMPT'] = String(request.runAttempt ?? 1)
   env['GITHUB_RUN_ID'] = '123456789'

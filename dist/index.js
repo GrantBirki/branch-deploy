@@ -44651,7 +44651,7 @@ async function help(octokit, context, reactionId, inputs) {
 // :param context: the context object
 // :param environment: the environment to check
 // :return: true if the current deployment's ref is identical to the merge commit, false otherwise
-async function identicalCommitCheck(octokit, context, environment) {
+async function identicalCommitCheck(octokit, context, environment, retry) {
     // get the owner and the repo from the context
     const { owner, repo } = context.repo;
     // find the default branch
@@ -44661,6 +44661,9 @@ async function identicalCommitCheck(octokit, context, environment) {
         headers: API_HEADERS
     });
     const defaultBranchName = repoData.default_branch;
+    if (retry !== undefined && retry.ref !== `refs/heads/${defaultBranchName}`) {
+        throw new Error('Merge deploy retry requires a push to the current default branch.');
+    }
     debug(`default branch name: ${defaultBranchName}`);
     // get the latest commit on the default branch of the repo
     const { data: defaultBranchData } = await octokit.rest.repos.getBranch({
@@ -44672,6 +44675,10 @@ async function identicalCommitCheck(octokit, context, environment) {
     const defaultBranchTreeSha = defaultBranchData.commit.commit.tree.sha;
     debug(`default branch tree sha: ${defaultBranchTreeSha}`);
     const latestDefaultBranchCommitSha = defaultBranchData.commit.sha;
+    // The caller still runs the workflow and tooling from the original push.
+    if (retry !== undefined && retry.sha !== latestDefaultBranchCommitSha) {
+        throw new Error('The default branch advanced since this run. Start a fresh merge deploy run on its current tip.');
+    }
     info(`📍 latest commit sha on ${COLORS.highlight}${defaultBranchName}${COLORS.reset}: ${COLORS.info}${latestDefaultBranchCommitSha}${COLORS.reset}`);
     const latestDeployment = await latestBranchDeployDeployment(octokit, context, environment);
     let latestDeploymentTreeSha;
@@ -45417,17 +45424,33 @@ function finish(outcome) {
 function main_terminal(operation, outcome) {
     return finish({ ...outcome, operation });
 }
+function canRetryMergeDeploy() {
+    const triggeringActor = process.env['GITHUB_TRIGGERING_ACTOR'];
+    return (github_context.eventName === 'push' &&
+        process.env['GITHUB_REF_PROTECTED'] === 'true' &&
+        Boolean(triggeringActor) &&
+        triggeringActor === github_context.actor &&
+        getBooleanActionInput('merge_deploy_mode') &&
+        !getBooleanActionInput('unlock_on_merge_mode') &&
+        !(getActionInput('result_mode') !== '' &&
+            getBooleanActionInput('result_mode')));
+}
 // :returns: 'success', 'success - noop', 'success - merge deploy mode', 'failure', 'safe-exit', 'success - unlock on merge mode' or raises an error
 async function run() {
     let operation = 'none';
+    let retryMergeDeploy = false;
     try {
         // Failed input validation must still dispatch the runner's post invocation to post.
         saveActionState('isPost', 'true');
         info(`🛸 grantbirki/branch-deploy ${COLORS.info}${src_version_VERSION}${COLORS.reset}`);
         debug(`context: ${JSON.stringify(github_context)}`);
         if (Number(process.env['GITHUB_RUN_ATTEMPT']) > 1) {
-            if (getActionInput('allow_reruns') === '' ||
-                !getBooleanActionInput('allow_reruns')) {
+            const explicitRerunPolicy = getActionInput('allow_reruns') !== '';
+            retryMergeDeploy = !explicitRerunPolicy && canRetryMergeDeploy();
+            const allowRerun = explicitRerunPolicy
+                ? getBooleanActionInput('allow_reruns')
+                : retryMergeDeploy;
+            if (!allowRerun) {
                 saveActionState('bypass', 'true');
                 setActionOutput('continue', 'false');
                 setFailed('Workflow reruns are disabled for Branch Deploy. Start a new workflow run with a new command, or set allow_reruns: true if you accept the original-actor privilege risk.');
@@ -45474,7 +45497,7 @@ async function run() {
         if (inputs.mergeDeployMode) {
             operation = 'merge_deploy';
             info(`🏃 running in 'merge deploy' mode`);
-            const identical = await identicalCommitCheck(octokit, github_context, inputs.environment);
+            const identical = await identicalCommitCheck(octokit, github_context, inputs.environment, retryMergeDeploy ? { ref: github_context.ref, sha: github_context.sha } : undefined);
             saveActionState('bypass', 'true');
             return main_terminal(operation, {
                 runResult: 'success - merge deploy mode',

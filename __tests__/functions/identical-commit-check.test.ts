@@ -170,6 +170,47 @@ test('checks if the default branch sha and deployment sha are identical, and the
   assertCalledWith(saveActionStateMock, 'sha', 'abcdef')
 })
 
+test('rechecks current deployment history for an eligible retry', async () => {
+  getCommitMock.mock.mockImplementation(() =>
+    Promise.resolve({data: {commit: {tree: {sha: 'beefdead'}}}})
+  )
+
+  assert.strictEqual(
+    await identicalCommitCheck(octokit, context, 'production', {
+      ref: 'refs/heads/main',
+      sha: 'abcdef'
+    }),
+    false
+  )
+  assertCalledWith(setActionOutputMock, 'continue', 'true')
+  assertCalledWith(setActionOutputMock, 'sha', 'abcdef')
+})
+
+test('rejects a retry from a different branch before checking deployment history', async () => {
+  await assert.rejects(
+    identicalCommitCheck(octokit, context, 'production', {
+      ref: 'refs/heads/feature',
+      sha: 'abcdef'
+    }),
+    /requires a push to the current default branch/
+  )
+  assertNotCalled(getBranchMock)
+  assertNotCalled(graphqlMock)
+  assertNotCalled(setActionOutputMock)
+})
+
+test('rejects a retry when the default branch has advanced', async () => {
+  await assert.rejects(
+    identicalCommitCheck(octokit, context, 'production', {
+      ref: 'refs/heads/main',
+      sha: 'earlier-sha'
+    }),
+    /The default branch advanced/
+  )
+  assertNotCalled(graphqlMock)
+  assertNotCalled(setActionOutputMock)
+})
+
 test('does not skip when the newest branch-deploy deployment is inactive', async () => {
   graphqlMock.mock.mockImplementation(() =>
     Promise.resolve({
