@@ -275,7 +275,7 @@ Stop and ask the user before proceeding if the migration would require intention
 
 ### Runtime compatibility
 
-Branch Deploy v12 continues to use the GitHub Actions Node 24 runtime already declared by current v11 releases. The development and CI runtime remain pinned to an exact Node 24 version in `.node-version`.
+Branch Deploy v12 continues to use the GitHub Actions Node 24 runtime already declared by current v11 releases. Local development and CI use the exact Node 26 version pinned in `.node-version`.
 
 ### Who is affected
 
