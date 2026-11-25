@@ -59,7 +59,8 @@ export interface IdenticalCommitOctokit extends DeploymentGraphqlOctokit {
 export async function identicalCommitCheck(
   octokit: IdenticalCommitOctokit,
   context: BranchDeployContext,
-  environment: string
+  environment: string,
+  retry?: {readonly ref: string; readonly sha: string}
 ): Promise<boolean> {
   // get the owner and the repo from the context
   const {owner, repo} = context.repo
@@ -71,6 +72,11 @@ export async function identicalCommitCheck(
     headers: API_HEADERS
   })
   const defaultBranchName = repoData.default_branch
+  if (retry !== undefined && retry.ref !== `refs/heads/${defaultBranchName}`) {
+    throw new Error(
+      'Merge deploy retry requires a push to the current default branch.'
+    )
+  }
   core.debug(`default branch name: ${defaultBranchName}`)
 
   // get the latest commit on the default branch of the repo
@@ -84,6 +90,12 @@ export async function identicalCommitCheck(
   core.debug(`default branch tree sha: ${defaultBranchTreeSha}`)
 
   const latestDefaultBranchCommitSha = defaultBranchData.commit.sha
+  // The caller still runs the workflow and tooling from the original push.
+  if (retry !== undefined && retry.sha !== latestDefaultBranchCommitSha) {
+    throw new Error(
+      'The default branch advanced since this run. Start a fresh merge deploy run on its current tip.'
+    )
+  }
   core.info(
     `📍 latest commit sha on ${COLORS.highlight}${defaultBranchName}${COLORS.reset}: ${COLORS.info}${latestDefaultBranchCommitSha}${COLORS.reset}`
   )

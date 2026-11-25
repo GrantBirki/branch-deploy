@@ -2047,6 +2047,47 @@ const scenarios = [
       })
   },
   {
+    name: 'protected merge deploy retry',
+    run: async () => {
+      for (const [deployedSha, decision, reason, proceed] of [
+        [ACCEPTANCE_SHAS.default, 'stop', 'merge_deploy_not_required', 'false'],
+        [
+          ACCEPTANCE_SHAS.oldDeployment,
+          'continue',
+          'merge_deploy_required',
+          'true'
+        ]
+      ] as const) {
+        await withMockGitHub(reason, async context => {
+          seedDeployment(context.state, deployedSha)
+          const result = await runAction({
+            actor: 'octocat',
+            environment: {
+              GITHUB_REF_PROTECTED: 'true',
+              GITHUB_TRIGGERING_ACTOR: 'octocat'
+            },
+            event: 'push',
+            inputs: {merge_deploy_mode: 'true'},
+            mode: 'main',
+            port: context.port,
+            runAttempt: 2,
+            previousState: {},
+            state: context.state,
+            status: 'success'
+          })
+
+          assertExit(context, result, 0)
+          assertDecision(context, result, decision)
+          assertReason(context, result, reason)
+          assertOutput(context, result, 'continue', proceed)
+          if (proceed === 'true') {
+            assertOutput(context, result, 'sha', ACCEPTANCE_SHAS.default)
+          }
+        })
+      }
+    }
+  },
+  {
     name: 'merge deploy required',
     run: () =>
       withMockGitHub('merge deploy required', async context => {

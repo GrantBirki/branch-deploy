@@ -29,6 +29,12 @@ Example scenario 2:
 
 This strategy saves CI time without treating unrelated or unsuccessful deployment history as proof that the current default-branch tree is already deployed. Without it, a workflow that deploys on every default-branch push will redeploy that tree even when the newest active Branch Deploy deployment already represents it.
 
+## Retrying a merge deploy
+
+Use GitHub's **Re-run jobs** on a push to the protected default branch when the original actor can start the retry and the pushed commit is still the branch tip. The check reads current deployment history and returns the default-branch SHA if reconciliation is needed. If the branch has advanced, use a fresh workflow run on its current tip so the deployment uses the current workflow and configuration.
+
+An explicit `allow_reruns: false` disables retries. See the [workflow rerun policy](../README.md#workflow-reruns-) for the broader opt-in and requirements for separate deployment jobs.
+
 ## Using the Merge Commit Workflow Strategy
 
 To use the advanced merge commit workflow strategy, you will need to do the following:

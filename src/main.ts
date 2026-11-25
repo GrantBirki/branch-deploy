@@ -61,9 +61,26 @@ function terminal(
   return finish({...outcome, operation})
 }
 
+function canRetryMergeDeploy(): boolean {
+  const triggeringActor = process.env['GITHUB_TRIGGERING_ACTOR']
+  return (
+    context.eventName === 'push' &&
+    process.env['GITHUB_REF_PROTECTED'] === 'true' &&
+    Boolean(triggeringActor) &&
+    triggeringActor === context.actor &&
+    getBooleanActionInput('merge_deploy_mode') &&
+    !getBooleanActionInput('unlock_on_merge_mode') &&
+    !(
+      getActionInput('result_mode') !== '' &&
+      getBooleanActionInput('result_mode')
+    )
+  )
+}
+
 // :returns: 'success', 'success - noop', 'success - merge deploy mode', 'failure', 'safe-exit', 'success - unlock on merge mode' or raises an error
 export async function run(): Promise<RunResult> {
   let operation: Operation = 'none'
+  let retryMergeDeploy = false
   try {
     // Failed input validation must still dispatch the runner's post invocation to post.
     saveActionState('isPost', 'true')
@@ -73,10 +90,12 @@ export async function run(): Promise<RunResult> {
     core.debug(`context: ${JSON.stringify(context)}`)
 
     if (Number(process.env['GITHUB_RUN_ATTEMPT']) > 1) {
-      if (
-        getActionInput('allow_reruns') === '' ||
-        !getBooleanActionInput('allow_reruns')
-      ) {
+      const explicitRerunPolicy = getActionInput('allow_reruns') !== ''
+      retryMergeDeploy = !explicitRerunPolicy && canRetryMergeDeploy()
+      const allowRerun = explicitRerunPolicy
+        ? getBooleanActionInput('allow_reruns')
+        : retryMergeDeploy
+      if (!allowRerun) {
         saveActionState('bypass', 'true')
         setActionOutput('continue', 'false')
         core.setFailed(
@@ -135,7 +154,8 @@ export async function run(): Promise<RunResult> {
       const identical = await identicalCommitCheck(
         octokit,
         context,
-        inputs.environment
+        inputs.environment,
+        retryMergeDeploy ? {ref: context.ref, sha: context.sha} : undefined
       )
       saveActionState('bypass', 'true')
       return terminal(operation, {

@@ -299,7 +299,7 @@ For [deploy-on-merge](docs/merge-commit-strategy.md), keep checking `continue ==
 | `ignored_checks` | `false` | `""` | Comma-separated check names to ignore, for example `"lint,markdown-formatting"`. With more than 100 results, deployment stops if Branch Deploy [cannot verify the remaining checks separately](docs/checks.md#required-ci-checks). |
 | `skip_reviews` | `false` | `""` | A comma separated list of environment that will not use reviews/approvals as a requirement for deployment. Use this options to explicitly bypass branch protection settings for a certain environment in your repository. Default is an empty string `""` - Example: `"development,staging"` |
 | `allow_forks` | `false` | `false` | Allow branch deployments to run on repository forks. Default is `false`. Set this to `true` only when your workflow intentionally supports deployments from forked pull requests. |
-| `allow_reruns` | `false` | `false` | Allow this Action to run on later workflow attempts. Reruns reuse the original actor's privileges, even when someone else starts the rerun. Leave this disabled unless your workflow accepts that risk. See [workflow reruns](#workflow-reruns-). |
+| `allow_reruns` | `false` | `""` | Use the default [workflow rerun policy](#workflow-reruns-), set `false` to deny all reruns, or set `true` to opt in to reruns using the original actor's privileges. |
 | `admins` | `false` | `"false"` | A comma separated list of GitHub usernames or teams that should be considered admins by this Action. Admins can deploy pull requests without the need for branch protection approvals. Example: "monalisa,octocat,my-org/my-team" |
 | `admins_pat` | `false` | `"false"` | A GitHub personal access token with "read:org" scopes. This is only needed if you are using the "admins" option with a GitHub org team. For example: "my-org/my-team" |
 | `merge_deploy_mode` | `false` | `false` | Advanced configuration option for operations on merge commits. See the [merge commit docs](#merge-commit-workflow-strategy) below |
@@ -546,7 +546,9 @@ Here are some additional security best practices to consider:
 
 ### Workflow reruns 🔁
 
-Reruns are off by default because GitHub reuses the original actor's permissions. For IssueOps, post a new command to retry. If you accept the risk, set `allow_reruns: true` on each invocation that needs it.
+For IssueOps, post a new command to retry. GitHub reruns reuse the original actor's permissions. If you accept that risk, set `allow_reruns: true` on each invocation that needs it.
+
+With `allow_reruns` omitted, [merge deploy mode](docs/merge-commit-strategy.md#retrying-a-merge-deploy) can retry a push to the protected default branch when the original actor requests the rerun and that push is still the current tip. Set `allow_reruns: false` to disable this retry.
 
 Separate deployment jobs still need [attempt guards](docs/result-mode.md#usage); Branch Deploy cannot block a job it never runs in.
 

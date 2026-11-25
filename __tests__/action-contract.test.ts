@@ -58,7 +58,7 @@ const expectedInputContract = {
   ignored_checks: {default: '', required: false},
   skip_reviews: {default: '', required: false},
   allow_forks: {default: 'false', required: false},
-  allow_reruns: {default: 'false', required: false},
+  allow_reruns: {default: '', required: false},
   admins: {default: 'false', required: false},
   admins_pat: {default: 'false', required: false},
   merge_deploy_mode: {default: 'false', required: false},

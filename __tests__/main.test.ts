@@ -296,6 +296,8 @@ const environmentDefaults = {
   GITHUB_SERVER_URL: 'https://github.com',
   GITHUB_RUN_ID: '12345',
   GITHUB_RUN_ATTEMPT: '1',
+  GITHUB_REF_PROTECTED: 'false',
+  GITHUB_TRIGGERING_ACTOR: '',
   INPUT_GITHUB_TOKEN: 'faketoken',
   INPUT_TRIGGER: '.deploy',
   INPUT_REACTION: 'eyes',
@@ -313,7 +315,7 @@ const environmentDefaults = {
   INPUT_LOCK_INFO_ALIAS: '.wcid',
   INPUT_REQUIRED_CONTEXTS: 'false',
   INPUT_ALLOW_FORKS: 'false',
-  INPUT_ALLOW_RERUNS: 'false',
+  INPUT_ALLOW_RERUNS: '',
   GITHUB_REPOSITORY: 'corp/test',
   INPUT_GLOBAL_LOCK_FLAG: '--global',
   INPUT_MERGE_DEPLOY_MODE: 'false',
@@ -538,6 +540,7 @@ beforeEach(() => {
 
   githubContext.actor = 'monalisa'
   githubContext.eventName = 'issue_comment'
+  githubContext.ref = 'refs/heads/main'
   githubContext.runId = 12345
   githubContext.sha = '1'.repeat(40)
 
@@ -761,6 +764,65 @@ for (const mode of [
     assertNotCalled(identicalCommitCheckMock)
     assertNotCalled(unlockOnMergeMock)
     assertNotCalled(resultOperationMock)
+  })
+}
+
+function prepareMergeDeployRetry(): void {
+  githubContext.eventName = 'push'
+  setEnv('GITHUB_RUN_ATTEMPT', '2')
+  setEnv('GITHUB_REF_PROTECTED', 'true')
+  setEnv('GITHUB_TRIGGERING_ACTOR', githubContext.actor)
+  setEnv('INPUT_MERGE_DEPLOY_MODE', 'true')
+}
+
+for (const [input, value] of [
+  ['GITHUB_REF_PROTECTED', 'false'],
+  ['GITHUB_TRIGGERING_ACTOR', ''],
+  ['GITHUB_TRIGGERING_ACTOR', 'another-maintainer'],
+  ['INPUT_MERGE_DEPLOY_MODE', 'false'],
+  ['INPUT_UNLOCK_ON_MERGE_MODE', 'true'],
+  ['INPUT_RESULT_MODE', 'true'],
+  ['INPUT_ALLOW_RERUNS', 'false']
+] as const) {
+  test(`merge deploy retry is blocked with ${input}=${JSON.stringify(value)}`, async () => {
+    prepareMergeDeployRetry()
+    setEnv(input, value)
+
+    assert.strictEqual(await run(), 'failure')
+    assertCalledWith(setOutputMock, 'reason_code', 'rerun_not_allowed')
+    assertNotCalled(getOctokitMock)
+    assertNotCalled(identicalCommitCheckMock)
+    assertNotCalled(unlockOnMergeMock)
+    assertNotCalled(resultOperationMock)
+  })
+}
+
+for (const [identical, resultMode] of [
+  [true, ''],
+  [false, 'false']
+] as const) {
+  test(`merge deploy retry reconciles a protected push with identical=${String(identical)}`, async () => {
+    prepareMergeDeployRetry()
+    setEnv('INPUT_RESULT_MODE', resultMode)
+    identicalCommitCheckMock.mock.mockImplementation(() =>
+      Promise.resolve(identical)
+    )
+
+    assert.strictEqual(await run(), 'success - merge deploy mode')
+    assert.deepEqual(identicalCommitCheckMock.mock.calls[0]?.arguments[3], {
+      ref: githubContext.ref,
+      sha: githubContext.sha
+    })
+    assertOperationResult({
+      decision: identical ? 'stop' : 'continue',
+      reason_code: identical
+        ? 'merge_deploy_not_required'
+        : 'merge_deploy_required',
+      operation: 'merge_deploy',
+      environment: 'production'
+    })
+    assertNotCalled(contextCheckMock)
+    assertNotCalled(createDeploymentMock)
   })
 }
 

@@ -118,9 +118,9 @@ inputs:
     required: false
     default: "false"
   allow_reruns:
-    description: 'Allow this Action to run on later attempts of a workflow. Default is "false" because GitHub reruns use the original actor and privileges, not necessarily the person who requested the rerun. Set to "true" only if your workflow accepts that risk. Result mode still requires the same run and attempt.'
+    description: 'Omit to allow protected default-branch merge deploy retries by the original actor at the current tip. Set "false" to deny all reruns or "true" to opt in to reruns using the original actor and privileges. Result mode still requires the same run and attempt.'
     required: false
-    default: "false"
+    default: ""
   admins:
     description: 'A comma separated list of GitHub usernames or teams that should be considered admins by this Action. Admins can deploy pull requests without the need for branch protection approvals. Example: "monalisa,octocat,my-org/my-team". Default "false" disables designated admins; "true" and "false" (any case) are reserved, not usernames.'
     required: false
